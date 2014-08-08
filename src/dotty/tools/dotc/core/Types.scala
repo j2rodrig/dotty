@@ -64,6 +64,11 @@ object Types {
    */
   abstract class Type extends DotClass with Hashable with printing.Showable {
 
+// ----- Reference Immutability Type -------------------------------
+
+    def riType(implicit ctx: Context) = 0   // 0 for mutable, 1 = polyread, 2 = readonly
+
+
 // ----- Tests -----------------------------------------------------
 
     /** Is this type different from NoType? */
@@ -506,7 +511,8 @@ object Types {
      *  This is the case iff `this <:< that` and `that <:< this`.
      */
     final def =:=(that: Type)(implicit ctx: Context): Boolean = track("=:=") {
-      ctx.typeComparer.isSameType(this, that)
+      //ctx.typeComparer.isSameType(this, that)
+	  ctx.typeComparer.topLevelSubType(this, that) && ctx.typeComparer.topLevelSubType(that, this)
     }
 
     /** Is this type close enough to that type so that members
@@ -941,6 +947,8 @@ object Types {
    *  Each implementation is expected to redefine the `underlying` method.
    */
   abstract class TypeProxy extends Type {
+    /* The RI type of most proxy types should be the underlying RI type. */
+    override def riType(implicit ctx: Context): Int = underlying.riType
     /** The type to which this proxy forwards operations. */
     def underlying(implicit ctx: Context): Type
   }
@@ -1548,6 +1556,8 @@ object Types {
 
   abstract case class AndType(tp1: Type, tp2: Type) extends CachedGroundType with AndOrType {
 
+    override def riType(implicit ctx: Context): Int = math.min (tp1.riType, tp2.riType)
+
     def isAnd = true
 
     def derivedAndType(tp1: Type, tp2: Type)(implicit ctx: Context): Type =
@@ -1580,6 +1590,9 @@ object Types {
 
   abstract case class OrType(tp1: Type, tp2: Type) extends CachedGroundType with AndOrType {
     assert(tp1.isInstanceOf[ValueType] && tp2.isInstanceOf[ValueType])
+	
+    override def riType(implicit ctx: Context): Int = math.max (tp1.riType, tp2.riType)
+
     def isAnd = false
 
     def derivedOrType(tp1: Type, tp2: Type)(implicit ctx: Context): Type =
@@ -1639,6 +1652,9 @@ object Types {
   abstract case class MethodType(paramNames: List[TermName], paramTypes: List[Type])
       (resultTypeExp: MethodType => Type)
     extends CachedGroundType with BindingType with TermType with MethodOrPoly with NarrowCached { thisMethodType =>
+
+    // RI type of the method. If 1 (polyread), viewpoint adaptation must be applied
+    override def riType(implicit ctx: Context): Int = resultType.riType
 
     override val resultType = resultTypeExp(this)
     assert(resultType != NoType)
@@ -2219,6 +2235,17 @@ object Types {
   /** An annotated type tpe @ annot */
   case class AnnotatedType(annot: Annotation, tpe: Type)
       extends UncachedProxyType with ValueType {
+	  
+    override def riType(implicit ctx: Context) = {
+		// RI type is the outermost annotation present
+		annot.symbol.name.toString match {
+			case "mutable" => 0
+			case "polyread" => 1
+			case "readonly" => 2
+			case _ => tpe.riType  // check underlying type
+		}
+	}
+	
     // todo: cache them? but this makes only sense if annotations and trees are also cached.
     override def underlying(implicit ctx: Context): Type = tpe
     def derivedAnnotatedType(annot: Annotation, tpe: Type) =

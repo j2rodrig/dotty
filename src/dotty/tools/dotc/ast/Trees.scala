@@ -219,6 +219,11 @@ object Trees {
     type ThisTree[T >: Untyped] <: Tree[T]
 
     private[this] var myTpe: T = _
+	
+	//private[this] var myRiType: RiType = defaultRiType
+	
+	//def defaultRiType(implicit ctx: Context): RiType = {
+	//}
 
     /** Destructively set the type of the tree. This should be called only when it is known that
      *  it is safe under sharing to do so. One user-case is in the withType method below
@@ -226,6 +231,8 @@ object Trees {
      *  where we overwrite with a simplified version of the type itself.
      */
     private[dotc] def overwriteType(tpe: T) = myTpe = tpe
+
+    //private[dotc] def overwriteRiType(riTpe: T) = myRiTpe = riTpe
 
     /** The type of the tree. In case of an untyped tree,
      *   an UnAssignedTypeException is thrown. (Overridden by empty trees)
@@ -260,6 +267,7 @@ object Trees {
           (myTpe.asInstanceOf[AnyRef] eq tpe.asInstanceOf[AnyRef])) this
          else clone).asInstanceOf[Tree[Type]]
       tree overwriteType tpe
+      //tree overwriteRiType defaultRiType
       tree.asInstanceOf[ThisTree[Type]]
     }
 

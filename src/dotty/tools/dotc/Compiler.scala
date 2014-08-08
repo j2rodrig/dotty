@@ -19,6 +19,9 @@ class Compiler {
   def phases: List[List[Phase]] =
     List(
       List(new FrontEnd),
+	  
+	  List(new MutationObserver),
+	  
       List(new Companions, new ElimRepeated /*, new ElimLocals*/),
       List(new SuperAccessors),
       List(new ExtensionMethods),

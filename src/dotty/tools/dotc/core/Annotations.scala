@@ -15,6 +15,15 @@ object Annotations {
 
     def derivedAnnotation(tree: Tree)(implicit ctx: Context) =
       if (tree eq this.tree) this else Annotation(tree)
+	
+	/*def riType(implicit ctx: Context) = symbol.name.toString match {
+		case "mutable" => 0
+		case "polyread" => 1
+		case "readonly" => 2
+		case _ => -1
+	}
+	def isRiType(implicit ctx: Context) = riType > -1*/
+	
   }
 
   case class ConcreteAnnotation(t: Tree) extends Annotation {

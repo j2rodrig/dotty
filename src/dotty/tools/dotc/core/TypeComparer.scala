@@ -12,6 +12,8 @@ import util.{Stats, DotClass, SimpleMap}
 import config.Config
 import config.Printers._
 
+//import Mutability.Simple._
+
 /** Provides methods to compare types.
  */
 class TypeComparer(initctx: Context) extends DotClass {
@@ -347,9 +349,13 @@ class TypeComparer(initctx: Context) extends DotClass {
     if ((tp2 eq tp1) ||
         (tp2 eq WildcardType) ||
         (tp2 eq AnyType) && tp1.isValueType) return true
+    
+	//if (!isSubTypeRi(tp1, tp2)) return false
+	//if (!isSubtypeOf(getSimpleMutability(tp1), getSimpleMutability(tp2))) return false
+	
     isSubType(tp1, tp2)
   }
-
+  
   def isSubTypeWhenFrozen(tp1: Type, tp2: Type): Boolean = {
     val saved = frozenConstraint
     frozenConstraint = true
@@ -363,6 +369,103 @@ class TypeComparer(initctx: Context) extends DotClass {
   private def traceInfo(tp1: Type, tp2: Type) =
     s"${tp1.show} <:< ${tp2.show}" +
     (if (ctx.settings.verbose.value) s"${tp1.getClass} ${tp2.getClass}" else "")
+
+  /** Is tp1 a subtype of tp2 with respect to Reference Immutability? */
+  def isSubTypeRi(tp1: Type, tp2: Type): Boolean = {
+  
+  return true
+  
+  // TO DISCUSS (POSS):
+  // type bounds
+  // generic types
+  // integration: modification of Type itself? (A: Yes, type mods can still be kept logically separate)
+  // checking: only do subtyping during typer phase, not general subtype mods?
+  //    what is the subclassing relationship anyway (w.r.t. RI types on type declarations)? And do we need it?
+  // Are types ever copied in such a way that RI types are not preserved? that annotations would be lost?
+  
+//    tp2 match {
+//	  case tp2: AndType => isSubTypeRi(tp1, tp1.)
+//	  case tp2: OrType =>
+//	  case tp2: MethodType =>
+//	  case tp2: RefinedType =>
+//	}
+  
+    // Top-level RI types must match
+    //if (tp1.riType > tp2.riType) return false
+    // Some types have more complex requirements
+	
+	/*def getRefinement(tp: Type): Type = {
+		tp match {
+			case tp: RefinedType => tp.refinedInfo
+			case tp: ProxyType => getRefinement(tp.underlying)
+			case tp: GroundType => NoType
+		}
+	}
+	
+	if (tp1.riType > tp2.riType) return false
+	
+	val tpr1 = getRefinement(tp1)
+	val tpr2 = getRefinement(tp2)
+	tpr1 match {
+		case NoType => tpr2.isInstance[NoType]
+		case _ => !tpr2.isInstance[NoType] && isSubTypeRi(tpr1)
+	}*/
+	
+	// Algorithm:
+	// Iterate through both types until RefinedType
+	
+	//tp1 match {
+	
+	  // type bounds
+	  /*case tp1 @ TypeBounds(lo1, hi1) =>
+	    def compareTypeBoundsRi = tp2 match {
+	      case tp2 @ TypeBounds(lo2, hi2) =>
+            (tp2.variance > 0 && tp1.variance >= 0 || isSubTypeRi(lo2, lo1)) &&
+            (tp2.variance < 0 && tp1.variance <= 0 || isSubTypeRi(hi1, hi2))
+		  case _ =>
+		    isSubTypeRi (hi1, tp2)
+	    }
+		compareTypeBoundsRi*/
+		//false  // thunk
+	  
+	  // refined types are compatible if their parents are compatible and their refinements are compatible
+	  /*case tp1: RefinedType => tp2 match {
+		  case tp2: RefinedType =>
+		    //isSubTypeRi (tp1.parent, tp2.parent) && isSubTypeRi (tp1.refinedInfo, tp2.refinedInfo)
+			false
+		  case _ => false
+		}
+	
+	  // Simple top-level compare
+	  case _ => tp2 match {
+	    case tp2: RefinedType => false
+	    case _ => tp1.riType <= tp2.riType
+	  }
+	}*/
+	/*tp1 match {
+	  // Polymorphic types must match in the number and types of their parameters
+	  case tp1: PolyType => tp2 match { case tp2: PolyType =>
+	    return matchingTypeParams(tp1, tp2)
+	    //if (tp1.size != tp2.size) return false
+	    //val paramsMatch = tp1.paramBounds.zip(tp2.paramBounds).forall({ (a, b) =>
+		//
+		//})
+	    case _ => return false
+	  }
+	  case _ =>
+	}*/
+	
+	// Cannot say that tp1 is _not_ a subtype of tp2.
+	//return true
+  }
+  
+  // TODO: MethodType for overload resolution, viewpoint adaptation
+
+  /** Adds restrictions to the subtyping relationship.
+      tp1 can only be a subtype of tp2 if the additional restrictions are met. */
+  //def restrictedSubType(tp1: Type, tp2: Type): Boolean = {
+  //  isSubType(tp1, tp2) && isRiSubType(tp1, tp2)
+  //}
 
   def isSubType(tp1: Type, tp2: Type): Boolean = /*>|>*/ ctx.traceIndented(s"isSubType ${traceInfo(tp1, tp2)}", subtyping) /*<|<*/ {
     if (tp2 eq NoType) false
@@ -912,13 +1015,21 @@ class TypeComparer(initctx: Context) extends DotClass {
     (poly1.paramBounds corresponds poly2.paramBounds)((b1, b2) =>
       isSameType(b1, b2.subst(poly2, poly1)))
 
+  //private def matchingTypeParamsRi(poly1: PolyType, poly2: PolyType): Boolean =
+  //  (poly1.paramBounds corresponds poly2.paramBounds)((b1, b2) =>
+  //    isSameTypeRi(b1, b2.subst(poly2, poly1)))
+
   // Type equality =:=
 
   /** Two types are the same if are mutual subtypes of each other */
   def isSameType(tp1: Type, tp2: Type): Boolean =
     if (tp1 eq NoType) false
     else if (tp1 eq tp2) true
-    else isSubType(tp1, tp2) && isSubType(tp2, tp1)
+    else isSubType(tp1, tp2) && isSubType(tp2, tp1) && tp1.riType == tp2.riType
+
+  /** Are two types the same with respect to Reference Immutability? */
+  //def isSameTypeRi(tp1: Type, tp2: Type): Boolean =
+  //  isSubTypeRi(tp1, tp2) && isSubTypeRi(tp2, tp1)
 
   /** Same as `isSameType` but also can be applied to overloaded TermRefs, where
    *  two overloaded refs are the same if they have pairwise equal alternatives
@@ -943,8 +1054,8 @@ class TypeComparer(initctx: Context) extends DotClass {
     if (tp1 eq tp2) tp1
     else if (!tp1.exists) tp2
     else if (!tp2.exists) tp1
-    else if ((tp1 isRef AnyClass) || (tp2 isRef NothingClass)) tp2
-    else if ((tp2 isRef AnyClass) || (tp1 isRef NothingClass)) tp1
+    else if (((tp1 isRef AnyClass) && tp1.riType == 2) || ((tp2 isRef NothingClass) && tp2.riType <= 0)) tp2
+    else if (((tp2 isRef AnyClass) && tp2.riType == 2) || ((tp1 isRef NothingClass) && tp1.riType <= 0)) tp1
     else tp2 match {  // normalize to disjunctive normal form if possible.
       case OrType(tp21, tp22) =>
         tp1 & tp21 | tp1 & tp22
@@ -975,8 +1086,8 @@ class TypeComparer(initctx: Context) extends DotClass {
     if (tp1 eq tp2) tp1
     else if (!tp1.exists) tp1
     else if (!tp2.exists) tp2
-    else if ((tp1 isRef AnyClass) || (tp2 isRef NothingClass)) tp1
-    else if ((tp2 isRef AnyClass) || (tp1 isRef NothingClass)) tp2
+    else if (((tp1 isRef AnyClass) && tp1.riType == 2) || ((tp2 isRef NothingClass) && tp2.riType <= 0)) tp1
+    else if (((tp2 isRef AnyClass) && tp2.riType == 2) || ((tp1 isRef NothingClass) && tp1.riType <= 0)) tp2
     else {
       val t1 = mergeIfSuper(tp1, tp2)
       if (t1.exists) t1
