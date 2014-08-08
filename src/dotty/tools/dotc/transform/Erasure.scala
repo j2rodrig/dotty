@@ -23,6 +23,7 @@ import ast.Trees._
 import scala.collection.mutable.ListBuffer
 import dotty.tools.dotc.core.Flags
 import ValueClasses._
+import TypeUtils._
 
 class Erasure extends Phase with DenotTransformer {
 
@@ -83,7 +84,6 @@ object Erasure {
     }
 
     def isErasedValueType(tpe: Type)(implicit ctx: Context): Boolean = tpe.isInstanceOf[ErasedValueType]
-    def isPrimitiveValueType(tpe: Type)(implicit ctx: Context): Boolean = tpe.classSymbol.isPrimitiveValueClass
 
     def constant(tree: Tree, const: Tree)(implicit ctx: Context) =
       if (isPureExpr(tree)) Block(tree :: Nil, const) else const
@@ -112,7 +112,7 @@ object Erasure {
       pt match {
         case ErasedValueType(clazz, underlying) =>
           val tree1 =
-            if ((tree.tpe isRef defn.NullClass) && isPrimitiveValueType(underlying))
+            if ((tree.tpe isRef defn.NullClass) && underlying.isPrimitiveValueType)
               // convert `null` directly to underlying type, as going
               // via the unboxed type would yield a NPE (see SI-5866)
               unbox(tree, underlying)
@@ -133,17 +133,21 @@ object Erasure {
 
     /** Generate a synthetic cast operation from tree.tpe to pt.
      */
-    def cast(tree: Tree, pt: Type)(implicit ctx: Context): Tree =
+    def cast(tree: Tree, pt: Type)(implicit ctx: Context): Tree = {
+      // TODO: The commented out assertion fails for tailcall/t6574.scala
+      //       Fix the problem and enable the assertion.
+      // assert(!pt.isInstanceOf[SingletonType], pt)
       if (pt isRef defn.UnitClass) unbox(tree, pt)
       else (tree.tpe, pt) match {
         case (defn.ArrayType(treeElem), defn.ArrayType(ptElem))
-        if isPrimitiveValueType(treeElem.widen) && !isPrimitiveValueType(ptElem) =>
+        if treeElem.widen.isPrimitiveValueType && !ptElem.isPrimitiveValueType =>
           // See SI-2386 for one example of when this might be necessary.
           cast(runtimeCall(nme.toObjectArray, tree :: Nil), pt)
         case _ =>
           ctx.log(s"casting from ${tree.showSummary}: ${tree.tpe.show} to ${pt.show}")
           mkAsInstanceOf(tree, pt)
       }
+    }
 
     /** Adaptation of an expression `e` to an expected type `PT`, applying the following
      *  rewritings exhaustively as long as the type of `e` is not a subtype of `PT`.
@@ -157,13 +161,13 @@ object Erasure {
     def adaptToType(tree: Tree, pt: Type)(implicit ctx: Context): Tree =
       if (tree.tpe <:< pt)
         tree
-      else if (isErasedValueType(tree.tpe.widen))
+      else if (tree.tpe.widen.isErasedValueType)
         adaptToType(box(tree), pt)
-      else if (isErasedValueType(pt))
+      else if (pt.isErasedValueType)
         adaptToType(unbox(tree, pt), pt)
-      else if (isPrimitiveValueType(tree.tpe.widen) && !isPrimitiveValueType(pt))
+      else if (tree.tpe.widen.isPrimitiveValueType && !pt.isPrimitiveValueType)
         adaptToType(box(tree), pt)
-      else if (isPrimitiveValueType(pt) && !isPrimitiveValueType(tree.tpe.widen))
+      else if (pt.isPrimitiveValueType && !tree.tpe.widen.isPrimitiveValueType)
         adaptToType(unbox(tree, pt), pt)
       else
         cast(tree, pt)
@@ -211,11 +215,11 @@ object Erasure {
         else recur(cast(qual, erasedPre))
 
       def recur(qual: Tree): Tree = {
-        val qualIsPrimitive = isPrimitiveValueType(qual.tpe.widen)
+        val qualIsPrimitive = qual.tpe.widen.isPrimitiveValueType
         val symIsPrimitive = sym.owner.isPrimitiveValueClass
         if ((sym.owner eq defn.AnyClass) || (sym.owner eq defn.AnyValClass))
           select(qual, defn.ObjectClass.info.decl(sym.name).symbol)
-        else if (qualIsPrimitive && !symIsPrimitive || isErasedValueType(qual.tpe))
+        else if (qualIsPrimitive && !symIsPrimitive || qual.tpe.isErasedValueType)
           recur(box(qual))
         else if (!qualIsPrimitive && symIsPrimitive)
           recur(unbox(qual, sym.owner.typeRef))

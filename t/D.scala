@@ -80,33 +80,17 @@ RefinedType(
 		mm = mm
 	}
 
-/*AnnotatedType(
-	ConcreteAnnotation(Apply(Select(New(Ident(readonly)),<init>),List())),
-	RefinedType(
-		TypeRef(ThisType(module class immutable),List),
-		scala$collection$immutable$List$$A,
-		CoTypeAlias(AnnotatedType(
-			ConcreteAnnotation(Apply(Select(New(Ident(mutable)),<init>),List())),
-			TypeRef(TermRef(ThisType(module class <root>),scala),AnyRef)))))*/
 
-	val f: Option[Int] = new Option[Int]
-	
-	var v: AnyRef = f
-	
-	val g = f
-	val h: AnyRef
-	var c = new C
-	def m(p1: AnyRef): AnyRef = None
-	
-	//@mutable(System.out,System.in) def m(@readonly p1: AnyRef @mutable): AnyRef @mutable = None
-
-
+	//---------
+	// METHODS
+	//---------
 	// DOESN'T WORK:
 	//@mutable(C) def m(): ... // error: not found: C
-	
+	//
 	// DOES WORK:
 	//@mutable(c) def m(): ... // OK because c is a literal variable
 	//@mutable(this) def m(): ...
 	//@mutable(C.this) def m(): ...
 	//@mutable(None) def m(): ...
+	//@mutable(System.out,System.in) def m(@readonly p1: AnyRef @mutable): AnyRef @mutable = None
 }

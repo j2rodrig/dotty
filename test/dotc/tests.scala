@@ -14,7 +14,7 @@ class tests extends CompilerTest {
         "-pagewidth", "160")
 
   implicit val defaultOptions = noCheckOptions ++ List(
-    "-Ycheck:extmethods"//, "-Ystop-before:terminal"
+    "-Ycheck:tailrec"
   )
 
   val twice = List("#runs", "2", "-YnoDoubleBindings")
@@ -24,6 +24,7 @@ class tests extends CompilerTest {
   val negDir = "./tests/neg/"
   val newDir = "./tests/new/"
   val dotcDir = "./src/dotty/"
+
 
   @Test def pos_erasure = compileFile(posDir, "erasure", doErase)
   @Test def pos_Coder() = compileFile(posDir, "Coder", doErase)
@@ -84,7 +85,9 @@ class tests extends CompilerTest {
   @Test def neg_tailcall2 = compileFile(negDir, "tailcall/tailrec-2", xerrors = 2)
   @Test def neg_tailcall3 = compileFile(negDir, "tailcall/tailrec-3", xerrors = 2)
   @Test def neg_t1843 = compileFile(negDir, "t1843", xerrors = 1)
+  @Test def neg_t1843_variances = compileFile(negDir, "t1843-variances", xerrors = 1)
   @Test def neg_t2994 = compileFile(negDir, "t2994", xerrors = 2)
+  @Test def neg_variances = compileFile(negDir, "variances", xerrors = 2)
 
   @Test def dotc = compileDir(dotcDir + "tools/dotc", twice)
   @Test def dotc_ast = compileDir(dotcDir + "tools/dotc/ast", twice)

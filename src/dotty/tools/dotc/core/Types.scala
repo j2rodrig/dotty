@@ -161,7 +161,16 @@ object Types {
 
     /** Is this a type of a repeated parameter? */
     def isRepeatedParam(implicit ctx: Context): Boolean =
-      defn.RepeatedParamClasses contains typeSymbol
+      typeSymbol eq defn.RepeatedParamClass
+
+    /** Is this the type of a method that has a repeated parameter type as
+     *  last parameter type?
+     */
+    def isVarArgsMethod(implicit ctx: Context): Boolean = this match {
+      case tp: PolyType => tp.resultType.isVarArgsMethod
+      case MethodType(_, paramTypes) => paramTypes.nonEmpty && paramTypes.last.isRepeatedParam
+      case _ => false
+    }
 
     /** Is this an alias TypeBounds? */
     def isAlias: Boolean = this match {
@@ -628,16 +637,6 @@ object Types {
     final def objToAny(implicit ctx: Context) =
       if ((this isRef defn.ObjectClass) && !ctx.phase.erasedTypes) defn.AnyType else this
 
-    /** If this is repeated parameter type, its underlying Seq type,
-     *  else the type itself.
-     */
-    def underlyingIfRepeated(implicit ctx: Context): Type = this match {
-      case rt @ RefinedType(tref: TypeRef, name) if defn.RepeatedParamClasses contains tref.symbol =>
-        RefinedType(defn.SeqClass.typeRef, name, rt.refinedInfo)
-      case _ =>
-        this
-    }
-
     /** If this is a (possibly aliased, annotated, and/or parameterized) reference to
      *  a class, the class type ref, otherwise NoType.
      */
@@ -824,10 +823,17 @@ object Types {
         }
       }
 
-/* Not needed yet:
+    /** Same as `subst` but follows aliases as a fallback. When faced with a reference
+     *  to an alias type, where normal substiution does not yield a new type, the
+     *  substitution is instead applied to the alias. If that yields a new type,
+     *  this type is returned, outherwise the original type (not the alias) is returned.
+     *  A use case for this method is if one wants to substitute the type parameters
+     *  of a class and also wants to substitute any parameter accessors that alias
+     *  the type parameters.
+     */
     final def substDealias(from: List[Symbol], to: List[Type])(implicit ctx: Context): Type =
-      new ctx.SubstDealiasMap(from, to).apply(this)
-*/
+      ctx.substDealias(this, from, to, null)
+
     /** Substitute all types of the form `PolyParam(from, N)` by
      *  `PolyParam(to, N)`.
      */
@@ -837,6 +843,10 @@ object Types {
     /** Substitute all occurrences of `This(cls)` by `tp` */
     final def substThis(cls: ClassSymbol, tp: Type)(implicit ctx: Context): Type =
       ctx.substThis(this, cls, tp, null)
+
+    /** As substThis, but only is class is a static owner (i.e. a globally accessible object) */
+    final def substThisUnlessStatic(cls: ClassSymbol, tp: Type)(implicit ctx: Context): Type =
+      if (cls.isStaticOwner) this else ctx.substThis(this, cls, tp, null)
 
     /** Substitute all occurrences of `RefinedThis(rt)` by `tp` */
     final def substThis(rt: RefinedType, tp: Type)(implicit ctx: Context): Type =
@@ -862,7 +872,7 @@ object Types {
      */
     def toFunctionType(implicit ctx: Context): Type = this match {
       case mt @ MethodType(_, formals) if !mt.isDependent =>
-        defn.FunctionType(formals mapConserve (_.underlyingIfRepeated), mt.resultType)
+        defn.FunctionType(formals mapConserve (_.underlyingIfRepeated(mt.isJava)), mt.resultType)
     }
 
     /** The signature of this type. This is by default NotAMethod,
@@ -2209,6 +2219,7 @@ object Types {
     override def variance = 1
     override def toString = "Co" + super.toString
   }
+
   final class ContraTypeBounds(lo: Type, hi: Type, hc: Int) extends CachedTypeBounds(lo, hi, hc) {
     override def variance = -1
     override def toString = "Contra" + super.toString

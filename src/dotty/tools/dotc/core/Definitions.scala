@@ -196,7 +196,6 @@ class Definitions {
     lazy val Array_update                = ctx.requiredMethod(ArrayClass, nme.update)
     lazy val Array_length                = ctx.requiredMethod(ArrayClass, nme.length)
     lazy val Array_clone                 = ctx.requiredMethod(ArrayClass, nme.clone_)
-  lazy val uncheckedStableClass: ClassSymbol = ctx.requiredClass("scala.annotation.unchecked.uncheckedStable")
 
   lazy val UnitClass = valueClassSymbol("scala.Unit", BoxedUnitClass, java.lang.Void.TYPE, UnitEnc)
   lazy val BooleanClass = valueClassSymbol("scala.Boolean", BoxedBooleanClass, java.lang.Boolean.TYPE, BooleanEnc)
@@ -235,7 +234,6 @@ class Definitions {
   lazy val EqualsPatternClass     = specialPolyClass(tpnme.EQUALS_PATTERN, EmptyFlags, AnyType)
 
   lazy val RepeatedParamClass     = specialPolyClass(tpnme.REPEATED_PARAM_CLASS, Covariant, SeqType)
-  lazy val JavaRepeatedParamClass = specialPolyClass(tpnme.JAVA_REPEATED_PARAM_CLASS, Covariant, ArrayClass.typeRef)
 
   // fundamental classes
   lazy val StringClass                  = ctx.requiredClass("java.lang.String")
@@ -297,6 +295,8 @@ class Definitions {
   lazy val AnnotationDefaultAnnot = ctx.requiredClass("dotty.annotation.internal.AnnotationDefault")
   lazy val ThrowsAnnot = ctx.requiredClass("scala.throws")
   lazy val UncheckedAnnot = ctx.requiredClass("scala.unchecked")
+  lazy val UncheckedStableAnnot = ctx.requiredClass("scala.annotation.unchecked.uncheckedStable")
+  lazy val UncheckedVarianceAnnot = ctx.requiredClass("scala.annotation.unchecked.uncheckedVariance")
   lazy val VolatileAnnot = ctx.requiredClass("scala.volatile")
 
   // convenient one-parameter method types
@@ -327,7 +327,6 @@ class Definitions {
   def PairType: Type = PairClass.typeRef
   def StringType: Type = StringClass.typeRef
   def RepeatedParamType = RepeatedParamClass.typeRef
-  def JavaRepeatedParamType = JavaRepeatedParamClass.typeRef
   def ThrowableType = ThrowableClass.typeRef
   def OptionType = OptionClass.typeRef
   def VolatileAnnotType = VolatileAnnot.typeRef
@@ -395,8 +394,6 @@ class Definitions {
   lazy val FunctionClasses: Set[Symbol] = FunctionClass.toSet
   lazy val TupleClasses: Set[Symbol] = TupleClass.toSet
   lazy val ProductClasses: Set[Symbol] = ProductNClass.toSet
-
-  lazy val RepeatedParamClasses: Set[Symbol] = Set(RepeatedParamClass, JavaRepeatedParamClass)
 
   /** `Modules whose members are in the default namespace and their module classes */
   lazy val UnqualifiedOwners = RootImports.toSet ++ RootImports.map(_.moduleClass)
@@ -554,7 +551,6 @@ class Definitions {
     AnyClass,
     AnyRefAlias,
     RepeatedParamClass,
-    JavaRepeatedParamClass,
     ByNameParamClass2x,
     AnyValClass,
     NullClass,
