@@ -31,8 +31,7 @@ import util.Stats.{track, record}
 import config.Printers._
 import language.implicitConversions
 
-//***
-import Mutability.Simple._
+import Mutability._
 
 trait TyperContextOps { ctx: Context => }
 
@@ -369,13 +368,7 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
           case ref: TermRef if ref.symbol is (Mutable, butNot = Accessor) =>
 		    val rhs1 = typed(tree.rhs, ref.info)
 		  
-		    //***
-		  	//val annotatedRi = riTypeFromDenotation(ref.symbol.denot)
-		  	//if (annotatedRi > -1 && rhs1.tpe.riType > annotatedRi)
-		  	//	ctx.error(s"Expression is not compatiable with mutability annotations on ${ref.symbol.name}", rhs1.pos)
-			
-			//***
-			if (!isSubtypeOf(getSimpleMutability(rhs1.tpe), getSimpleMutability(lhs1.tpe))) {
+			if (!mutabilitySubtype(rhs1.tpe, lhs1.tpe)) {
 				err.typeMismatch (rhs1, lhs1.tpe)
 			}
 		  
@@ -797,96 +790,22 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
     typed(annot, defn.AnnotationClass.typeRef)
   }
 
-	def riTypeFromDenotation(denot: Denotation)(implicit ctx: Context): Int = {
-		var ri = -1   // unknown
-		denot.alternatives.foreach { d => 
-			d match {
-				case sd: SymDenotation =>
-					sd.annotations.foreach { ann: Annotation =>
-						val annRi = ann.symbol.name.toString match {
-							case "mutable" => 0
-							case "polyread" => 1
-							case "readonly" => 2
-							case _ => -1
-						}
-						if (ri > -1 && annRi > -1)
-							ctx.error(s"multiple RI annotations on ${sd.symbol.name}", ann.tree.pos)
-						ri = annRi
-					}
-				case s: SingleDenotation =>
-			}
-		}
-		ri
-	}
-
   def typedValDef(vdef: untpd.ValDef, sym: Symbol)(implicit ctx: Context) = track("typedValDef") {
     val ValDef(mods, name, tpt, rhs) = vdef
     val mods1 = addTypedModifiersAnnotations(mods, sym)
-    val tpt1 = typedType(tpt)
+    var tpt1 = typedType(tpt)
     val rhs1 = rhs match {
       case Ident(nme.WILDCARD) => rhs withType tpt1.tpe
       case _ => typedExpr(rhs, tpt1.tpe)
     }
-	
-	//***
-	/// Returns a string of all annotations on this denotation
-	//def annots (denot: Denotation) : String = {
-	//	var str = ""
-	//	denot.alternatives.foreach { d => 
-	//		d match {
-	//			case sd: SymDenotation =>
-	//				sd.annotations.foreach { ann: Annotation =>
-	//					str = str + ann.symbol.name.toString + " "
-	//				}
-	//			case s: SingleDenotation =>
-	//		}
-	//	}
-	//	return str
-	//}
-	//println(annots(sym.denot) + sym.owner.name + "." + sym.name + ": " + annots(tpt1.denot))
-	
-	//def matchesRiAnnotation()
-	
-	//val annotatedRi = riTypeFromDenotation(sym.denot)
-	//if (annotatedRi > -1 && tpt1.tpe.riType > annotatedRi)
-	//	ctx.error(s"Type is not compatiable with mutability annotations on ${sym.name}", vdef.pos)
-	
-	//tpt1.tpe match {
-	//	case AnnotatedType(annot,tp) =>
-	//		println(annots(sym.denot) + sym.owner.name + "." + sym.name + ": " + annot.symbol.name.toString)
-	//	case tp =>
-	//		println(annots(sym.denot) + sym.owner.name + "." + sym.name + ": " + "unannotated")
-	//}
-	
-	// TODO: add left-hand annotation (if present) to symbol type
-	// TODO: where is the check that tpt1.tpe is compatible with rhs1.tpe?
-	
-	def scoped_name(sym: Symbol): String =
-		if (sym.denot.exists) sym.owner.name.toString + "." + sym.name.toString
-		else "<none>"
-	
-	tpt1.tpe match {
-		case tpe: RefinedType =>
-			println(scoped_name(sym) + ": (RefinedType) " + tpt1.tpe) // tpe.refinedInfo)
-		case _ =>
-			println(scoped_name(sym) + ": " + tpt1.tpe)
-	}
-	
-	//println(riTypeFromDenotation(sym.denot).toString + " " + scoped_name(sym) + ": " + tpt1.tpe)
-	
-    /*val typed = 
-	val riType = riType(sym.denot)
-	if (riType > -1) {
-	  if (tpt1.tpe.riType > riType) ctx.error(s"Type of symbol is not compatible with RI annotation", ann.tree.pos)
-	  if (tpt1.tpe.riType < riType)
-	    return typed.withType()
-	}
-	typed
-	*/
-	
-	//***
-	if (!isSubtypeOf(getSimpleMutability(rhs1.tpe), getSimpleMutability(tpt1.tpe))) {
+		
+	if (!mutabilitySubtype(rhs1.tpe, tpt1.tpe)) {
 		err.typeMismatch (rhs1, tpt1.tpe)
+	}
+	else incompatibleAutoMutabilityTypes(sym.info) match {
+		case Some(annot) =>
+			ctx.error(s"Incompatible mutability annotation on ${sym.name}", annot.tree.pos)
+		case None =>
 	}
   
 	assignType(cpy.ValDef(vdef, mods1, name, tpt1, rhs1), sym)
@@ -901,29 +820,6 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
     val tpt1 = typedType(tpt)
     val rhs1 = typedExpr(rhs, tpt1.tpe)
 	
-	//***
-	//if (!sym.owner.name.toString.equals("readonly") && !sym.owner.name.toString.equals("mutable") && !sym.owner.name.toString.equals("polyread")) {  //***
-	//def getRiType(tree: Tree): String = {  // from a (possibly annotated) type tree
-	//	tree match {
-	//		case Annotated(annot,arg) =>
-	//			annot.symbol.owner.name.toString
-	//		case _ => "xxx"
-	//	}
-	//}
-
-	//println(annots(sym.denot) + sym.owner.name + "." + sym.name + ": " + tpt1.tpe.riType)
-	println(sym.owner.name + "." + sym.name + ": " + tpt1.tpe.riType)
-
-	
-	/*tpt1.tpe match {
-		case AnnotatedType(annot,tp) =>
-			println(annots(sym.denot) + sym.owner.name + "." + sym.name + ": " + annot.symbol.name.toString)
-		case tp =>
-			println(annots(sym.denot) + sym.owner.name + "." + sym.name + ": " + "unannotated")
-	}*/
-	
-//	println(annots(sym.denot) + sym.owner.name + "." + sym.name + ": " + tpt1)//tpt1.tpe.riType)
-
     val newTree = assignType(cpy.DefDef(ddef, mods1, name, tparams1, vparamss1, tpt1, rhs1), sym)
     //todo: make sure dependent method types do not depend on implicits or by-name params
 	
@@ -974,8 +870,6 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
     checkNoDoubleDefs(cls)
     val impl1 = cpy.Template(impl, constr1, parents1, self1, body1)
       .withType(dummy.termRef)
-	
-  	println("ClassDef: " + name.toString + ": " + cls.denot.info)
 	
     checkVariance(impl1)
     assignType(cpy.TypeDef(cdef, mods1, name, impl1), cls)

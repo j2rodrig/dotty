@@ -16,6 +16,8 @@ import util.Stats
 import config.Config
 import config.Printers._
 
+import Mutability._
+
 trait SymDenotations { this: Context =>
   import SymDenotations._
 
@@ -79,6 +81,20 @@ object SymDenotations {
     private[this] var myInfo: Type = initInfo
     private[this] var myPrivateWithin: Symbol = initPrivateWithin
     private[this] var myAnnotations: List[Annotation] = Nil
+	
+	/** Applies automatic modifications of the symbol's type.
+	 *  Modifications include: application of mutability annotations
+	 *    as type annotations. Tagged as AutoType so that the consistency
+	 *    of the type annotations can be checked where needed.
+	 */
+	private[this] def infoWithAutoTypes(implicit ctx: Context): Type = {
+		var inf = myInfo
+		myAnnotations.foreach { annot =>
+			if (getAnnotationMutability(annot).isAnnotated)
+				inf = new AnnotatedType(annot, inf) with AutoType
+		}
+		inf
+	}
 
     /** The owner of the symbol; overridden in NoDenotation */
     def owner: Symbol = ownerIfExists
@@ -134,7 +150,7 @@ object SymDenotations {
      */
     final def info(implicit ctx: Context): Type = myInfo match {
       case myInfo: LazyType => completeFrom(myInfo); info
-      case _ => myInfo
+      case _ => infoWithAutoTypes
     }
 
     /** The type info, or, if symbol is not yet completed, the completer */

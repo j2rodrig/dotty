@@ -60,6 +60,25 @@ RefinedType(
 		mu2 = mu2
 		mu2 = ro   // should error
 		mu2 = mu
+
+		var mu3 = mu
+		var pr3 = pr
+		var ro3 = ro
+		ro3 = mu   // should error
+		ro3 = pr   // should error
+		@mutable var mPre1 = mu
+		@mutable var mPre2 = pr  // should error
+		@mutable var mPre3 = ro  // should error
+		@polyread var pPre1 = mu
+		@polyread var pPre2 = pr
+		@polyread var pPre3 = ro  // should error
+		@readonly var rPre1 = mu
+		@readonly var rPre2 = pr
+		@readonly var rPre3 = ro
+		/*** Prefix annotations on a variable definition can strengthen the symbol's type, but not weaken it.
+		In contrast, annotations on a type expression are not checked -- they override
+		the previously-inferred top-level mutability.
+		**/
 		
 		// Generic Type Annotations
 		rr = rr

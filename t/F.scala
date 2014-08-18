@@ -1,19 +1,16 @@
-package t
 
 trait F {
 
 	trait Base {
-		def m(lst: List[Int]): List[Int]
-		def n(an: AnyRef): List[Int]
+		def m(lst: List[Int]): List[Double]
 		
-		val x: List[Int]
+		def n: List[Double]
 	}
 	
 	trait Derived extends Base {
-		override def m(an: AnyRef): List[Int]
-		override def n(lst: List[Int]): List[Int]
+		def m2(lst: List[Int]): List[Int] = m(lst)
 		
-		val x: AnyRef
+		def n2: List[Int] = n
 	}
 
 }

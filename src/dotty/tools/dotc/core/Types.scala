@@ -1056,6 +1056,12 @@ object Types {
     }
   }
 
+  /** A marker trait for types that are automatically derived from symbol
+   *  information, e.g., where an annotation on a symbol is automatically
+   *  applied to a symbol's type.
+   */
+  trait AutoType extends Type
+
 // --- NamedTypes ------------------------------------------------------------------
 
   /** A NamedType of the form Prefix # name */
