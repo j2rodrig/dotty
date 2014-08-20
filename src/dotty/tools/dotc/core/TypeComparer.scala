@@ -12,8 +12,6 @@ import util.{Stats, DotClass, SimpleMap}
 import config.Config
 import config.Printers._
 
-//import Mutability.Simple._
-
 /** Provides methods to compare types.
  */
 class TypeComparer(initctx: Context) extends DotClass {
@@ -1015,21 +1013,13 @@ class TypeComparer(initctx: Context) extends DotClass {
     (poly1.paramBounds corresponds poly2.paramBounds)((b1, b2) =>
       isSameType(b1, b2.subst(poly2, poly1)))
 
-  //private def matchingTypeParamsRi(poly1: PolyType, poly2: PolyType): Boolean =
-  //  (poly1.paramBounds corresponds poly2.paramBounds)((b1, b2) =>
-  //    isSameTypeRi(b1, b2.subst(poly2, poly1)))
-
   // Type equality =:=
 
   /** Two types are the same if are mutual subtypes of each other */
   def isSameType(tp1: Type, tp2: Type): Boolean =
     if (tp1 eq NoType) false
     else if (tp1 eq tp2) true
-    else isSubType(tp1, tp2) && isSubType(tp2, tp1) && tp1.riType == tp2.riType
-
-  /** Are two types the same with respect to Reference Immutability? */
-  //def isSameTypeRi(tp1: Type, tp2: Type): Boolean =
-  //  isSubTypeRi(tp1, tp2) && isSubTypeRi(tp2, tp1)
+    else isSubType(tp1, tp2) && isSubType(tp2, tp1)
 
   /** Same as `isSameType` but also can be applied to overloaded TermRefs, where
    *  two overloaded refs are the same if they have pairwise equal alternatives
@@ -1054,8 +1044,8 @@ class TypeComparer(initctx: Context) extends DotClass {
     if (tp1 eq tp2) tp1
     else if (!tp1.exists) tp2
     else if (!tp2.exists) tp1
-    else if (((tp1 isRef AnyClass) && tp1.riType == 2) || ((tp2 isRef NothingClass) && tp2.riType <= 0)) tp2
-    else if (((tp2 isRef AnyClass) && tp2.riType == 2) || ((tp1 isRef NothingClass) && tp1.riType <= 0)) tp1
+    else if ((tp1 isRef AnyClass) || (tp2 isRef NothingClass)) tp2
+    else if ((tp2 isRef AnyClass) || (tp1 isRef NothingClass)) tp1
     else tp2 match {  // normalize to disjunctive normal form if possible.
       case OrType(tp21, tp22) =>
         tp1 & tp21 | tp1 & tp22
@@ -1086,8 +1076,8 @@ class TypeComparer(initctx: Context) extends DotClass {
     if (tp1 eq tp2) tp1
     else if (!tp1.exists) tp1
     else if (!tp2.exists) tp2
-    else if (((tp1 isRef AnyClass) && tp1.riType == 2) || ((tp2 isRef NothingClass) && tp2.riType <= 0)) tp1
-    else if (((tp2 isRef AnyClass) && tp2.riType == 2) || ((tp1 isRef NothingClass) && tp1.riType <= 0)) tp2
+    else if ((tp1 isRef AnyClass) || (tp2 isRef NothingClass)) tp1
+    else if ((tp2 isRef AnyClass) || (tp1 isRef NothingClass)) tp2
     else {
       val t1 = mergeIfSuper(tp1, tp2)
       if (t1.exists) t1

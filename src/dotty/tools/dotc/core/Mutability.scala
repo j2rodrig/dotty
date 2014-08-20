@@ -16,27 +16,6 @@ import Decorators._
 import Denotations._
 import Periods._
 import Types._
-import util.Positions.Position
-import util.Stats._
-import util.{Stats, DotClass, SimpleMap}
-import ast.tpd._, printing.Texts._
-import ast.untpd
-import transform.Erasure
-import printing.Printer
-import Hashable._
-import Uniques._
-import collection.{mutable, Seq, breakOut}
-import config.Config
-import config.Printers._
-import annotation.tailrec
-import language.implicitConversions
-
-import typer.Mode
-import collection.{mutable => collection_mutable }
-import printing.Disambiguation.disambiguated
-
-import TypeComparer._
-
 
 object Mutability {
 
@@ -89,199 +68,232 @@ BOUNDED TYPES:
 * ...
 
 */
-	abstract class Mutability {
-		def exists: Boolean
-		def isAnnotated: Boolean
-		def canBeMutable: Boolean = false
-		def canBeReadonly: Boolean = false
-	}
-	case class readonly() extends Mutability {
-		override def exists: Boolean = true
-		override def isAnnotated: Boolean = true
-		override def canBeReadonly: Boolean = true
-		override def toString = "@readonly"
-	}
-	case class polyread() extends Mutability {
-		override def exists: Boolean = true
-		override def isAnnotated: Boolean = true
-		override def canBeMutable: Boolean = true
-		override def canBeReadonly: Boolean = true
-		override def toString = "@polyread"
-	}
-	case class mutable() extends Mutability {
-		override def exists: Boolean = true
-		override def isAnnotated: Boolean = true
-		override def canBeMutable: Boolean = true
-		override def toString = "@mutable"
-	}
-	case class unannotated() extends Mutability {
-		override def exists: Boolean = true
-		override def isAnnotated: Boolean = false
-		override def toString = "@unannotated"
-	}
-	case class notfound() extends Mutability {
-		override def exists: Boolean = false
-		override def isAnnotated: Boolean = false
-		override def toString = "@notfound"
+
+	object SimpleMutabilityTypes {
+
+		abstract class SimpleMutability {
+			def exists: Boolean
+			def isAnnotated: Boolean
+			def canBeMutable: Boolean = false
+			def canBeReadonly: Boolean = false
+		}
+		case class readonly() extends SimpleMutability {
+			override def exists: Boolean = true
+			override def isAnnotated: Boolean = true
+			override def canBeReadonly: Boolean = true
+			override def toString = "@readonly"
+		}
+		case class polyread() extends SimpleMutability {
+			override def exists: Boolean = true
+			override def isAnnotated: Boolean = true
+			override def canBeMutable: Boolean = true
+			override def canBeReadonly: Boolean = true
+			override def toString = "@polyread"
+		}
+		case class mutable() extends SimpleMutability {
+			override def exists: Boolean = true
+			override def isAnnotated: Boolean = true
+			override def canBeMutable: Boolean = true
+			override def toString = "@mutable"
+		}
+		/** The mutability of a type where no mutability has been specified. */
+		case class unannotated() extends SimpleMutability {
+			override def exists: Boolean = true
+			override def isAnnotated: Boolean = false
+			override def toString = "@unannotated"
+		}
+		/** The mutability resulting from a failed search. */
+		case class notfound() extends SimpleMutability {
+			override def exists: Boolean = false
+			override def isAnnotated: Boolean = false
+			override def toString = "@notfound"
+		}
+		/** The mutability of an ErrorType. */
+		case class errortype() extends SimpleMutability {
+			override def exists: Boolean = true
+			override def isAnnotated: Boolean = false
+			override def toString = "@errortype"
+		}
+
+		/** Finds a mutability that bounds both m1 and m2.
+		If either mutability can be adapted to @mutable, then the result can be adapted to @mutable.
+		If either mutability can be adapted to @readonly, then the result can be adapted to @readonly.
+		E.g., for types P and Q, the bounds expression "<:P @mutable >:Q @readonly" yields @polyread.
+		The expression "<:P >:Q @polyread" is equivalent.
+		*/
+		def narrowestBound(m1: SimpleMutability, m2: SimpleMutability): SimpleMutability = {
+			val mut = (m1.canBeMutable || m2.canBeMutable)
+			val ro = (m1.canBeReadonly || m2.canBeReadonly)
+			if (m1.isInstanceOf[errortype] || m2.isInstanceOf[errortype]) errortype()
+			else if (mut && ro) polyread()
+			else if (mut) mutable()
+			else if (ro) readonly()
+			else unannotated()
+		}
+
+		/// The greatest lower bound / intersection of two mutabilities.
+		def glb(m1: SimpleMutability, m2: SimpleMutability): SimpleMutability = {
+			if (m1.isInstanceOf[errortype] || m2.isInstanceOf[errortype]) errortype()
+			else if (!m1.isAnnotated || !m2.isAnnotated) unannotated()
+			else if (m1.isInstanceOf[mutable] || m2.isInstanceOf[mutable]) mutable()
+			else if (m1.isInstanceOf[polyread] || m2.isInstanceOf[polyread]) polyread()
+			else readonly()
+		}
+		def lower = glb _   // alias
+
+		/// The least upper bound / union of two mutabilities.
+		def lub(m1: SimpleMutability, m2: SimpleMutability): SimpleMutability = {
+			if (m1.isInstanceOf[errortype] || m2.isInstanceOf[errortype]) errortype()
+			else if (m1.isInstanceOf[readonly] || m2.isInstanceOf[readonly]) readonly()
+			else if (m1.isInstanceOf[polyread] || m2.isInstanceOf[polyread]) polyread()
+			else if (m1.isInstanceOf[mutable] || m2.isInstanceOf[mutable]) mutable()
+			else unannotated()
+		}
+		def upper = lub _   // alias
+	
 	}
 	
-	def simpleMutabilitySubtype(m1: Mutability, m2: Mutability): Boolean = m2 match {
-		case m2: readonly => true
-		case m2: polyread => !m1.isInstanceOf[readonly]
-		case _ => !m1.isInstanceOf[readonly] && !m1.isInstanceOf[polyread]
-	}
+	import SimpleMutabilityTypes._
 	
-	def getAnnotationMutability(annot: Annotation)(implicit ctx: Context): Mutability = annot.symbol.name.toString match {
-		case "mutable" => mutable()
-		case "polyread" => polyread()
-		case "readonly" => readonly()
-		case _ => unannotated()
-	}
+	def simpleSubtype(m1: SimpleMutability, m2: SimpleMutability): Boolean =
+		m1.isInstanceOf[errortype] || m2.isInstanceOf[errortype] ||   // don't generate extra errors for error types
+			(m2 match {
+				case m2: readonly => true
+				case m2: polyread => !m1.isInstanceOf[readonly]
+				case _ => !m1.isInstanceOf[readonly] && !m1.isInstanceOf[polyread]
+			})
+	
+	def getAnnotationMutability(annot: Annotation)(implicit ctx: Context): SimpleMutability =
+		annot.symbol.name.toString match {
+			case "mutable" => mutable()
+			case "polyread" => polyread()
+			case "readonly" => readonly()
+			case _ => unannotated()
+		}
 	
 	/** If a top-level automatically-added type annotation is incompatible with
 	 *  the underlying mutability type, then return it.
+	 *  Returns a pair: (found_annotation, expected_mutability)
 	 */
-	def incompatibleAutoMutabilityTypes(t: Type)(implicit ctx: Context): Option[Annotation] = t match {
+	def incompatibleAutoMutabilityTypes(t: Type)(implicit ctx: Context): Option[(Annotation,SimpleMutability)] = t match {
 		case t @ AnnotatedType(annot, tpe) if (t.isInstanceOf[AutoType]) =>
 			// If t is an automatic mutability type annotation, then it must be a supertype of the underlying type.
-			val mut = getAnnotationMutability(annot)
-			if (mut.isAnnotated && !simpleMutabilitySubtype(getSimpleMutability(t.underlying), mut)) Some(annot)
+			val found = getAnnotationMutability(annot)
+			val expected = getSimpleMutability(t.underlying)
+			if (found.isAnnotated && !simpleSubtype(expected, found)) Some((annot, expected))
 			else incompatibleAutoMutabilityTypes(t.underlying)
+		case t: MethodType => incompatibleAutoMutabilityTypes(t.resultType)  // annotations on methods go on the result type
 		case t: TypeProxy => incompatibleAutoMutabilityTypes(t.underlying)
 		case _ => None
 	}
 	
-	/*/// Returns the annotated mutability of a symbol. For multiple annotations, returns the most restrictive mutability.
-	def getSymbolMutability(sym: Symbol)(implicit ctx: Context): Mutability = {
-		var accumulated: Mutability = unannotated()
-		sym.denot.annotations.foreach { annot =>
-			accumulated = unionMutability(accumulated, getAnnotationMutability(annot))
-		}
-		accumulated
-	}*/
-
-	/** Finds a mutability that bounds both m1 and m2.
-	
+	/** Returns true if the given mutability can override the given annotation in a type expression.
+	I.e., where the given mutability is applied, can the given annotation be ignored
+	without changing the meaning of the program?
+	The rule implemented here is: If both mut and annot have specified mutabilities,
+	    then annot can be ignored (mut can override annot).
 	*/
-	def narrowestFittingBound(m1: Mutability, m2: Mutability): Mutability = {
-		val mut = (m1.canBeMutable || m2.canBeMutable)
-		val ro = (m1.canBeReadonly || m2.canBeReadonly)
-		if (mut && ro) polyread()
-		else if (mut) mutable()
-		else if (ro) readonly()
-		else unannotated()
-	}
-
-	/// The greatest lower bound / intersection of two mutabilities.
-	def intersectMutability(m1: Mutability, m2: Mutability): Mutability = {
-		if (!m1.isAnnotated || !m2.isAnnotated) unannotated()
-		else if (m1.isInstanceOf[mutable] || m2.isInstanceOf[mutable]) mutable()
-		else if (m1.isInstanceOf[polyread] || m2.isInstanceOf[polyread]) polyread()
-		else readonly()
-	}
-
-	/// The least upper bound / union of two mutabilities.
-	def unionMutability(m1: Mutability, m2: Mutability): Mutability = {
-		if (m1.isInstanceOf[readonly] || m2.isInstanceOf[readonly]) readonly()
-		else if (m1.isInstanceOf[polyread] || m2.isInstanceOf[polyread]) polyread()
-		else if (m1.isInstanceOf[mutable] || m2.isInstanceOf[mutable]) mutable()
-		else unannotated()
-	}
+	def overridesAnnotation(mut: SimpleMutability, annot: Annotation)(implicit ctx: Context): Boolean =
+		mut.isAnnotated && getAnnotationMutability(annot).isAnnotated
 	
-	/** Finds the top-level mutability of the named member of type tp.
-	Returns one of: mutable, polyread, readonly, unannotated, notfound.
-	*/
-	/*def getNameMutability(tp: Type, name: Name)(implicit ctx: Context): Mutability = tp match {
-		case tp @ ClassInfo
-		case tp @ RefinedType(parent, refinedName) =>
-			if (name == refinedName) getSimpleMutability(tp.refinedInfo)
-			else getNameMutability(parent, name)
-		case _ => notfound()
-	}*/
-	
-	//TODO for generic mutability subtyping: see member-querying methods on Type
+	def overridesAnnotation(annot1: Annotation, annot2: Annotation)(implicit ctx: Context): Boolean =
+		overridesAnnotation(getAnnotationMutability(annot1), annot2)
 
-	/** Finds the top-level mutability of a given type.
-	Returns one of: mutable, polyread, readonly, unannotated.
+	/** Finds the top-level (simple) mutability of a given type.
+	Returns one of: mutable, polyread, readonly, unannotated, errortype.
 	*/
-	def getSimpleMutability(tp: Type)(implicit ctx: Context): Mutability = tp match {
+	def getSimpleMutability(tp: Type)(implicit ctx: Context): SimpleMutability = tp match {
 		case tp @ AnnotatedType(annot, tpe) => annot.symbol.name.toString match {
 			case "mutable" => mutable()
 			case "polyread" => polyread()
 			case "readonly" => readonly()
 			case _ => getSimpleMutability(tpe)  // unrecognized annotation: check underlying type
 		}
-		case tp @ TypeBounds(lo, hi) => typeBoundsMutability(lo, hi)
-		case tp @ AndType(tp1, tp2) => intersectMutability(getSimpleMutability(tp1), getSimpleMutability(tp2))
-		case tp @ OrType(tp1, tp2) => unionMutability(getSimpleMutability(tp1), getSimpleMutability(tp2))
+		/*case tp: NamedType => {
+			var mut: SimpleMutability = unannotated()  // include mutability annotations on symbols
+			tp.denot.alternatives.foreach { d => d match {
+				case d: SymDenotation =>
+					d.annotations.foreach { annot => mut = lub(mut, getAnnotationMutability(annot)) }
+				case _ =>
+				}
+			}
+			lub(mut, getSimpleMutability(tp.underlying))
+		}*/
+		case tp @ TypeBounds(lo, hi) => simpleTypeBoundsMutability(lo, hi)
+		case tp @ AndType(tp1, tp2) => glb(getSimpleMutability(tp1), getSimpleMutability(tp2))
+		case tp @ OrType(tp1, tp2) => lub(getSimpleMutability(tp1), getSimpleMutability(tp2))
 		case tp: TypeProxy => getSimpleMutability(tp.underlying)
+		case tp: MethodOrPoly => getSimpleMutability(tp.resultType)
+		case tp: ErrorType => errortype()
 		case _ => unannotated()
 	}
 
 	/** Finds the mutability bounds for the given type bounds.
-	If any annotations are immediately present, bounds are determined entirely from annotations.
+	If any annotations are explicitly present, bounds are determined entirely from explicit annotations.
 	Else-wise, bounds are determined from the default mutabilities of the bounding types.
 	*/
-	def typeBoundsMutability(lo: Type, hi: Type)(implicit ctx: Context): Mutability = {
-		val immLo = getImmediateMutability(lo)
-		val immHi = getImmediateMutability(hi)
-		if (immLo.isAnnotated && immHi.isAnnotated) narrowestFittingBound(immLo, immHi)
-		else if (immLo.isAnnotated) immLo
-		else if (immHi.isAnnotated) immHi		
-		else {
-			val deepLo = getSimpleMutability(lo)
-			val deepHi = getSimpleMutability(hi)
-			narrowestFittingBound(deepLo, deepHi)
-		}
-	}
-
-	/** If the given type is an AnnotationType, returns mutability type.
-	Non-mutability annotations at the same level are filtered out.
-	Can return mutable, polyread, readonly, or unannotated.
-	*/
-	def getImmediateMutability(tp: Type)(implicit ctx: Context): Mutability = tp match {
-		case tp @ AnnotatedType(annot, tpe) => annot.symbol.name.toString match {
-			case "mutable" => mutable()
-			case "polyread" => polyread()
-			case "readonly" => readonly()
-			case _ => getImmediateMutability(tpe)  // check underlying annotation
-		}
-		case _ => unannotated()
+	def simpleTypeBoundsMutability(lo: Type, hi: Type)(implicit ctx: Context): SimpleMutability = {
+		val mLo = explicitSimpleMutability(lo)
+		val mHi = explicitSimpleMutability(hi)
+		if (mLo.isInstanceOf[errortype] || mHi.isInstanceOf[errortype]) errortype()
+		else if (mLo.isAnnotated && mHi.isAnnotated) narrowestBound(mLo, mHi)
+		else if (mLo.isAnnotated) mLo
+		else if (mHi.isAnnotated) mHi
+		else narrowestBound(getSimpleMutability(lo), getSimpleMutability(hi))
 	}
 	
-	def mutabilityOfMember(tp: Type, name: Name)(implicit ctx: Context): Mutability = tp match {
+	/** If t refers a sequence of annotations, returns the mutability of the outermost mutability annotation. */
+	def explicitSimpleMutability(t: Type)(implicit ctx: Context): SimpleMutability = t match {
+		case t @ AnnotatedType(annot, underlying) =>
+			val mut = getAnnotationMutability(annot)
+			if (mut.isAnnotated) mut
+			else explicitSimpleMutability(underlying)
+		case t: ErrorType => errortype()
+		case _ => unannotated()
+	}
+
+	def simpleMemberMutability(tp: Type, name: Name)(implicit ctx: Context): SimpleMutability = tp match {
+		// Search for the member in a ClassInfo.
+		// If more than one member matches, then take the upper bound of all matched members.
 		case tp @ ClassInfo(prefix, cls, classParents, decls, selfInfo) =>
-			getSimpleMutability(cls.denot.findMember(name, prefix, EmptyFlags).info)
-			// TODO: does findMember ever return NoDenotation or MultiDenotation? Handle this.
+			var mut: SimpleMutability = notfound()
+			cls.denot.findMember(name, prefix, EmptyFlags).alternatives.foreach { d =>
+				if (mut.isAnnotated) mut = lub(mut, getSimpleMutability(d.info))
+				else mut = getSimpleMutability(d.info)
+			}
+			mut
 			
 		case tp @ RefinedType(parent, refinedName) =>
 			if (name eq refinedName)
 				getSimpleMutability(tp.refinedInfo)
 			else
-				mutabilityOfMember(parent, name)
+				simpleMemberMutability(parent, name)
 				
 		case tp @ AndType(tp1, tp2) =>
-			intersectMutability(mutabilityOfMember(tp1, name), mutabilityOfMember(tp2, name))
+			glb(simpleMemberMutability(tp1, name), simpleMemberMutability(tp2, name))
 			
 		case tp @ OrType(tp1, tp2) =>
-			unionMutability(mutabilityOfMember(tp1, name), mutabilityOfMember(tp2, name))
+			lub(simpleMemberMutability(tp1, name), simpleMemberMutability(tp2, name))
 			
 		case tp: TypeProxy =>
-			mutabilityOfMember(tp.underlying, name)
+			simpleMemberMutability(tp.underlying, name)
+			
+		case tp: MethodOrPoly =>
+			simpleMemberMutability(tp.resultType, name)
 			
 		case _ => notfound()
 	}
 	
 	def typeRefinementMutabilitySubtype(t1: Type, t2: Type)(implicit ctx: Context): Boolean = t2 match {
 		case t2 @ RefinedType(parent, refinedName) => {
-			val mutability1 = mutabilityOfMember(t1, refinedName)
-			val mutability2 = mutabilityOfMember(t2, refinedName)
+			val mutability1 = simpleMemberMutability(t1, refinedName)
+			val mutability2 = simpleMemberMutability(t2, refinedName)
 			// Possibilities:
 			// * mutability1 is notfound -- should not happen if t1 is really a subtype of t2,
 			//   but I am ignoring PolyTypes and a few other things, so we'll just return true in this case.
 			// * mutability1 is something else -- simple mutability subtyping applies.
 			// Also makes sure refinements in the parent type are OK.
-			simpleMutabilitySubtype(mutability1, mutability2) && typeRefinementMutabilitySubtype(t1, parent)
+			simpleSubtype(mutability1, mutability2) && typeRefinementMutabilitySubtype(t1, parent)
 		}
 		
 		// TODO: And/Or/Bounds/etc.?
@@ -293,22 +305,17 @@ BOUNDED TYPES:
 	}
 	
 	def mutabilitySubtype(t1: Type, t2: Type)(implicit ctx: Context): Boolean = {
-		// Simple test: if same type, has same mutability
+		// Simple test: if same type, then same mutability
 		if (t1 eq t2) return true
 	
 		// Check simple (top-level) mutability.
-		if (!simpleMutabilitySubtype(getSimpleMutability(t1), getSimpleMutability(t2))) return false
+		if (!simpleSubtype(getSimpleMutability(t1), getSimpleMutability(t2))) return false
 	
-		// Check complex (deep) mutability.
-		// t1 is a subtype of t2 if all members 
+		// Check mutability of method signatures and type refinements.
 		typeRefinementMutabilitySubtype(t1, t2)
+		// TODO: (unapplied) method mutability
 	}
 	
-	/*def deepMutabilitySubtype(t1: Type, t2: Type)(implicit ctx: Context): Boolean = {
-		// Check complex (deep) mutability.
-		// t1 is a subtype of t2 if all members 
-		typeRefinementMutabilitySubtype(t1, t2)
-	}*/
 	
 
 
@@ -322,7 +329,7 @@ BOUNDED TYPES:
 	def mutabilitySubtype(t1: Type, t2: Type)(implicit ctx: Context): Boolean = {
 		if (t1 eq t2) return true
 		
-		if (!simpleMutabilitySubtype(getSimpleMutability(t1), getSimpleMutability(t2))) return false
+		if (!simpleSubtype(getSimpleMutability(t1), getSimpleMutability(t2))) return false
 		
 		println("Secondary mutability check on types " + t1 + " and " + t2)
 		
@@ -357,7 +364,7 @@ BOUNDED TYPES:
 	def mutabilitySubtype(t1: Type, t2: Type)(implicit ctx: Context): Boolean = {
 		if (t1 == t2) return true
 		
-		if (!simpleMutabilitySubtype(getSimpleMutability(t1), getSimpleMutability(t2))) return false
+		if (!simpleSubtype(getSimpleMutability(t1), getSimpleMutability(t2))) return false
 		// TODO: method subtypes
 		
 		// For each named member of m2, make sure that it is a supertype of that member in m1

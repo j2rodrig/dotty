@@ -16,8 +16,6 @@ import util.Stats
 import config.Config
 import config.Printers._
 
-import Mutability._
-
 trait SymDenotations { this: Context =>
   import SymDenotations._
 
@@ -87,14 +85,32 @@ object SymDenotations {
 	 *    as type annotations. Tagged as AutoType so that the consistency
 	 *    of the type annotations can be checked where needed.
 	 */
-	private[this] def infoWithAutoTypes(implicit ctx: Context): Type = {
+	def infoWithAutoTypes(implicit ctx: Context): Type = {
 		var inf = myInfo
 		myAnnotations.foreach { annot =>
-			if (getAnnotationMutability(annot).isAnnotated)
-				inf = new AnnotatedType(annot, inf) with AutoType
+			if (Mutability.getAnnotationMutability(annot).isAnnotated) inf match {
+				case mt: MethodType => inf = addToResultType(annot, mt)
+				case _ => inf = addToOrdinaryType(annot, inf)
+			}
 		}
 		inf
 	}
+	private[this] def addToResultType(annot: Annotation, mt: MethodType)(implicit ctx: Context): MethodType = {
+		mt.resultType match {
+			case rt: MethodType => addToResultType(annot, rt)
+			case _ => mt.resultType_ = addToOrdinaryType(annot, mt.resultType_)
+		}
+		mt
+	}
+	private[this] def addToOrdinaryType(annot: Annotation, t: Type)(implicit ctx: Context): Type =
+		t match {
+			// If the given annotation overrides the next annotation down, then
+			// remove the next annotation from the returned type. (Helps reduce unnecessary annotations.)
+			case t @ AnnotatedType(annot2, tpe) if (Mutability.overridesAnnotation(annot, annot2)) =>
+				new AnnotatedType(annot, t.underlying) with AutoType
+			case _ =>
+				new AnnotatedType(annot, t) with AutoType
+		}
 
     /** The owner of the symbol; overridden in NoDenotation */
     def owner: Symbol = ownerIfExists

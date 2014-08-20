@@ -64,8 +64,6 @@ RefinedType(
 		var mu3 = mu
 		var pr3 = pr
 		var ro3 = ro
-		ro3 = mu   // should error
-		ro3 = pr   // should error
 		@mutable var mPre1 = mu
 		@mutable var mPre2 = pr  // should error
 		@mutable var mPre3 = ro  // should error

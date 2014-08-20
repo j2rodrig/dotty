@@ -798,15 +798,41 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
       case Ident(nme.WILDCARD) => rhs withType tpt1.tpe
       case _ => typedExpr(rhs, tpt1.tpe)
     }
-		
+	
+	if (!mutabilitySubtype(rhs1.tpe, sym.info)) { //tpt1.tpe)) {
+		err.typeMismatch (rhs1, sym.info) //tpt1.tpe)
+	}
+	/*else incompatibleAutoMutabilityTypes(sym.info) match {
+		case Some((annot, expected_mut)) =>
+			val found_mut = getAnnotationMutability(annot)
+			ctx.error(
+				s"Incompatible mutability annotation on ${sym.name}.\n" +
+				s" found: $found_mut\n" +
+				s" expected: $expected_mut", annot.tree.pos)
+			//ctx.error(s"Incompatible mutability annotation on ${sym.name}", annot.tree.pos)
+		case None =>
+	}*/
+	/*else {
+		val mut_sym = getSimpleMutability(sym.info)
+		val mut_tpt = getSimpleMutability(tpt1.tpe)
+		if (!simpleSubtype(mut_tpt, mut_sym))
+			ctx.error(s"Incompatible mutability annotation on ${sym.name}.\n" +
+				s" Found: ${mut_sym}\n Expected: ${mut_tpt}", sym.pos)
+	}*/
+	
+	/*
 	if (!mutabilitySubtype(rhs1.tpe, tpt1.tpe)) {
 		err.typeMismatch (rhs1, tpt1.tpe)
 	}
 	else incompatibleAutoMutabilityTypes(sym.info) match {
+	//else incompatibleAutoMutabilityTypes(sym.info) match {
 		case Some(annot) =>
-			ctx.error(s"Incompatible mutability annotation on ${sym.name}", annot.tree.pos)
+			ctx.error(s"""Incompatible mutability annotation on ${sym.name}.
+				| found: ${annot}
+				| expected: """ + getSimpleMutability(tpt1.tpe), annot.tree.pos)
+			//ctx.error(s"Incompatible mutability annotation on ${sym.name}", annot.tree.pos)
 		case None =>
-	}
+	}*/
   
 	assignType(cpy.ValDef(vdef, mods1, name, tpt1, rhs1), sym)
   }
@@ -819,6 +845,22 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
     if (sym is Implicit) checkImplicitParamsNotSingletons(vparamss1)
     val tpt1 = typedType(tpt)
     val rhs1 = typedExpr(rhs, tpt1.tpe)
+	
+	if (!mutabilitySubtype(rhs1.tpe, sym.info.finalResultType)) { //tpt1.tpe)) {
+		err.typeMismatch (rhs1, sym.info.finalResultType) //tpt1.tpe)
+	}
+	//if (!mutabilitySubtype(rhs1.tpe, tpt1.tpe)) {
+	//	err.typeMismatch (rhs1, tpt1.tpe)
+	//}
+	/*else incompatibleAutoMutabilityTypes(sym.info) match {
+		case Some(annot) =>
+			ctx.error(s"Incompatible mutability annotation on ${sym.name}.\n" +	
+				s" found: " + getSimpleMutability(sym.info) + "\n" +
+				s" expected: ${annot}", annot.tree.pos)
+		case None =>
+	}*/
+	
+	//println(s"${sym.name}: "+tpt1.tpe+" / "+sym.info)
 	
     val newTree = assignType(cpy.DefDef(ddef, mods1, name, tparams1, vparamss1, tpt1, rhs1), sym)
     //todo: make sure dependent method types do not depend on implicits or by-name params
