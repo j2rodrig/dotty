@@ -9,6 +9,7 @@ SCALA_BINARY_VERSION=2.11
 DOTTY_VERSION=0.1
 bootcp=true
 default_java_opts="-Xmx768m -Xms768m"
+SCALA_LIBRARY_JAR=$SCALA_HOME/lib/scala-library  # change location of library classpath
 programName=$(basename "$0")
 # uncomment next line to enable debug output
 #debug=true
@@ -53,7 +54,7 @@ checkjar $MAIN_JAR package
 
 # Autodetecting the scala-library location, in case it wasn't provided by an environment variable
 if [ "$SCALA_LIBRARY_JAR" == "" ]
-then  
+then
   SCALA_LIBRARY_JAR=$HOME/.ivy2/cache/org.scala-lang/scala-library/jars/scala-library-$SCALA_VERSION.jar
   # this is location where sbt stores it in ivy cache
 fi
@@ -63,12 +64,12 @@ then
   SCALA_REFLECT_JAR=$HOME/.ivy2/cache/org.scala-lang/scala-reflect/jars/scala-reflect-$SCALA_VERSION.jar
 fi
 
-if [ ! -f "$SCALA_LIBRARY_JAR" -o ! -f "$SCALA_REFLECT_JAR" ]
-then
-  echo To use this script please set 
-  echo SCALA_LIBRARY_JAR to point to scala-library-$SCALA_VERSION.jar "(currently $SCALA_LIBRARY_JAR)"
-  echo SCALA_REFLECT_JAR to point to scala-reflect-$SCALA_VERSION.jar "(currently $SCALA_REFLECT_JAR)"
-fi
+#if [ ! -f "$SCALA_LIBRARY_JAR" -o ! -f "$SCALA_REFLECT_JAR" ]
+#then
+#  echo To use this script please set 
+#  echo SCALA_LIBRARY_JAR to point to scala-library-$SCALA_VERSION.jar "(currently $SCALA_LIBRARY_JAR)"
+#  echo SCALA_REFLECT_JAR to point to scala-reflect-$SCALA_VERSION.jar "(currently $SCALA_REFLECT_JAR)"
+#fi
 
 ifdebug () {
   [[ -n $debug ]] && eval "$@"

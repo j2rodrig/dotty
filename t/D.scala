@@ -1,10 +1,12 @@
-package test
+//package test
 
-import annotation.{StaticAnnotation, TypeConstraint}
+import annotation._
 
-class readonly extends TypeConstraint {}
-class polyread extends TypeConstraint {}
-class mutable extends TypeConstraint {}
+//import annotation.{StaticAnnotation, TypeConstraint}
+
+//class readonly extends TypeConstraint {}
+//class polyread extends TypeConstraint {}
+//class mutable extends TypeConstraint {}
 
 //class readonly(args: Any*) extends StaticAnnotation with TypeConstraint {}
 //class polyread(args: Any*) extends StaticAnnotation with TypeConstraint {}
@@ -15,7 +17,6 @@ object D {}
 
 trait C {
 	var ro: AnyRef @readonly
-	var pr: AnyRef @polyread
 	var mu: AnyRef @mutable
 	
 	@readonly var ro2: AnyRef
@@ -39,14 +40,11 @@ RefinedType(
 		ConcreteAnnotation(Apply(Select(New(Ident(mutable)),<init>),List())),
 		TypeRef(TermRef(ThisType(module class <root>),scala),AnyRef))))*/
 
-	def m1() = {
+	def m1(pr: AnyRef @polyread) = {
 		// Basic Annotations
 		ro = ro
 		ro = pr
 		ro = mu
-		pr = ro   // should error
-		pr = pr
-		pr = mu
 		mu = ro   // should error
 		mu = pr   // should error
 		mu = mu
@@ -64,12 +62,18 @@ RefinedType(
 		var mu3 = mu
 		var pr3 = pr
 		var ro3 = ro
+		mu3 = pr3   // should error
+		pr3 = ro3
+		ro3 = pr3
 		@mutable var mPre1 = mu
 		@mutable var mPre2 = pr  // should error
 		@mutable var mPre3 = ro  // should error
-		@polyread var pPre1 = mu
-		@polyread var pPre2 = pr
+		@polyread var pPre1 = mu  // should error
+		@polyread var pPre2 = pr  // should error
 		@polyread var pPre3 = ro  // should error
+		var ptPre1: AnyRef @polyread = mu  // should error (or silently convert to readonly)
+		var ptPre2: AnyRef @polyread = pr  // should error (or silently convert to readonly)
+		var ptPre3: AnyRef @polyread = ro  // should error (or silently convert to readonly)
 		@readonly var rPre1 = mu
 		@readonly var rPre2 = pr
 		@readonly var rPre3 = ro

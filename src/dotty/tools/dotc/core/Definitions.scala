@@ -281,6 +281,12 @@ class Definitions {
   lazy val TransientAnnot                = ctx.requiredClass("scala.transient")
   lazy val NativeAnnot                   = ctx.requiredClass("scala.native")
   lazy val ScalaStrictFPAnnot            = ctx.requiredClass("scala.annotation.strictfp")
+  
+  lazy val ReadonlyClass = ctx.requiredClass("scala.annotation.readonly")
+  lazy val MinpolyreadClass = ctx.requiredClass("scala.annotation.minpolyread")
+  lazy val PolyreadClass = ctx.requiredClass("scala.annotation.polyread")
+  lazy val MutableClass = ctx.requiredClass("scala.annotation.mutable")
+  
 
   // Annotation classes
   lazy val AliasAnnot = ctx.requiredClass("dotty.annotation.internal.Alias")

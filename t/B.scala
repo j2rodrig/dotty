@@ -1,7 +1,16 @@
 //package test
 
+import annotation._
+
 //import scala.annotation.Annotation
 //class READONLY extends Annotation {}
+
+/*import annotation.{StaticAnnotation, TypeConstraint}
+
+class readonly extends TypeConstraint {}
+class polyread extends TypeConstraint {}
+class mutable extends TypeConstraint {}*/
+
 
 package P.Q {
 	object v { var m = null }
@@ -48,10 +57,21 @@ package P.Q {
 				
 				val arr = new Array[Int](5)
 				arr(0) = 2
+				
+				def __f(): (() => Unit) @readonly = { () => }
 			}
 		}
 	}
 }
+
+
+// def __f(): (() => Unit) @readonly = { () => }   // OK: wrapping a function type in an annotation
+/*DefDef(Modifiers(<method>,,List()),__f,List(),List(List()),
+	Annotated(
+		Apply(Select(New(Ident(readonly)),<init>),List()),
+		AppliedTypeTree(TypeTree[TypeRef(ThisType(module class scala),Function0)],List(Ident(Unit)))),
+	Block(List(),Block(List(DefDef(Modifiers(<synthetic>,,List()),$anonfun,List(),List(List()),TypeTree[TypeRef(ThisType(module class
+scala),Unit)],Block(List(),Literal(Constant(()))))),Closure(List(),Ident($anonfun),EmptyTree))))),Literal(Constant(())))))))))))))*/
 
 // vars have a modifier "mutable"
 

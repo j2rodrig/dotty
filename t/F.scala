@@ -1,3 +1,8 @@
+import annotation.{StaticAnnotation, TypeConstraint}
+
+class readonly extends TypeConstraint {}
+class polyread extends TypeConstraint {}
+class mutable extends TypeConstraint {}
 
 trait F {
 
@@ -12,5 +17,5 @@ trait F {
 		
 		def n2: List[Int] = n
 	}
-
+	
 }

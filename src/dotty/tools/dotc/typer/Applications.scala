@@ -350,10 +350,46 @@ trait Applications extends Compatibility { self: Typer =>
     private var typedArgBuf = new mutable.ListBuffer[Tree]
     private var liftedDefs: mutable.ListBuffer[Tree] = null
     private var myNormalizedFun: Tree = fun
+	private[dotc] var resultModifier: Mutability.SimpleMutability = Mutability.unannotated() /*methType match {
+		case mt: MethodType => Mutability.unannotated()  //mt.resultModifier
+		case _: ErrorType => Mutability.errortype()
+	}*/
     init()
+	
+	//println(s"METHOD TYPE in Application: ${methType.show}")
+	//println(s"RETURN TYPE in Application: ${methodType.finalResultType.show}")
+	//if (methType.isInstanceOf[MethodType]) resultModifier = methodType.resultModifier
 
-    def addArg(arg: Tree, formal: Type): Unit =
-      typedArgBuf += adaptInterpolated(arg, formal.widenExpr, EmptyTree)
+    def addArg(arg: Tree, formal: Type): Unit = {
+      //typedArgBuf += adaptInterpolated(arg, formal.widenExpr, EmptyTree)
+	  val adaptedArg = adaptInterpolated(arg, formal.widenExpr, EmptyTree)
+	  typedArgBuf += adaptedArg
+	  // For each arg: adaptation applied is @readonly if argument is a non-parameter @polyread
+	  if (Mutability.getSimpleMutability(formal.widenExpr).isPolyread) {
+        var argTmt = Mutability.getSimpleMutability(adaptedArg.tpe)
+	    adaptedArg.tpe match {
+		  case named: NamedType =>
+	        //println(s"""Argument "${named.symbol.name}", flags ${named.symbol.denot.flags}""")
+		    if (!Mutability.isParameter(named.symbol) && argTmt.isInstanceOf[Mutability.polyread])
+		      argTmt = Mutability.readonly()
+		}
+	    resultModifier = Mutability.lub(resultModifier, argTmt)
+	    //argType.denot.alternatives.foreach { d =>
+		//}
+		/*d match {
+		  case d: SymDenotation => //d.flags
+		    println(s"Argument \"${d.symbol.name}\", flags ${d.flags}")
+			var argTmt = Mutability.getSimpleMutability(adaptedArg.tpe)
+			//if (!d.flags.is(Param) && argTmt.isInstaceOf[Mutability.polyread])
+			if (Mutability.isParameter(d.) && argTmt.isInstaceOf[Mutability.polyread])
+			  argTmt = Mutability.readonly()
+			resultModifier = Mutability.lub(resultModifier, argTmt)
+		  case _ => println(s"UNEXPECTED SINGLE DENOTATION")
+		}*/
+	  }
+      //Mutability.getSimpleMutability(adaptedArg.tpe)
+      //resultModifier = Mutability.lub(resultModifier, )
+	}
 
     def makeVarArg(n: Int, elemFormal: Type): Unit = {
       val args = typedArgBuf.takeRight(n).toList
@@ -458,7 +494,14 @@ trait Applications extends Compatibility { self: Typer =>
             val app =
               if (proto.argsAreTyped) new ApplyToTyped(tree, fun1, funRef, proto.typedArgs, pt)
               else new ApplyToUntyped(tree, fun1, funRef, proto, pt)
-            val result = app.result
+            //val result = app.result
+			//val result = app.modifiedResult
+			val result = app.result withType Mutability.modifiedResultType(app.result.tpe, app.resultModifier)
+			//println(s"\nApp result type: ${app.result.tpe.show} with mod ${app.resultModifier} -> ${result.tpe.show}\n")
+			//println ("   Result type: " + result.tpe)
+			//println ("   Result type shown: " + result.tpe.show)
+			//println ("   Result type with underlying: " + result.tpe.showWithUnderlying(10))
+			//println("\n")
             ConstFold(result)
           } { (failedVal, failedState) =>
             val fun2 = tryInsertImplicitOnQualifier(fun1, proto)

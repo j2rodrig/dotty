@@ -85,33 +85,9 @@ object SymDenotations {
 	 *    as type annotations. Tagged as AutoType so that the consistency
 	 *    of the type annotations can be checked where needed.
 	 */
-	def infoWithAutoTypes(implicit ctx: Context): Type = {
-		var inf = myInfo
-		myAnnotations.foreach { annot =>
-			if (Mutability.getAnnotationMutability(annot).isAnnotated) inf match {
-				case mt: MethodType => inf = addToResultType(annot, mt)
-				case _ => inf = addToOrdinaryType(annot, inf)
-			}
-		}
-		inf
-	}
-	private[this] def addToResultType(annot: Annotation, mt: MethodType)(implicit ctx: Context): MethodType = {
-		mt.resultType match {
-			case rt: MethodType => addToResultType(annot, rt)
-			case _ => mt.resultType_ = addToOrdinaryType(annot, mt.resultType_)
-		}
-		mt
-	}
-	private[this] def addToOrdinaryType(annot: Annotation, t: Type)(implicit ctx: Context): Type =
-		t match {
-			// If the given annotation overrides the next annotation down, then
-			// remove the next annotation from the returned type. (Helps reduce unnecessary annotations.)
-			case t @ AnnotatedType(annot2, tpe) if (Mutability.overridesAnnotation(annot, annot2)) =>
-				new AnnotatedType(annot, t.underlying) with AutoType
-			case _ =>
-				new AnnotatedType(annot, t) with AutoType
-		}
-
+	//def infoWithAutoTypes(implicit ctx: Context): Type =
+	//	Mutability.addAnnotations(myInfo, myAnnotations)
+	
     /** The owner of the symbol; overridden in NoDenotation */
     def owner: Symbol = ownerIfExists
 
@@ -166,7 +142,7 @@ object SymDenotations {
      */
     final def info(implicit ctx: Context): Type = myInfo match {
       case myInfo: LazyType => completeFrom(myInfo); info
-      case _ => infoWithAutoTypes
+      case _ => myInfo  // infoWithAutoTypes
     }
 
     /** The type info, or, if symbol is not yet completed, the completer */

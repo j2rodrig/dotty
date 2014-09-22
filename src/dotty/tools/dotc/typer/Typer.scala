@@ -274,7 +274,9 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
   def typedSelect(tree: untpd.Select, pt: Type)(implicit ctx: Context): Tree = track("typedSelect") {
     val qual1 = typedExpr(tree.qualifier, selectionProto(tree.name, pt, this))
     if (tree.name.isTypeName) checkStable(qual1.tpe, qual1.pos)
-    checkValue(assignType(cpy.Select(tree, qual1, tree.name), qual1), pt)
+    //val finalTree = 
+	checkValue(assignType(cpy.Select(tree, qual1, tree.name), qual1), pt)
+	//finalTree withType Mutability.viewpointAdapt(qual1.tpe, finalTree.tpe)
   }
 
   def typedSelectFromTypeTree(tree: untpd.SelectFromTypeTree, pt: Type)(implicit ctx: Context): SelectFromTypeTree = track("typedSelectFromTypeTree") {
@@ -368,8 +370,18 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
           case ref: TermRef if ref.symbol is (Mutable, butNot = Accessor) =>
 		    val rhs1 = typed(tree.rhs, ref.info)
 		  
+			// Make sure the prefix is not readonly.
+			Mutability.getSimpleMutability(ref.prefix) match {
+				case Mutability.readonly() =>
+					typer.ErrorReporting.errorTree(lhs1, s"Field ${ref.name} cannot be written through a @readonly reference")
+				case Mutability.minpolyread() => ctx.error(s"Unexpected minpolyread mutability in assignment")
+				case Mutability.polyread() =>
+					typer.ErrorReporting.errorTree(lhs1, s"Field ${ref.name} cannot be written through a @polyread reference")
+				case _ => // do nothing
+			}
+		  
 			if (!mutabilitySubtype(rhs1.tpe, lhs1.tpe)) {
-				err.typeMismatch (rhs1, lhs1.tpe)
+				Mutability.tmtMismatch (rhs1, lhs1.tpe)
 			}
 		  
             assignType(cpy.Assign(tree, lhs1, rhs1))
@@ -467,10 +479,13 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
       val params = args.asInstanceOf[List[untpd.ValDef]]
       val (protoFormals, protoResult): (List[Type], Type) = pt match {
         case _ if defn.isFunctionType(pt) =>
-          (pt.dealias.argInfos.init, pt.dealias.argInfos.last)
+          (pt.dealias.argInfos.init, pt.dealias.argInfos.last)   // TODO: augment argInfos.last with mutation adapataions
         case SAMType(meth) =>
           val mt @ MethodType(_, paramTypes) = meth.info
-          (paramTypes, mt.resultType)
+		  //println(s"CREATING CLOSURE FOR METHODTYPE.\n    Modified result type: ${Mutability.getSimpleMutability(mt.modifiedResultType)}")
+		  
+          (paramTypes, mt.resultType)   // TODO: augment result type with mutation adapataions
+		  //(paramTypes, mt.modifiedResultType)
         case _ =>
           (params map alwaysWildcardType, WildcardType)
       }
@@ -799,40 +814,31 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
       case _ => typedExpr(rhs, tpt1.tpe)
     }
 	
-	if (!mutabilitySubtype(rhs1.tpe, sym.info)) { //tpt1.tpe)) {
-		err.typeMismatch (rhs1, sym.info) //tpt1.tpe)
-	}
-	/*else incompatibleAutoMutabilityTypes(sym.info) match {
-		case Some((annot, expected_mut)) =>
-			val found_mut = getAnnotationMutability(annot)
-			ctx.error(
-				s"Incompatible mutability annotation on ${sym.name}.\n" +
-				s" found: $found_mut\n" +
-				s" expected: $expected_mut", annot.tree.pos)
-			//ctx.error(s"Incompatible mutability annotation on ${sym.name}", annot.tree.pos)
-		case None =>
-	}*/
-	/*else {
-		val mut_sym = getSimpleMutability(sym.info)
-		val mut_tpt = getSimpleMutability(tpt1.tpe)
-		if (!simpleSubtype(mut_tpt, mut_sym))
-			ctx.error(s"Incompatible mutability annotation on ${sym.name}.\n" +
-				s" Found: ${mut_sym}\n Expected: ${mut_tpt}", sym.pos)
-	}*/
+	// Add mutability annotations on sym to sym's type.
+	// Allows expressions like `@readonly val x = y`.
+	sym.denot.info = Mutability.addAnnotations(sym.denot.info, sym.denot.annotations)
 	
-	/*
-	if (!mutabilitySubtype(rhs1.tpe, tpt1.tpe)) {
-		err.typeMismatch (rhs1, tpt1.tpe)
+	// If the symbol is not a parameter, but has a polyread type, convert it to @readonly.
+	if (!Mutability.isParameter(sym) && Mutability.getSimpleMutability(sym.info).isPolyread) {
+	
+		sym.denot.info = Mutability.withSimpleMutability(sym.denot.info, Mutability.readonly())
+		
+		// Tell the programmer if @polyread was placed on the symbol.
+		if (sym.denot.hasAnnotation(ctx.definitions.PolyreadClass))
+			ctx.error(s"Only method parameters and return types can be declared @polyread", vdef.pos)
+
+		// Tell the programmer if @polyread was placed on the symbol's type.
+		// (but only issue the error if the type was not inferred from the right-hand-side.)
+		else if (rhs.isEmpty && Mutability.explicitSimpleMutability(tpt1.tpe).isPolyread)
+			ctx.error(s"Only method parameters and return types can be declared @polyread", tpt1.pos)
+	
 	}
-	else incompatibleAutoMutabilityTypes(sym.info) match {
-	//else incompatibleAutoMutabilityTypes(sym.info) match {
-		case Some(annot) =>
-			ctx.error(s"""Incompatible mutability annotation on ${sym.name}.
-				| found: ${annot}
-				| expected: """ + getSimpleMutability(tpt1.tpe), annot.tree.pos)
-			//ctx.error(s"Incompatible mutability annotation on ${sym.name}", annot.tree.pos)
-		case None =>
-	}*/
+	
+	//println(s" ${sym.name}: ${sym.info.show}")
+	
+	if (!mutabilitySubtype(rhs1.tpe, sym.info)) {
+		Mutability.tmtMismatch(rhs1, sym.info)
+	}
   
 	assignType(cpy.ValDef(vdef, mods1, name, tpt1, rhs1), sym)
   }
@@ -846,28 +852,17 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
     val tpt1 = typedType(tpt)
     val rhs1 = typedExpr(rhs, tpt1.tpe)
 	
-	if (!mutabilitySubtype(rhs1.tpe, sym.info.finalResultType)) { //tpt1.tpe)) {
-		err.typeMismatch (rhs1, sym.info.finalResultType) //tpt1.tpe)
+	sym.denot.info = Mutability.addAnnotations(sym.denot.info, sym.denot.annotations)
+	
+	if (!mutabilitySubtype(rhs1.tpe, sym.info.finalResultType)) {
+		tmtMismatch(rhs1, sym.info.finalResultType)
 	}
-	//if (!mutabilitySubtype(rhs1.tpe, tpt1.tpe)) {
-	//	err.typeMismatch (rhs1, tpt1.tpe)
-	//}
-	/*else incompatibleAutoMutabilityTypes(sym.info) match {
-		case Some(annot) =>
-			ctx.error(s"Incompatible mutability annotation on ${sym.name}.\n" +	
-				s" found: " + getSimpleMutability(sym.info) + "\n" +
-				s" expected: ${annot}", annot.tree.pos)
-		case None =>
-	}*/
 	
-	//println(s"${sym.name}: "+tpt1.tpe+" / "+sym.info)
+	//println(s" ${sym.name}: ${sym.info.show}")
 	
-    val newTree = assignType(cpy.DefDef(ddef, mods1, name, tparams1, vparamss1, tpt1, rhs1), sym)
+    assignType(cpy.DefDef(ddef, mods1, name, tparams1, vparamss1, tpt1, rhs1), sym)
     //todo: make sure dependent method types do not depend on implicits or by-name params
 	
-	
-	
-	newTree
   }
 
   def typedTypeDef(tdef: untpd.TypeDef, sym: Symbol)(implicit ctx: Context): Tree = track("typedTypeDef") {

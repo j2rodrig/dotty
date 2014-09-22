@@ -166,15 +166,30 @@ trait TypeAssigner {
 
   /** Type assignment method. Each method takes as parameters
    *   - an untpd.Tree to which it assigns a type,
-   *   - typed child trees it needs to access to cpmpute that type,
+   *   - typed child trees it needs to access to compute that type,
    *   - any further information it needs to access to compute that type.
    */
 
   def assignType(tree: untpd.Ident, tp: Type)(implicit ctx: Context) =
     tree.withType(tp)
 
-  def assignType(tree: untpd.Select, qual: Tree)(implicit ctx: Context) =
+  def assignType(tree: untpd.Select, qual: Tree)(implicit ctx: Context): tpd.Select = {
+	//println(s"QUAL: ${Mutability.getSimpleMutability(qual.tpe)}  SELECTION(${tree.name}): ${Mutability.getSimpleMutability(accessibleSelectionType(tree, qual))}")
+	//println(accessibleSelectionType(tree, qual))
+	
+	//val qualTmt = Mutability.getSimpleMutability(qual.tpe)
+	//val selectedTmt = Mutability.getSimpleMutability(accessibleSelectionType(tree, qual))
+	//val adaptedTmt = Mutability.viewpointAdapt(qualTmt, selectedTmt)
+    //tree.withType(Mutability.withSimpleMutability(accessibleSelectionType(tree, qual), adaptedTmt))
+	
+    /*val finalType = accessibleSelectionType(tree, qual)
+    val qualMut = Mutability.getSimpleMutability(qual.tpe.widenIfUnstable)
+	val unadaptedMut = Mutability.getSimpleMutability(finalType)
+	val adaptedMut = Mutability.viewpointAdapt(qualMut, unadaptedMut)
+	println(s"${Mutability.withSimpleMutability(finalType,adaptedMut).show} -- from ${qualMut} . ${unadaptedMut}")
+	tree.withType(Mutability.withSimpleMutability(finalType,adaptedMut))*/
     tree.withType(accessibleSelectionType(tree, qual))
+  }
 
   def assignType(tree: untpd.SelectFromTypeTree, qual: Tree)(implicit ctx: Context) =
     tree.withType(accessibleSelectionType(tree, qual))
@@ -256,8 +271,15 @@ trait TypeAssigner {
   def assignType(tree: untpd.If, thenp: Tree, elsep: Tree)(implicit ctx: Context) =
     tree.withType(thenp.tpe | elsep.tpe)
 
-  def assignType(tree: untpd.Closure, meth: Tree, target: Tree)(implicit ctx: Context) =
-    tree.withType(if (target.isEmpty) meth.tpe.widen.toFunctionType else target.tpe)
+  def assignType(tree: untpd.Closure, meth: Tree, target: Tree)(implicit ctx: Context) = {
+    //println(s"Method result passed to closure: ${meth.tpe.widen.asInstanceOf[MethodType].resultModifier}")
+    val methodType = Mutability.copyMethodWithModifiedResult(meth.tpe.widen, meth.tpe.widen.asInstanceOf[MethodType].resultModifier)
+    var funType = if (target.isEmpty) methodType.toFunctionType else target.tpe
+    //var funType = if (target.isEmpty) meth.tpe.widen.toFunctionType else target.tpe
+	//tree.env.foreach { argTree => println(s"Closure arg: ${argTree.tpe}") }
+	//println(s"   on function type: $funType\n")
+    tree.withType(funType)
+  }
 
   def assignType(tree: untpd.CaseDef, body: Tree)(implicit ctx: Context) =
     tree.withType(body.tpe)

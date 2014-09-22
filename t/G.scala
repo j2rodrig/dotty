@@ -36,4 +36,21 @@ trait G {
 	def dd1()(): AnyRef = d1()         // should error
 	def dd10()(): AnyRef @polyread = e10()   // should error
 	def dd11()(): AnyRef @readonly = e11()
+	
+	def multid(a: AnyRef @polyread)(b: AnyRef @polyread): AnyRef @polyread = b
+	mu = multid(mu)(mu)
+	
+	def __f(): (() => Unit) @readonly = { () => }
+	def __g(a: AnyRef)(b: AnyRef): Unit = { }
+	val _g2 = __g
+	val __g2 = _g2(mu) _
+	__g2(mu)
+	/* Type of __f:
+	MethodType(List(), List(),
+		AnnotatedType(
+			ConcreteAnnotation(Apply(Select(New(Ident(readonly)),<init>),List())),
+			RefinedType(TypeRef(ThisType(module class scala),Function0), scala$Function0$$R,
+				CoTypeAlias(TypeRef(TermRef(ThisType(module class <root>),scala),Unit)))))*/
+	/* Type of __g:
+	MethodType(List(), List(), MethodType(List(), List(), TypeRef(TermRef(ThisType(module class <root>),scala),Unit)))*/
 }
