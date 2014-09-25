@@ -174,17 +174,17 @@ trait TypeAssigner {
     tree.withType(tp)
 
   def assignType(tree: untpd.Select, qual: Tree)(implicit ctx: Context): tpd.Select = {
-	//println(s"QUAL: ${Mutability.getSimpleMutability(qual.tpe)}  SELECTION(${tree.name}): ${Mutability.getSimpleMutability(accessibleSelectionType(tree, qual))}")
+	//println(s"QUAL: ${Mutability.tmt(qual.tpe)}  SELECTION(${tree.name}): ${Mutability.tmt(accessibleSelectionType(tree, qual))}")
 	//println(accessibleSelectionType(tree, qual))
 	
-	//val qualTmt = Mutability.getSimpleMutability(qual.tpe)
-	//val selectedTmt = Mutability.getSimpleMutability(accessibleSelectionType(tree, qual))
+	//val qualTmt = Mutability.tmt(qual.tpe)
+	//val selectedTmt = Mutability.tmt(accessibleSelectionType(tree, qual))
 	//val adaptedTmt = Mutability.viewpointAdapt(qualTmt, selectedTmt)
     //tree.withType(Mutability.withSimpleMutability(accessibleSelectionType(tree, qual), adaptedTmt))
 	
     /*val finalType = accessibleSelectionType(tree, qual)
-    val qualMut = Mutability.getSimpleMutability(qual.tpe.widenIfUnstable)
-	val unadaptedMut = Mutability.getSimpleMutability(finalType)
+    val qualMut = Mutability.tmt(qual.tpe.widenIfUnstable)
+	val unadaptedMut = Mutability.tmt(finalType)
 	val adaptedMut = Mutability.viewpointAdapt(qualMut, unadaptedMut)
 	println(s"${Mutability.withSimpleMutability(finalType,adaptedMut).show} -- from ${qualMut} . ${unadaptedMut}")
 	tree.withType(Mutability.withSimpleMutability(finalType,adaptedMut))*/

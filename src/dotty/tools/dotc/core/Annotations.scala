@@ -2,6 +2,7 @@ package dotty.tools.dotc
 package core
 
 import Symbols._, Types._, util.Positions._, Contexts._, Constants._, ast.tpd._
+import printing.Texts.Text
 
 object Annotations {
 
@@ -15,6 +16,8 @@ object Annotations {
 
     def derivedAnnotation(tree: Tree)(implicit ctx: Context) =
       if (tree eq this.tree) this else Annotation(tree)
+	  
+	def toText(implicit ctx: Context): Text = s"@${symbol.name}"
   }
 
   case class ConcreteAnnotation(t: Tree) extends Annotation {

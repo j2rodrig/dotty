@@ -31,8 +31,6 @@ import util.Stats.{track, record}
 import config.Printers._
 import language.implicitConversions
 
-import Mutability._
-
 trait TyperContextOps { ctx: Context => }
 
 object Typer {
@@ -371,16 +369,16 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
 		    val rhs1 = typed(tree.rhs, ref.info)
 		  
 			// Make sure the prefix is not readonly.
-			Mutability.getSimpleMutability(ref.prefix) match {
-				case Mutability.readonly() =>
+			Mutability.tmt(ref.prefix) match {
+				case Mutability.Readonly() =>
 					typer.ErrorReporting.errorTree(lhs1, s"Field ${ref.name} cannot be written through a @readonly reference")
 				case Mutability.minpolyread() => ctx.error(s"Unexpected minpolyread mutability in assignment")
-				case Mutability.polyread() =>
+				case Mutability.Polyread() =>
 					typer.ErrorReporting.errorTree(lhs1, s"Field ${ref.name} cannot be written through a @polyread reference")
 				case _ => // do nothing
 			}
 		  
-			if (!mutabilitySubtype(rhs1.tpe, lhs1.tpe)) {
+			if (!Mutability.mutabilitySubtype(rhs1.tpe, lhs1.tpe)) {
 				Mutability.tmtMismatch (rhs1, lhs1.tpe)
 			}
 		  
@@ -482,7 +480,7 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
           (pt.dealias.argInfos.init, pt.dealias.argInfos.last)   // TODO: augment argInfos.last with mutation adapataions
         case SAMType(meth) =>
           val mt @ MethodType(_, paramTypes) = meth.info
-		  //println(s"CREATING CLOSURE FOR METHODTYPE.\n    Modified result type: ${Mutability.getSimpleMutability(mt.modifiedResultType)}")
+		  //println(s"CREATING CLOSURE FOR METHODTYPE.\n    Modified result type: ${Mutability.tmt(mt.modifiedResultType)}")
 		  
           (paramTypes, mt.resultType)   // TODO: augment result type with mutation adapataions
 		  //(paramTypes, mt.modifiedResultType)
@@ -814,14 +812,40 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
       case _ => typedExpr(rhs, tpt1.tpe)
     }
 	
+	import Mutability._
+	
 	// Add mutability annotations on sym to sym's type.
 	// Allows expressions like `@readonly val x = y`.
-	sym.denot.info = Mutability.addAnnotations(sym.denot.info, sym.denot.annotations)
+	sym.denot.annotations.foreach { annot =>
+		val tmtAnnot = tmt(annot)
+		if (tmtAnnot.exists)
+			sym.denot.info = withResultTmt(sym.denot.info, tmtAnnot)
+	}
+	//sym.denot.info = Mutability.addAnnotations(sym.denot.info, sym.denot.annotations)
+	
+	// If the symbol is a parameter and has a polyread type, then set its origin to the owning method.
+	val tmtVal = tmt(sym.denot.info)
+	if (tmtVal.isPolyread && sym.denot.flags.is(Param))
+		//sym.denot.info = addAnnotation(sym.denot.info, toAnnot(tmtVal withOrigin sym.denot.owner))
+		sym.denot.info = withResultTmt(sym.denot.info, tmtVal withOrigin sym.denot.owner)
+
+	// If the symbol is not a parameter but has a polyread type, then set a default origin.
+	if (tmtVal.isPolyread && !sym.denot.flags.is(Param)) {
+		val defaultOrigin =
+			if (tmt(rhs1.tpe).isPolyread) tmt(rhs1.tpe).origin  // does the RHS have an origin?
+			else sym.denot.owner  // otherwise, use the owning method/class as the origin.
+		sym.denot.info = withResultTmt(sym.denot.info, tmtVal withOrigin defaultOrigin)
+	}
+
+	//if (Mutability.isParameter(sym) && Mutability.tmt(sym.info).isPolyread) {
+
+	//	sym.denot.info = Mutability.assignOrigin(sym.denot.info, sym)
+	//}
 	
 	// If the symbol is not a parameter, but has a polyread type, convert it to @readonly.
-	if (!Mutability.isParameter(sym) && Mutability.getSimpleMutability(sym.info).isPolyread) {
+	/*if (!Mutability.isParameter(sym) && Mutability.tmt(sym.info).isPolyread) {
 	
-		sym.denot.info = Mutability.withSimpleMutability(sym.denot.info, Mutability.readonly())
+		sym.denot.info = Mutability.withSimpleMutability(sym.denot.info, Mutability.Readonly())
 		
 		// Tell the programmer if @polyread was placed on the symbol.
 		if (sym.denot.hasAnnotation(ctx.definitions.PolyreadClass))
@@ -832,11 +856,11 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
 		else if (rhs.isEmpty && Mutability.explicitSimpleMutability(tpt1.tpe).isPolyread)
 			ctx.error(s"Only method parameters and return types can be declared @polyread", tpt1.pos)
 	
-	}
+	}*/
 	
-	//println(s" ${sym.name}: ${sym.info.show}")
+	println(s"$sym: ${sym.info.show}")
 	
-	if (!mutabilitySubtype(rhs1.tpe, sym.info)) {
+	if (!Mutability.mutabilitySubtype(rhs1.tpe, sym.info)) {
 		Mutability.tmtMismatch(rhs1, sym.info)
 	}
   
@@ -852,13 +876,25 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
     val tpt1 = typedType(tpt)
     val rhs1 = typedExpr(rhs, tpt1.tpe)
 	
-	sym.denot.info = Mutability.addAnnotations(sym.denot.info, sym.denot.annotations)
+	import Mutability._
 	
-	if (!mutabilitySubtype(rhs1.tpe, sym.info.finalResultType)) {
-		tmtMismatch(rhs1, sym.info.finalResultType)
+	sym.denot.annotations.foreach { annot =>
+		val tmtAnnot = tmt(annot)
+		if (tmtAnnot.exists)
+			sym.denot.info = withResultTmt(sym.denot.info, tmtAnnot)
+	}
+	//sym.denot.info = addAnnotations(sym.denot.info, sym.denot.annotations)
+	
+	val tmtFinal = tmt(sym.info.finalResultType)
+	if (tmtFinal.isPolyread)
+		//sym.denot.info = addAnnotation(sym.denot.info, toAnnot(tmtFinal withOrigin sym))
+		sym.denot.info = withResultTmt(sym.denot.info, tmtFinal withOrigin sym)
+	
+	if (!Mutability.mutabilitySubtype(rhs1.tpe, sym.info.finalResultType)) {
+		Mutability.tmtMismatch(rhs1, sym.info.finalResultType)
 	}
 	
-	//println(s" ${sym.name}: ${sym.info.show}")
+	println(s"$sym: ${sym.info.show}")
 	
     assignType(cpy.DefDef(ddef, mods1, name, tparams1, vparamss1, tpt1, rhs1), sym)
     //todo: make sure dependent method types do not depend on implicits or by-name params

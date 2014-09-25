@@ -130,8 +130,7 @@ object TransitiveMutabilityTypes {
 		case TermRef(prefix, name) => denot  // temp
 	}
 
-	class TmtAnnotation(tree: Tree, val tmt: Tmt)
-		extends ConcreteAnnotation(tree) { }
+	class TmtAnnotation(tree: Tree, val tmt: Tmt) extends ConcreteAnnotation(tree) { }
 
 	def toAnnotation(tmt: Tmt)(implicit ctx: Context): Annotation =
 		new TmtAnnotation(

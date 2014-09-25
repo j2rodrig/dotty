@@ -368,7 +368,7 @@ class PlainPrinter(_ctx: Context) extends Printer {
     case _ => String.valueOf(const.value)
   }
 
-  def toText(annot: Annotation): Text = s"@${annot.symbol.name}" // for now
+  def toText(annot: Annotation): Text = annot.toText  //s"@${annot.symbol.name}" // for now
 
   protected def escapedString(str: String): String = str flatMap escapedChar
 

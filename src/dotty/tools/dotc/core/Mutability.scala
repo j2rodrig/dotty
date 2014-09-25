@@ -18,6 +18,7 @@ import Decorators._
 import Denotations._
 import Periods._
 import Types._
+import printing.Texts.Text
 
 object Mutability {
 
@@ -97,132 +98,320 @@ Solution alternative 3: 1) Create mutability type for methods.
 	3) Include "as-viewed-from" on the closure.
 	4) ...
 
+Solution alternative 4: ... work in progress ...
+
 */
 
 
-// TODO: use stripTypeVar?
 
-	trait Mutability {
-	}
+	// NEW STUFF
 
-	trait SimpleMutability extends Mutability {
-		def exists: Boolean
-		def isAnnotated: Boolean
-		def isPolyread: Boolean = false
-		def canBeMutable: Boolean = false
-		def canBeReadonly: Boolean = false
+	trait Tmt {
+		def origin: Symbol = NoSymbol   // origin if Polyread, NoSymbol otherwise
+		def adaptations: Tmt = UnannotatedTmt()  // For Polyread result types, LUB of adaptations
+		
+		def <:<(other: Tmt): Boolean = tmtSubtypeOf(this, other)
+		
+		def isReadonly = this.isInstanceOf[Readonly]
+		def isPolyread = this.isInstanceOf[Polyread]
+		def isMutable = this.isInstanceOf[Mutable]
+		def isUnannotated = this.isInstanceOf[UnannotatedTmt]
+		def isError = this.isInstanceOf[ErrorTmt]
+	
+		def exists = isReadonly || isPolyread || isMutable
+
+		// Convenience methods
+		def withOrigin(_origin: Symbol): Tmt = this  // for non-polyread types, does nothing.
+		def withAdaptations(_adaptations: Tmt): Tmt = this  // for non-polyread types, does nothing.
+	
+		// OLD STUFF
 	}
-	case class readonly() extends SimpleMutability {
-		override def exists: Boolean = true
-		override def isAnnotated: Boolean = true
-		override def canBeReadonly: Boolean = true
+	case class Readonly() extends Tmt {
 		override def toString = "@readonly"
 	}
-	case class polyread() extends SimpleMutability {
-		override def exists: Boolean = true
-		override def isAnnotated: Boolean = true
-		override def isPolyread: Boolean = true
-		override def canBeMutable: Boolean = true
-		override def canBeReadonly: Boolean = true
-		override def toString = "@polyread"
+	case class Polyread() extends Tmt {
+		override def withOrigin(_origin: Symbol): Tmt = PolyreadWithOriginAndAdaptations(_origin, adaptations)
+		override def withAdaptations(_adaptations: Tmt): Tmt = PolyreadWithOriginAndAdaptations(origin, _adaptations)
+		override def toString =
+			if (adaptations.exists) s"@polyread[$origin,adapted with $adaptations]"
+			else s"@polyread[$origin]"
 	}
-	case class minpolyread() extends SimpleMutability {
-		override def exists: Boolean = true
-		override def isAnnotated: Boolean = true
-		override def isPolyread: Boolean = true
-		override def canBeMutable: Boolean = false   //true   // this is a lie, but some functions need it
-		override def canBeReadonly: Boolean = true
+	case class minpolyread() extends Tmt {
 		override def toString = "@minpolyread"
 	}
-	case class mutable() extends SimpleMutability {
-		override def exists: Boolean = true
-		override def isAnnotated: Boolean = true
-		override def canBeMutable: Boolean = true
+	case class Mutable() extends Tmt {
 		override def toString = "@mutable"
 	}
 	/** The mutability of a type where no mutability has been specified. */
-	case class unannotated() extends SimpleMutability {
-		override def exists: Boolean = true
-		override def isAnnotated: Boolean = false
-		override def toString = "(unannotated)"
+	case class UnannotatedTmt() extends Tmt {
+		override def toString = "<unannotated TMT>"
 	}
 	/** The mutability resulting from a failed search. */
-	case class notfound() extends SimpleMutability {
-		override def exists: Boolean = false
-		override def isAnnotated: Boolean = false
-		override def toString = "(notfound)"
+	case class notfound() extends Tmt {
+		override def toString = "<TMT Not Found>"
 	}
 	/** The mutability of an ErrorType. */
-	case class errortype() extends SimpleMutability {
-		override def exists: Boolean = true
-		override def isAnnotated: Boolean = false
-		override def toString = "(errortype)"
+	case class ErrorTmt() extends Tmt {
+		override def toString = "<TMT Error Type>"
 	}
 	
-	/** Represents a function object or closure. */
-	/*class FunctionMutability(paramTypes: List[Type], returnMut: SimpleMutability) extends Mutability {
-		def apply(argType: Type)(implicit ctx: Context): Mutability = {
-			val newRet = viewpointAdaptPartial(getSimpleMutability(paramTypes.head), returnMut)
-			if (paramTypes.tail.isEmpty) viewpointAdaptFinal(newRet)
-			else new FunctionMutability(paramTypes.tail, newRet)
+	def PolyreadWithOriginAndAdaptations(_origin: Symbol, _adaptations: Tmt): Polyread =
+		new Polyread() {
+			override def origin = _origin
+			override def adaptations = _adaptations
 		}
-	}*/
-	//case class NotAFunction() extends FunctionMutability(List(), errortype()) {}
+	
+
+	/// Least upper bound.
+	def lub(tmt1: Tmt, tmt2: Tmt): Tmt =
+		if (tmt1.isError || tmt2.isError) ErrorTmt()
+		else if (tmt1.isReadonly || tmt2.isReadonly) Readonly()
+		else if (tmt1.isPolyread && tmt2.isPolyread) {
+			if (tmt1.origin == tmt2.origin) tmt1      // polyread types are equal if same origin
+			else Readonly()     // if different origin, conservatively return readonly
+		}
+		else if (tmt1.isPolyread) tmt1   // any polyread dominates a mutable
+		else if (tmt2.isPolyread) tmt2
+		else if (tmt1.isMutable || tmt2.isMutable) Mutable()
+		else UnannotatedTmt()
+	
+	/// Greatest lower bound.
+	def glb(tmt1: Tmt, tmt2: Tmt): Tmt =
+		if (tmt1.isError || tmt2.isError) ErrorTmt()
+		else if (!tmt1.exists || !tmt2.exists) UnannotatedTmt()  // preserve unannotated-ness
+		else if (tmt1.isMutable || tmt2.isMutable) Mutable()
+		else if (tmt1.isPolyread && tmt2.isPolyread) {
+			if (tmt1.origin == tmt2.origin) tmt1      // polyread types are equal if same origin
+			else Mutable()     // if different origin, conservatively return mutable
+		}
+		else if (tmt1.isPolyread) tmt1   // any polyread is below readonly
+		else if (tmt2.isPolyread) tmt2
+		else Readonly()
+	
+	// Subtype relation: is tmt1 <:< tmt2?
+	def tmtSubtypeOf(tmt1: Tmt, tmt2: Tmt): Boolean =
+		// Don't fail subtypes if a type error already exists. Prevents generation of spurious error messages.
+		if (tmt1.isError || tmt2.isError) true
+		else
+			tmt2 match {
+				case Readonly() => true
+				case Polyread() => tmt1 match {
+					case Readonly() => false
+					case Polyread() => (tmt1.origin == tmt2.origin // Polyreads are only equal if their origins are equal.
+									 || tmt2.origin == NoSymbol)   // Or if tmt2's origin has not been set --
+									                               //  this can happen when Function types are created.
+																   //  Should be OK provided we don't try to instantiate
+																   //  an object with a non-origin polyread type.
+					case _ => true
+				}
+				case Mutable() => !tmt1.isReadonly && !tmt1.isPolyread
+				case UnannotatedTmt() => !tmt1.isReadonly && !tmt1.isPolyread
+			}
+
+	//--- Conversions to/from annotations ---//
+
+	/// Special annotation that carries extra TMT information.
+	class TmtAnnotation(tree: Tree, val tmt: Tmt) extends ConcreteAnnotation(tree) {
+		override def toText(implicit ctx: Context): Text = tmt.toString
+	}
+	
+	/// Finds the TMT of the given annotation.
+	def tmt(annot: Annotation)(implicit ctx: Context): Tmt =
+		annot match {
+			case annot: TmtAnnotation => annot.tmt   // This annotation carries TMT information.
+			case _ =>  // get TMT based on annotation class.
+				if (annot matches ctx.definitions.ReadonlyClass) Readonly()
+				else if (annot matches ctx.definitions.PolyreadClass) Polyread()
+				else if (annot matches ctx.definitions.MutableClass) Mutable()
+				else UnannotatedTmt()
+		}
+	
+	/// Builds a TmtAnnotation from the given TMT.
+	def toAnnot(tm: Tmt)(implicit ctx: Context): Annotation =
+		new TmtAnnotation(
+			New (
+				tm match {
+					case tm: Mutable  => ctx.definitions.MutableClass.typeRef
+					case tm: Polyread => ctx.definitions.PolyreadClass.typeRef
+					case tm: Readonly => ctx.definitions.ReadonlyClass.typeRef
+				},
+				Nil
+			),
+			tm)
+
+	//--- Interfacing with the Scala type system ---//
+	
+	/// Finds the TMT of the given type.
+	def tmt(tp: Type)(implicit ctx: Context): Tmt =
+		tp.dealias match {  // type aliases are removed.
+			case AnnotatedType(annot, underlying) =>
+				val tm = tmt(annot)
+				if (tm.exists) tm else tmt(underlying)
+			case tp @ TypeBounds(lo, hi) => tmtFromTypeBounds(lo, hi)  // TODO: deal with type bounds in typer?
+			case tp @ AndType(tp1, tp2) => glb(tmt(tp1), tmt(tp2))
+			case tp @ OrType(tp1, tp2) => lub(tmt(tp1), tmt(tp2))
+			case tp: TypeProxy => tmt(tp.underlying)
+			case tp: ErrorType => ErrorTmt()
+			case _ => UnannotatedTmt()
+		}
+
+	/// Finds the TMT of the given type, but only if tp is an AnnotatedType (type aliases and proxies return UnannotatedTmt).
+	/// TODO: Maybe type bounds are best taken care of by examining type trees -- transform type trees (to add annots directly?)
+	def tmtNoRecurse(tp: Type)(implicit ctx: Context): Tmt =
+		tp match {
+			case AnnotatedType(annot, underlying) =>
+				val tm = tmt(annot)
+				if (tm.exists) tm else tmt(underlying)
+			case tp: ErrorType => ErrorTmt()
+			case _ => UnannotatedTmt()
+		}
+
+	/// Finds the TMT for a type bounds declaration, e.g., T <: A >: B.
+	def tmtFromTypeBounds(lo: Type, hi: Type)(implicit ctx: Context): Tmt = {
+		/// If a TMT annotation is immediately present (not via an alias or proxy),
+		/// then only consider immediate annotations.
+		val (tmtLo, tmtHi) = (tmtNoRecurse(lo), tmtNoRecurse(hi))
+		if (tmtLo.exists || tmtHi.exists)
+			lub(tmtLo, tmtHi)
+		else
+			lub(tmt(lo), tmt(hi))  // default: look through alias/proxy types.
+	}
+
+	/** Adds the given TMT to the given type. Existing top-level TMT annotations are removed.
+	    Assumes the given type is not a method type - annotating method types directly can break stuff. **/
+	def withTmt(tp: Type, tm: Tmt)(implicit ctx: Context): Type =
+		if (tmt(tp).isError) tp
+		else
+			tp.dealias match {  // remove type aliases (to find annotations underneath)
+				case AnnotatedType(annot, underlying) =>
+					if (tmt(annot).exists)   // this is a TMT annotation: remove it
+						withTmt(underlying, tm)
+					else  // this is not a TMT annotation (but may have a TMT annotation underneath): keep it
+						new AnnotatedType(annot, withTmt(underlying, tm))
+				case _ =>
+					if (!tm.isUnannotated) new AnnotatedType(toAnnot(tm), tp)
+					else if (tmt(tp).exists) new AnnotatedType(toAnnot(Mutable()), tp)  // add @mutable to mask underlying stuff
+					else tp  // tp and tmt are both unannotated -- no action needed
+			}
+
+	/** Adds the given TMT to the given type. Safe for method types. **/
+	def withResultTmt(tp: Type, tm: Tmt)(implicit ctx: Context): Type =
+		tp dealias match {
+			case mt @ MethodType(paramNames, paramTypes) =>
+				mt.derivedMethodType(paramNames, paramTypes, withResultTmt(mt.resultType, tm))
+			case _ => withTmt(tp, tm)
+		}
+	
+	
+	def assignOrigin(tp: Type, origin: Symbol)(implicit ctx: Context): Type = {
+		val tm = tmt(tp)
+		val tmAssigned = tm withOrigin origin
+		if (tm == tmAssigned) tp
+		else withTmt(tp, tmAssigned)
+	}
+
+	//--- Function/method applications ---//
+
+	/** Finds the TMT adaptation for a given argument. **/
+	def adaptToArg(argument: Type, parameter: Type)(implicit ctx: Context): Tmt =
+		// if parameter is polyread, returns argument TMT.
+		if (tmt(parameter).isPolyread) tmt(argument) else UnannotatedTmt()
+
+	/****/
+	private[this] def partiallyAppliedResultType(tp: Type, adaptations: Tmt)(implicit ctx: Context): Type =
+		tp match {
+			case mt @ MethodType(paramNames, paramTypes) =>
+				mt.derivedMethodType(paramNames, paramTypes, partiallyAppliedResultType(mt.resultType, adaptations))
+			case _ =>
+				val resultTmt = tmt(tp)
+				if (resultTmt.isPolyread) {
+					//println(s" PARTIAL RESULT 1: ${resultTmt}")
+					//println(s" PARTIAL RESULT ADAPT: ${adaptations}")
+					//println(s" PARTIAL RESULT 2: ${resultTmt withAdaptations adaptations}")
+					//println(s" PARTIAL RESULT TYPE: ${withTmt(tp, resultTmt withAdaptations adaptations)}")
+					withTmt(tp, resultTmt withAdaptations adaptations)
+				}
+				else tp
+		}
+
+	/** Adaptations should include adaptations on the method's final result type. **/
+	private[this] def resultTypeWithAdaptations(resultType: Type, adaptations: Tmt)(implicit ctx: Context): Type =
+		// if result type is a method, partially apply.
+		resultType match {
+			case mt: MethodType =>  // perform a partial application
+				partiallyAppliedResultType(mt, adaptations)
+			case _ =>  // perform a final application
+				val resultTmt = tmt(resultType)
+				if (resultTmt.isPolyread) {
+					//println(s" FINAL RESULT PRE: ${resultType.dealias}")
+					//println(s" FINAL RESULT 1: $resultTmt")
+					//println(s" FINAL RESULT ADAPT: ${adaptations}")
+					//println(s" FINAL RESULT TYPE: ${withTmt(resultType.dealias, adaptations)}")
+					withTmt(resultType, adaptations)
+				}
+				else resultType
+		}
+
+	/** Finds the TMT-annotated result type of the given method, after the LUB of all argument
+	adaptations are applied. See adaptToArg to get the adaptation of an individual argument. **/
+	def methodResultWithAdapations(/*termRef: TermRef,*/ methType: Type, resultType: Type, argAdaptations: Tmt)(implicit ctx: Context): Type = {
+		methType match {
+			case methType: MethodType =>
+				//val receiverTmt = tmt(termRef.prefix)  // TODO: how do we know if the method's `this` parameter is polyread?
+				val resultAdaptations = tmt(methType.finalResultType).adaptations
+				val allAdaptations = lub(argAdaptations, resultAdaptations)
+				resultTypeWithAdaptations(resultType, allAdaptations)
+			case et: ErrorType => et
+		}
+	}
+	
+	//--- Modifiers for denotations ---//
+	
+	def pluginSymDenot(denot: SymDenotation): SymDenotation = denot
+	/*def pluginSymDenot(denot: SymDenotation): SymDenotation =
+		var newInfo = denot.info
+		// transfer annotations on the symbol to annotations on the symbol's type.
+		denot.annotations.foreach { annot =>
+			if (tmt(annot).exists)   // only transfer if really a TMT annotation
+				//denot.info match {
+				//	case _: MethodicType
+				//}
+		}
+	//denot.symbol.
+	//copySymDenotation(info = )*/
+
+	def pluginNamedTypeDenot(tp: Type, denot: Denotation)(implicit ctx: Context): Denotation =
+		denot match {
+			case denot: SingleDenotation =>
+				tp match {
+					case TermRef(prefix, name) =>  // adapt denot to viewpoint: prefix.name
+						val derivedTmt = lub(tmt(denot.info), tmt(prefix))  // TODO: What about methods? prefix for a method is actually an argument
+						denot.derivedSingleDenotation(denot.symbol, withTmt(denot.info, derivedTmt))
+					case _ => denot  // type does not cause denotation to change
+				}
+			case _ => denot  // denotation was overloaded -- do nothing
+		}
+
+	//ctx.warning(s"No origin set for this @polyread annotation", annot.tree.pos)
+
+
+
+	// OLD STUFF
 	
 	/** Viewpoint adapation for simple field selection. */
-	def viewpointAdapt(view: SimpleMutability, underlying: SimpleMutability): SimpleMutability = underlying match {
-		case minpolyread() => if (view.isInstanceOf[unannotated]) underlying else view
-		case polyread()    => if (view.isInstanceOf[unannotated]) underlying else view
+	/*def viewpointAdapt(view: Tmt, underlying: Tmt): Tmt = underlying match {
+		case minpolyread() => if (view.isInstanceOf[UnannotatedTmt]) underlying else view
+		case Polyread()    => if (view.isInstanceOf[UnannotatedTmt]) underlying else view
 		case _             => lub(view, underlying)
-	}
-/*	def viewpointAdapt(view: SimpleMutability, underlying: SimpleMutability): SimpleMutability = underlying match {
-		case readonly()    => underlying
-		case minpolyread() => if (view.isInstanceOf[unannotated]) underlying else view
-		case polyread()    => if (view.isInstanceOf[unannotated]) underlying else view
-		case mutable()     => if (view.isInstanceOf[unannotated]) underlying else view
-		case unannotated() => view
-		case errortype()   => underlying
 	}*/
 	
 	/** Viewpoint adapation for simple field selection. */
-	def viewpointAdapt(qual: Type, actual: Type)(implicit ctx: Context): Type = {
-		val qualMut = getSimpleMutability(qual)
-		val actualMut = getSimpleMutability(actual)
+	/*def viewpointAdapt(qual: Type, actual: Type)(implicit ctx: Context): Type = {
+		val qualMut = tmt(qual)
+		val actualMut = tmt(actual)
 		withSimpleMutability(actual, viewpointAdapt(qualMut, actualMut))
-	}
-	
-	/** Partial viewpoint adapation of return types, for arguments to polyread parameters. */
-	/*def viewpointAdaptPartial(arg: SimpleMutability, ret: SimpleMutability): SimpleMutability = ret match {
-		case readonly()    => readonly()
-		case mutable()     => mutable()
-		case unannotated() => polyread()
-		case polyread()    => arg match {
-				case readonly()    => readonly()
-				case polyread()    => minpolyread()
-				case mutable()     => polyread()
-				case unannotated() => polyread()
-				case errortype()   => errortype()
-			}
-		case minpolyread() => arg match {
-				case readonly()    => readonly()
-				case polyread()    => minpolyread()
-				case mutable()     => minpolyread()
-				case unannotated() => minpolyread()
-				case errortype()   => errortype()
-			}
-		case errortype()   => errortype()
 	}*/
-	
-	/** Final viewpoint adapation of return types, after all arguments have been applied. */
-	/*def viewpointAdaptFinal(ret: SimpleMutability): SimpleMutability = ret match {
-		case readonly()    => readonly()
-		case minpolyread() => polyread()
-		case polyread()    => mutable()
-		case mutable()     => mutable()
-		case unannotated() => unannotated()
-		case errortype()   => errortype()
-	}*/
-	
+		
 	def tmtMismatch(tree: Tree, pt: Type)(implicit ctx: Context): Tree = {
 		typer.ErrorReporting.errorTree(tree, tmtMismatchStr(tree.tpe, pt))
 	}
@@ -231,35 +420,24 @@ Solution alternative 3: 1) Create mutability type for methods.
 		s"mutability mismatch:\n"+
 		s" found   : ${found.show}\n"+
 		s" required: ${expected.show}"
-		//s" found   : ${getSimpleMutability(found)}\n"+
-		//s" required: ${getSimpleMutability(expected)}"
+		//s" found   : ${tmt(found)}\n"+
+		//s" required: ${tmt(expected)}"
 	}
-	
-	case class Adaptations(polyresult: SimpleMutability) {
-	
-	}
-	
-	case class MutabilityContext(tree: Tree) {}
 	
 	/** Applies a function of the given type t with arguments.
 	Type t can be a MethodType, a FunctionClass, or an alias thereof.
 	Returns the result type, adapted.
 	*/
-	def applyFunction(t: Type)(implicit ctx: Context): Type = {
+	//def applyFunction(t: Type)(implicit ctx: Context): Type = {
 		// 1. Find mutabilities of enclosing variables
 		// 2. If t is a method type, wrap final result type in modifier
 		// 2b. If result type is a FunctionClass, 
 		// 3. Check args to polyread params
 		//var 
-		t  // temp
-	}
+		//t  // temp
+	//}
 	
-	/*t.dealias match {
-		case t @ MethodType(paramNames, paramTypes) =>
-		case t: Refined
-	}*/
-	
-	def checkEnclosingVarMutabilities(applyNode: Tree) = {}
+	//def checkEnclosingVarMutabilities(applyNode: Tree) = {}
 
 
 	/** If t is a method type, annotates the result with the mutability tmt. */
@@ -274,7 +452,7 @@ Solution alternative 3: 1) Create mutability type for methods.
 			
 		case t: AnnotatedType =>
 			copyTypeWithResult(
-				(if (getAnnotationMutability(t).isAnnotated) t.underlying else t),
+				(if (tmt(t).exists) t.underlying else t),
 				tmt
 			)
 		case _ =>
@@ -304,93 +482,79 @@ Solution alternative 3: 1) Create mutability type for methods.
 	E.g., for types P and Q, the bounds expression "<:P @mutable >:Q @readonly" yields @polyread.
 	The expression "<:P >:Q @polyread" is equivalent.
 	*/
-	def narrowestBound(m1: SimpleMutability, m2: SimpleMutability): SimpleMutability = {
-		if (m1.isInstanceOf[errortype] || m2.isInstanceOf[errortype]) errortype()
+	/*def narrowestBound(m1: Tmt, m2: Tmt): Tmt = {
+		if (m1.isInstanceOf[ErrorTmt] || m2.isInstanceOf[ErrorTmt]) ErrorTmt()
 		else m2 match {
-			case readonly() => if (m1.canBeMutable) polyread() else if (m1.isPolyread) minpolyread() else readonly()
-			case minpolyread() => if (m1.canBeMutable) polyread() else minpolyread()
-			case polyread() => polyread()
+			case Readonly() => if (m1.canBeMutable) Polyread() else if (m1.isPolyread) minpolyread() else Readonly()
+			case minpolyread() => if (m1.canBeMutable) Polyread() else minpolyread()
+			case Polyread() => Polyread()
 			case _ => m2   // anything else - just return the upper bound
 		}
-/*		val mut = (m1.canBeMutable || m2.canBeMutable)
-		val poly = (m1.isPolyread || m2.isPolyread)
-		val ro = (m1.canBeReadonly || m2.canBeReadonly)
-		if (m1.isInstanceOf[errortype] || m2.isInstanceOf[errortype]) errortype()
-		else if (mut && ro) polyread()
-		else if (mut) mutable()
-		else if (ro) readonly()
-		else unannotated()*/
-	}
+	}*/
 
-	/// The greatest lower bound / intersection of two mutabilities.
-	def glb(m1: SimpleMutability, m2: SimpleMutability): SimpleMutability = {
-		if (m1.isInstanceOf[errortype] || m2.isInstanceOf[errortype]) errortype()
-		else if (!m1.isAnnotated || !m2.isAnnotated) unannotated()
-		else if (m1.isInstanceOf[mutable] || m2.isInstanceOf[mutable]) mutable()
-		else if (m1.isInstanceOf[polyread] || m2.isInstanceOf[polyread]) polyread()
+	/*/// The greatest lower bound / intersection of two mutabilities.
+	def glb(m1: Tmt, m2: Tmt): Tmt = {
+		if (m1.isInstanceOf[ErrorTmt] || m2.isInstanceOf[ErrorTmt]) ErrorTmt()
+		else if (!m1.exists || !m2.exists) UnannotatedTmt()
+		else if (m1.isInstanceOf[Mutable] || m2.isInstanceOf[Mutable]) Mutable()
+		else if (m1.isInstanceOf[Polyread] || m2.isInstanceOf[Polyread]) Polyread()
 		else if (m1.isInstanceOf[minpolyread] || m2.isInstanceOf[minpolyread]) minpolyread()
-		else readonly()
+		else Readonly()
 	}
-	def lower = glb _   // alias
+	def lower = glb _   // alias*/
 
-	/// The least upper bound / union of two mutabilities.
-	def lub(m1: SimpleMutability, m2: SimpleMutability): SimpleMutability = {
-		if (m1.isInstanceOf[errortype] || m2.isInstanceOf[errortype]) errortype()
-		else if (m1.isInstanceOf[readonly] || m2.isInstanceOf[readonly]) readonly()
+	/*/// The least upper bound / union of two mutabilities.
+	def lub(m1: Tmt, m2: Tmt): Tmt = {
+		if (m1.isInstanceOf[ErrorTmt] || m2.isInstanceOf[ErrorTmt]) ErrorTmt()
+		else if (m1.isInstanceOf[Readonly] || m2.isInstanceOf[Readonly]) Readonly()
 		else if (m1.isInstanceOf[minpolyread] || m2.isInstanceOf[minpolyread]) minpolyread()
-		else if (m1.isInstanceOf[polyread] || m2.isInstanceOf[polyread]) polyread()
-		else if (m1.isInstanceOf[mutable] || m2.isInstanceOf[mutable]) mutable()
-		else unannotated()
+		else if (m1.isInstanceOf[Polyread] || m2.isInstanceOf[Polyread]) Polyread()
+		else if (m1.isInstanceOf[Mutable] || m2.isInstanceOf[Mutable]) Mutable()
+		else UnannotatedTmt()
 	}
-	def upper = lub _   // alias
+	def upper = lub _   // alias*/
 
-	def simpleSubtype(m1: SimpleMutability, m2: SimpleMutability): Boolean =
-		m1.isInstanceOf[errortype] || m2.isInstanceOf[errortype] ||   // don't generate extra errors for error types
+	/*def simpleSubtype(m1: Tmt, m2: Tmt): Boolean =
+		m1.isInstanceOf[ErrorTmt] || m2.isInstanceOf[ErrorTmt] ||   // don't generate extra errors for error types
 			(m2 match {
 				//case m2: MethodMutability => m1.isInstanceOf
-				case m2: readonly => true
-				case m2: minpolyread => !m1.isInstanceOf[readonly]
-				case m2: polyread => !m1.isInstanceOf[readonly] && !m1.isInstanceOf[minpolyread]
-				case _ => !m1.isInstanceOf[readonly] && !m1.isInstanceOf[minpolyread] && !m1.isInstanceOf[polyread]
-			})
+				case m2: Readonly => true
+				case m2: minpolyread => !m1.isInstanceOf[Readonly]
+				case m2: Polyread => !m1.isInstanceOf[Readonly] && !m1.isInstanceOf[minpolyread]
+				case _ => !m1.isInstanceOf[Readonly] && !m1.isInstanceOf[minpolyread] && !m1.isInstanceOf[Polyread]
+			})*/
 	
-	def getAnnotationMutability(annot: Annotation)(implicit ctx: Context): SimpleMutability =
+	/*def tmt(annot: Annotation)(implicit ctx: Context): Tmt =
 		annot.symbol.name.toString match {
-			case "mutable" => mutable()
-			case "polyread" => polyread()
+			case "mutable" => Mutable()
+			case "polyread" => Polyread()
 			case "minpolyread" => minpolyread()
-			case "readonly" => readonly()
-			case _ => unannotated()
+			case "readonly" => Readonly()
+			case _ => UnannotatedTmt()
 		}
 	
-	def toAnnotation(mut: SimpleMutability)(implicit ctx: Context): Annotation = {
+	def toAnnotation(mut: Tmt)(implicit ctx: Context): Annotation = {
 		//Ident(tpnme.readonly)
-	val ann = mut match {
-		/*case mutable() => ConcreteAnnotation(New(ctx.definitions.MutableClass.typeRef) withType ctx.definitions.MutableClass.typeRef)
-		case polyread() => ConcreteAnnotation(New(ctx.definitions.PolyreadClass.typeRef) withType ctx.definitions.PolyreadClass.typeRef)
-		case minpolyread() => ConcreteAnnotation(New(ctx.definitions.MinpolyreadClass.typeRef) withType ctx.definitions.MinpolyreadClass.typeRef)
-		case readonly() => ConcreteAnnotation(New(ctx.definitions.ReadonlyClass.typeRef) withType ctx.definitions.ReadonlyClass.typeRef)
-		*/
-		case mutable() => Annotation(ctx.definitions.MutableClass, List())
-		case polyread() => Annotation(ctx.definitions.PolyreadClass, List())
-		case minpolyread() => Annotation(ctx.definitions.MinpolyreadClass, List())
-		case readonly() => Annotation(ctx.definitions.ReadonlyClass, List())
-	}
-	//println (s"ANNOTATION symbol for $mut = ${ann.symbol.name.toString}")
-	ann
-	}
+		val ann = mut match {
+			case Mutable() => Annotation(ctx.definitions.MutableClass, List())
+			case Polyread() => Annotation(ctx.definitions.PolyreadClass, List())
+			case minpolyread() => Annotation(ctx.definitions.MinpolyreadClass, List())
+			case Readonly() => Annotation(ctx.definitions.ReadonlyClass, List())
+		}
+		ann
+	}*/
 	
 	
 	/** If a top-level automatically-added type annotation is incompatible with
 	 *  the underlying mutability type, then return it.
 	 *  Returns a pair: (found_annotation, expected_mutability)
 	 */
-	def incompatibleAutoMutabilityTypes(t: Type)(implicit ctx: Context): Option[(Annotation,SimpleMutability)] = t match {
+	def incompatibleAutoMutabilityTypes(t: Type)(implicit ctx: Context): Option[(Annotation,Tmt)] = t match {
 		case t @ AnnotatedType(annot, tpe) if (t.isInstanceOf[AutoType]) =>
 			// If t is an automatic mutability type annotation, then it must be a supertype of the underlying type.
-			val found = getAnnotationMutability(annot)
-			val expected = getSimpleMutability(t.underlying)
-			if (found.isAnnotated && !simpleSubtype(expected, found)) Some((annot, expected))
+			val found = tmt(annot)
+			val expected = tmt(t.underlying)
+			if (found.exists && !tmtSubtypeOf(expected, found)) Some((annot, expected))
 			else incompatibleAutoMutabilityTypes(t.underlying)
 		case t: MethodType => incompatibleAutoMutabilityTypes(t.resultType)  // annotations on methods go on the result type
 		case t: TypeProxy => incompatibleAutoMutabilityTypes(t.underlying)
@@ -401,7 +565,7 @@ Solution alternative 3: 1) Create mutability type for methods.
 	def addAnnotations(t: Type, annots: List[Annotation])(implicit ctx: Context): Type = {
 		var newT = t
 		annots.foreach { annot =>
-			if (getAnnotationMutability(annot).isAnnotated)  // skip non-mutability annotations
+			if (tmt(annot).exists)  // skip non-mutability annotations
 				newT = addAnnotation(newT, annot)
 		}
 		newT
@@ -410,7 +574,7 @@ Solution alternative 3: 1) Create mutability type for methods.
 	/** Returns t without top-level mutability annotations. */
 	def stripMutabilityAnnots(t: Type)(implicit ctx: Context): Type = t match {
 		// TODO: this method stops as soon as a non-mutability annotation is found.
-		case AnnotatedType(ann, underlying) if (getAnnotationMutability(ann).isAnnotated) =>
+		case AnnotatedType(ann, underlying) if (tmt(ann).exists) =>
 			stripMutabilityAnnots(underlying)
 		case _ => t
 	}
@@ -418,14 +582,14 @@ Solution alternative 3: 1) Create mutability type for methods.
 	/** Returns the given type with the given mutability applied.
 	Do not use this method for MethodTypes/PolyTypes/ExprTypes! (Modify the result types/modifiers instead.)
 	*/
-	def withMutability(t: Type, mut: SimpleMutability)(implicit ctx: Context): Type =
-		if (mut.isAnnotated)
-			new AnnotatedType(toAnnotation(mut), stripMutabilityAnnots(t))
+	def withMutability(t: Type, mut: Tmt)(implicit ctx: Context): Type =
+		if (mut.exists)
+			new AnnotatedType(toAnnot(mut), stripMutabilityAnnots(t))
 		else {
 			// No annotation supplied - try to return an unannotated result.
 			// If stripping annotations does not remove t's mutability, then apply a @mutable annotation.
 			val stripped = stripMutabilityAnnots(t)
-			if (getSimpleMutability(stripped).isAnnotated) new AnnotatedType(toAnnotation(mutable()), stripped)
+			if (tmt(stripped).exists) new AnnotatedType(toAnnot(Mutable()), stripped)
 			else stripped
 		}
 	
@@ -443,13 +607,13 @@ Solution alternative 3: 1) Create mutability type for methods.
 			}
 			else mt  // no copy needed*/
 		case _ =>
-			if (getAnnotationMutability(annot).isAnnotated)   // only strip annotations if annot will override them
+			if (tmt(annot).exists)   // only strip annotations if annot will override them
 				new AnnotatedType(annot, stripMutabilityAnnots(t)) //with AutoType
 			else
 				new AnnotatedType(annot, t) //with AutoType
 	}
-	def addAnnotation(t: Type, mut: SimpleMutability)(implicit ctx: Context): Type = {
-		addAnnotation(t, toAnnotation(mut))
+	def addAnnotation(t: Type, mut: Tmt)(implicit ctx: Context): Type = {
+		addAnnotation(t, toAnnot(mut))
 	}
 	
 	/** Returns true if the given mutability can override the given annotation in a type expression.
@@ -458,83 +622,71 @@ Solution alternative 3: 1) Create mutability type for methods.
 	The rule implemented here is: If both mut and annot have specified mutabilities,
 	    then annot can be ignored (mut can override annot).
 	*/
-	def overridesAnnotation(mut: SimpleMutability, annot: Annotation)(implicit ctx: Context): Boolean =
-		mut.isAnnotated && getAnnotationMutability(annot).isAnnotated
+	def overridesAnnotation(mut: Tmt, annot: Annotation)(implicit ctx: Context): Boolean =
+		mut.exists && tmt(annot).exists
 	
 	def overridesAnnotation(annot1: Annotation, annot2: Annotation)(implicit ctx: Context): Boolean =
-		overridesAnnotation(getAnnotationMutability(annot1), annot2)
+		overridesAnnotation(tmt(annot1), annot2)
 
 	/** Finds the top-level (simple) mutability of a given type.
-	Returns one of: mutable, polyread, readonly, unannotated, errortype.
+	Returns one of: mutable, polyread, Readonly, UnannotatedTmt, ErrorTmt.
 	*/
-	def getSimpleMutability(tp: Type)(implicit ctx: Context): SimpleMutability = tp match {
+	/*def getSimpleMutability(tp: Type)(implicit ctx: Context): Tmt = tp match {
 		case tp @ AnnotatedType(annot, tpe) => annot.symbol.name.toString match {
-			case "mutable" => mutable()
-			case "polyread" => polyread()
+			case "mutable" => Mutable()
+			case "polyread" => Polyread()
 			case "minpolyread" => minpolyread()
-			case "readonly" => readonly()
+			case "readonly" => Readonly()
 			case _ => getSimpleMutability(tpe)  // unrecognized annotation: check underlying type
 		}
-		/*case tp: NamedType => {
-			var mut: SimpleMutability = unannotated()  // include mutability annotations on symbols
-			tp.denot.alternatives.foreach { d => d match {
-				case d: SymDenotation =>
-					d.annotations.foreach { annot => mut = lub(mut, getAnnotationMutability(annot)) }
-				case _ =>
-				}
-			}
-			lub(mut, getSimpleMutability(tp.underlying))
-		}*/
 		//case tp @ TermRef(prefix, name) => viewpointAdapt(getSimpleMutability(prefix), getSimpleMutability(tp.underlying))
 		//case tp @ TypeRef(prefix, name) => getSimpleMutability(tp.underlying)
 		case tp @ TypeBounds(lo, hi) => simpleTypeBoundsMutability(lo, hi)
 		case tp @ AndType(tp1, tp2) => glb(getSimpleMutability(tp1), getSimpleMutability(tp2))
 		case tp @ OrType(tp1, tp2) => lub(getSimpleMutability(tp1), getSimpleMutability(tp2))
 		case tp: TypeProxy => getSimpleMutability(tp.underlying)
-		//case tp @ MethodType(paramNames, paramTypes) =>
-		//	MethodMutability(paramTypes map { t => getSimpleMutability(t) }, getSimpleMutability(tp.resultType))
-		case tp: ErrorType => errortype()
-		case _ => unannotated()
-	}
+		case tp: ErrorType => ErrorTmt()
+		case _ => UnannotatedTmt()
+	}*/
 
 	/** Finds the mutability bounds for the given type bounds.
 	If any annotations are explicitly present, bounds are determined entirely from explicit annotations.
 	Else-wise, bounds are determined from the default mutabilities of the bounding types.
 	*/
-	def simpleTypeBoundsMutability(lo: Type, hi: Type)(implicit ctx: Context): SimpleMutability = {
+	/*def simpleTypeBoundsMutability(lo: Type, hi: Type)(implicit ctx: Context): Tmt = {
 		val mLo = explicitSimpleMutability(lo)
 		val mHi = explicitSimpleMutability(hi)
-		if (mLo.isInstanceOf[errortype] || mHi.isInstanceOf[errortype]) errortype()
-		else if (mLo.isAnnotated && mHi.isAnnotated) narrowestBound(mLo, mHi)
-		else if (mLo.isAnnotated) mLo
-		else if (mHi.isAnnotated) mHi
-		else narrowestBound(getSimpleMutability(lo), getSimpleMutability(hi))
-	}
+		if (mLo.isInstanceOf[ErrorTmt] || mHi.isInstanceOf[ErrorTmt]) ErrorTmt()
+		else if (mLo.exists && mHi.exists) narrowestBound(mLo, mHi)
+		else if (mLo.exists) mLo
+		else if (mHi.exists) mHi
+		else narrowestBound(tmt(lo), tmt(hi))
+	}*/
 	
 	/** If t refers a sequence of annotations, returns the mutability of the outermost mutability annotation. */
-	def explicitSimpleMutability(t: Type)(implicit ctx: Context): SimpleMutability = t match {
+	def explicitSimpleMutability(t: Type)(implicit ctx: Context): Tmt = t match {
 		case t @ AnnotatedType(annot, underlying) =>
-			val mut = getAnnotationMutability(annot)
-			if (mut.isAnnotated) mut
+			val mut = tmt(annot)
+			if (mut.exists) mut
 			else explicitSimpleMutability(underlying)
-		case t: ErrorType => errortype()
-		case _ => unannotated()
+		case t: ErrorType => ErrorTmt()
+		case _ => UnannotatedTmt()
 	}
 
-	def simpleMemberMutability(tp: Type, name: Name)(implicit ctx: Context): SimpleMutability = tp match {
+	def simpleMemberMutability(tp: Type, name: Name)(implicit ctx: Context): Tmt = tp match {
 		// Search for the member in a ClassInfo.
 		// If more than one member matches, then take the upper bound of all matched members.
 		case tp @ ClassInfo(prefix, cls, classParents, decls, selfInfo) =>
-			var mut: SimpleMutability = notfound()
+			var mut: Tmt = notfound()
 			cls.denot.findMember(name, prefix, EmptyFlags).alternatives.foreach { d =>
-				if (mut.isAnnotated) mut = lub(mut, getSimpleMutability(d.info))
-				else mut = getSimpleMutability(d.info)
+				if (mut.exists) mut = lub(mut, tmt(d.info))
+				else mut = tmt(d.info)
 			}
 			mut
 			
 		case tp @ RefinedType(parent, refinedName) =>
 			if (name eq refinedName)
-				getSimpleMutability(tp.refinedInfo)
+				tmt(tp.refinedInfo)
 			else
 				simpleMemberMutability(parent, name)
 				
@@ -562,7 +714,7 @@ Solution alternative 3: 1) Create mutability type for methods.
 			//   but I am ignoring PolyTypes and a few other things, so we'll just return true in this case.
 			// * mutability1 is something else -- simple mutability subtyping applies.
 			// Also makes sure refinements in the parent type are OK.
-			simpleSubtype(mutability1, mutability2) && typeRefinementMutabilitySubtype(t1, parent)
+			tmtSubtypeOf(mutability1, mutability2) && typeRefinementMutabilitySubtype(t1, parent)
 		}
 		
 		// TODO: And/Or/Bounds/etc.?
@@ -578,7 +730,7 @@ Solution alternative 3: 1) Create mutability type for methods.
 		if (t1 eq t2) return true
 	
 		// Check simple (top-level) mutability.
-		if (!simpleSubtype(getSimpleMutability(t1), getSimpleMutability(t2))) return false
+		if (!tmtSubtypeOf(tmt(t1), tmt(t2))) return false
 	
 		// Check mutability of method signatures and type refinements.
 		typeRefinementMutabilitySubtype(t1, t2)
@@ -586,8 +738,8 @@ Solution alternative 3: 1) Create mutability type for methods.
 	}
 	
 	// TODO: copy all enclosing types if underlying method result type changes? (Yes.)
-	private[this] def copyMethodWithResult(mt: MethodType, mut: SimpleMutability)(implicit ctx: Context): Type =
-		addAnnotation(mt, toAnnotation(mut))	
+	private[this] def copyMethodWithResult(mt: MethodType, mut: Tmt)(implicit ctx: Context): Type =
+		addAnnotation(mt, toAnnot(mut))
 
 
 	/** If t refers to a function type, then t can have: a mutability on its apply method,
@@ -599,31 +751,31 @@ Solution alternative 3: 1) Create mutability type for methods.
 	or a closure object. If a raw method type, then it suffices to place the result mutability
 	on the returned method type (or on the returned method's final result type).
 	If a closure object, then the closure's apply signature/type must take the resulting mutability. */
-	def copyWithResult(t: Type, mut: SimpleMutability)(implicit ctx: Context): Type = {
+	def copyWithResult(t: Type, mut: Tmt)(implicit ctx: Context): Type = {
 		t match {
 			case mt @ MethodType(paramNames, paramTypes) =>
 				mt.derivedMethodType(paramNames, paramTypes, copyWithResult(mt.resultType, mut))
 			case _ =>
-				if (mut.isAnnotated)
-					new AnnotatedType(toAnnotation(mut), t)    // TODO: strip off old annotations.
+				if (mut.exists)
+					new AnnotatedType(toAnnot(mut), t)    // TODO: strip off old annotations.
 				else
-					new AnnotatedType(toAnnotation(mutable()), t)  // TODO: strip off old annotations.
+					new AnnotatedType(toAnnot(Mutable()), t)  // TODO: strip off old annotations.
 		}
 	}
 	
-	def argMutToResult(mut: SimpleMutability): SimpleMutability = mut match {
-		case mutable() => polyread()
-		case polyread() => minpolyread()
+	def argMutToResult(mut: Tmt): Tmt = mut match {
+		case Mutable() => Polyread()
+		case Polyread() => minpolyread()
 		case _ => mut
 	}
 	
 	/** Upgrade the return type of a polyread method. Assumes t is a MethodType, and argMut
 	is the LUB of arguments that have been applied to polyread parameters.
 	*/
-	def copyMethodWithModifiedResult(t: Type, argMut: SimpleMutability)(implicit ctx: Context): Type = t match {
+	def copyMethodWithModifiedResult(t: Type, argMut: Tmt)(implicit ctx: Context): Type = t match {
 		case mt @ MethodType(paramNames, paramTypes) =>
-			val prevResultMut = getSimpleMutability(mt.finalResultType)
-			if (prevResultMut.isPolyread && simpleSubtype(prevResultMut, argMutToResult(argMut)))
+			val prevResultMut = tmt(mt.finalResultType)
+			if (prevResultMut.isPolyread && tmtSubtypeOf(prevResultMut, argMutToResult(argMut)))
 				copyWithResult(t, argMutToResult(argMut))
 			else
 				t
@@ -636,84 +788,84 @@ Solution alternative 3: 1) Create mutability type for methods.
 	
 
 
-	private[dotc] def withSimpleMutability(t: Type, tmt: SimpleMutability)(implicit ctx: Context): Type = t.dealias match {
+	private[dotc] def withSimpleMutability(tp: Type, tm: Tmt)(implicit ctx: Context): Type = tp.dealias match {
 		case AnnotatedType(annot, underlying) =>
-			if (getAnnotationMutability(annot).isAnnotated)
-				withSimpleMutability(underlying, tmt)  // strip existing simple TMT annotations
+			if (tmt(annot).exists)
+				withSimpleMutability(underlying, tm)  // strip existing simple TMT annotations
 			else
-				new AnnotatedType(annot, withSimpleMutability(underlying, tmt))  // leave non-TMT annotations in place
+				new AnnotatedType(annot, withSimpleMutability(underlying, tm))  // leave non-TMT annotations in place
 		case _ =>
-			if (tmt.isAnnotated)
-				new AnnotatedType(toAnnotation(tmt), t)  // add new TMT annotation
-			else if (getSimpleMutability(t).isAnnotated)
-				new AnnotatedType(toAnnotation(mutable()), t)  // tmt is unannotated, but t is - so apply @mutable
+			if (tm.exists)
+				new AnnotatedType(toAnnot(tm), tp)  // add new TMT annotation
+			else if (tmt(tp).exists)
+				new AnnotatedType(toAnnot(Mutable()), tp)  // tmt is UnannotatedTmt, but t is - so apply @mutable
 			else
-				t   // tmt and t are both unannotated - leave as unannotated
+				tp   // tmt and t are both unannotated - leave as unannotated
 	}
 
-	private[this] def modifyFinalResultType(t: Type, tmt: SimpleMutability)(implicit ctx: Context): Type = t match {
+	private[this] def modifyFinalResultType(t: Type, tmt: Tmt)(implicit ctx: Context): Type = t match {
 		case mt @ MethodType(paramNames, paramTypes) =>
 			mt.derivedMethodType(paramNames, paramTypes, modifyFinalResultType(mt.resultType, tmt))
 		case _ => withSimpleMutability(t, tmt)
 	}
 
-	/*def modifiedResultType(res: Type, modifier: SimpleMutability)(implicit ctx: Context): Type = res match {
+	/*def modifiedResultType(res: Type, modifier: Tmt)(implicit ctx: Context): Type = res match {
 		case mt: MethodType =>
 			modifyFinalResultType(mt, lub(modifier, getSimpleMutability(mt.finalResultType)))
 		case _ =>
 			withSimpleMutability(res, lub(modifier, getSimpleMutability(res)))
 	}*/
 	
-	def modifiedResultType(res: Type, modifier: SimpleMutability)(implicit ctx: Context): Type = { //res match {
-		def mutabilityOnPartialApplication(tmt: SimpleMutability) = tmt match {
-			case mutable()  => mutable()
-			case polyread() => modifier match {
-				case mutable()     => polyread()
-				case polyread()    => minpolyread()
-				case readonly()    => readonly()
-				case unannotated() => polyread()
-				case errortype()   => errortype()
+	def modifiedResultType(res: Type, modifier: Tmt)(implicit ctx: Context): Type = { //res match {
+		def mutabilityOnPartialApplication(tmt: Tmt) = tmt match {
+			case Mutable()  => Mutable()
+			case Polyread() => modifier match {
+				case Mutable()     => Polyread()
+				case Polyread()    => minpolyread()
+				case Readonly()    => Readonly()
+				case UnannotatedTmt() => Polyread()
+				case ErrorTmt()   => ErrorTmt()
 			}
 			case minpolyread() => modifier match {
-				case mutable()     => minpolyread()
-				case polyread()    => minpolyread()
-				case readonly()    => readonly()
-				case unannotated() => minpolyread()
-				case errortype()   => errortype()
+				case Mutable()     => minpolyread()
+				case Polyread()    => minpolyread()
+				case Readonly()    => Readonly()
+				case UnannotatedTmt() => minpolyread()
+				case ErrorTmt()   => ErrorTmt()
 			}
-			case readonly()    => readonly()
-			case unannotated() => unannotated()
-			case errortype()   => errortype()
+			case Readonly()    => Readonly()
+			case UnannotatedTmt() => UnannotatedTmt()
+			case ErrorTmt()   => ErrorTmt()
 		}
-		def mutabilityOnTotalApplication(tmt: SimpleMutability) = tmt match {
-			case mutable()  => mutable()
-			case polyread() => modifier match {
-				case mutable()     => mutable()
-				case polyread()    => polyread()
-				case readonly()    => readonly()
-				case unannotated() => unannotated()
-				case errortype()   => errortype()
+		def mutabilityOnTotalApplication(tmt: Tmt) = tmt match {
+			case Mutable()  => Mutable()
+			case Polyread() => modifier match {
+				case Mutable()     => Mutable()
+				case Polyread()    => Polyread()
+				case Readonly()    => Readonly()
+				case UnannotatedTmt() => UnannotatedTmt()
+				case ErrorTmt()   => ErrorTmt()
 			}
 			case minpolyread() => modifier match {
-				case mutable()     => polyread()
-				case polyread()    => polyread()
-				case readonly()    => readonly()
-				case unannotated() => polyread()
-				case errortype()   => errortype()
+				case Mutable()     => Polyread()
+				case Polyread()    => Polyread()
+				case Readonly()    => Readonly()
+				case UnannotatedTmt() => Polyread()
+				case ErrorTmt()   => ErrorTmt()
 			}
-			case readonly()    => readonly()
-			case unannotated() => unannotated()
-			case errortype()   => errortype()
+			case Readonly()    => Readonly()
+			case UnannotatedTmt() => UnannotatedTmt()
+			case ErrorTmt()   => ErrorTmt()
 		}
 		res match {
 			case mt: MethodType =>
-				modifyFinalResultType(mt, mutabilityOnPartialApplication(getSimpleMutability(mt.finalResultType)))
+				modifyFinalResultType(mt, mutabilityOnPartialApplication(tmt(mt.finalResultType)))
 			case _ =>
 				// if the result is a Function class, then use the partial application mutability
 				if (ctx.definitions.isFunctionType(res))
-					withSimpleMutability(res, mutabilityOnPartialApplication(getSimpleMutability(res)))
+					withSimpleMutability(res, mutabilityOnPartialApplication(tmt(res)))
 				else
-					withSimpleMutability(res, mutabilityOnTotalApplication(getSimpleMutability(res)))
+					withSimpleMutability(res, mutabilityOnTotalApplication(tmt(res)))
 		}
 	}
 
@@ -776,7 +928,7 @@ Solution alternative 3: 1) Create mutability type for methods.
 	def outer(a: @polyread) = {
 		val b = a
 	}
-	The idea of @polyread is that @polyread will be adapted to either @mutable or @readonly (or unannotated),
+	The idea of @polyread is that @polyread will be adapted to either @mutable or @readonly (or UnannotatedTmt),
 	depending upon whether any @readonly arguments are supplied at a call site context.
 	An unadapted method can call another unadapted method, in which case the viewing context of
 	the callee is the same as the caller. In this case, the callee is allowed to return @polyread.

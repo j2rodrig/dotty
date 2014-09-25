@@ -105,6 +105,25 @@ def wrapF(pr: AnyRef @polyread) = {
 
 	val k_pr2 = dbl(pr) _
 	k_pr2(mu)
+	pr
+	/* Type of k_pr2:
+	RefinedType(
+		RefinedType(
+			TypeRef(ThisType(module class scala),Function1),
+			scala$Function1$$T1,
+			ContraTypeAlias(
+				AnnotatedType(
+					ConcreteAnnotation(
+						Apply(Select(New(TypeTree[TypeRef(ThisType(module class annotation),polyread)]),<init>),List())),
+					TypeRef(TermRef(ThisType(module class <root>),scala),AnyRef)))),
+		scala$Function1$$R,
+		CoTypeAlias(
+			AnnotatedType(
+				ConcreteAnnotation(
+					Apply(Select(New(TypeTree[TypeRef(ThisType(module class annotation),polyread)]),<init>),List())),
+				TypeRef(TermRef(ThisType(module class <root>),scala),AnyRef))))
+	*/
+	
 	
 	/* Test Partial Applications */
 	//def d(@mutable a: AnyRef)(@readonly b: AnyRef): AnyRef @polyread = a

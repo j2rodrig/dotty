@@ -1,10 +1,12 @@
 package test
 
-import annotation.{StaticAnnotation, TypeConstraint}
+import annotation._
 
-class readonly extends TypeConstraint {}
-class polyread extends TypeConstraint {}
-class mutable extends TypeConstraint {}
+//import annotation.{StaticAnnotation, TypeConstraint}
+
+//class readonly extends TypeConstraint {}
+//class polyread extends TypeConstraint {}
+//class mutable extends TypeConstraint {}
 
 
 trait G {

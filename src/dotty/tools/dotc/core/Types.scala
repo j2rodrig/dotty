@@ -1080,7 +1080,7 @@ object Types {
     /** The denotation currently denoted by this type */
     final def denot(implicit ctx: Context): Denotation = {
       val now = ctx.period
-      if (checkedPeriod == now) lastDenotation else denotAt(now)
+      Mutability.pluginNamedTypeDenot(this, if (checkedPeriod == now) lastDenotation else denotAt(now))
     }
 
     /** A first fall back to do a somewhat more expensive calculation in case the first
@@ -1270,11 +1270,11 @@ object Types {
     //assert(name.toString != "<local Coder>")
     override def underlying(implicit ctx: Context): Type = {
       val d = denot
-      if (d.isOverloaded) NoType else
-	  	Mutability.withSimpleMutability(d.info,
-	  		Mutability.viewpointAdapt(
-	  			Mutability.getSimpleMutability(prefix), Mutability.getSimpleMutability(d.info)))
-      //if (d.isOverloaded) NoType else d.info
+      //if (d.isOverloaded) NoType else
+	  //	Mutability.withSimpleMutability(d.info,
+	  //		Mutability.viewpointAdapt(
+	  //			Mutability.tmt(prefix), Mutability.tmt(d.info)))
+      if (d.isOverloaded) NoType else d.info
     }
 
     override def signature(implicit ctx: Context): Signature = denot.signature
@@ -1669,7 +1669,7 @@ object Types {
     def isImplicit = false
 
 	// LUB of arguments previously applied to polyread parameters
-	var resultModifier: Mutability.SimpleMutability = Mutability.unannotated()
+	var resultModifier: Mutability.Tmt = Mutability.UnannotatedTmt()
 
     private[this] var myIsDependent: Boolean = _
     private[this] var myIsDepKnown = false
@@ -1710,6 +1710,7 @@ object Types {
         else MethodType(paramNames, paramTypes)(restpeFn)
       }
 
+	  // TODO: change instantiate to handle type mods: actually, just change resultType... but we need to know the arguments.
     def instantiate(argTypes: => List[Type])(implicit ctx: Context): Type =
       if (isDependent) resultType.substParams(this, argTypes)
       else resultType
@@ -1723,7 +1724,7 @@ object Types {
         false
     }
 	
-	def copyWithResultModifier(resultMod: Mutability.SimpleMutability)(implicit ctx: Context): MethodType = {
+	def copyWithResultModifier(resultMod: Mutability.Tmt)(implicit ctx: Context): MethodType = {
 		val derivedMethod = {
 			val restpeFn = (x: MethodType) => this.resultType.subst(this, x)
 			if (isJava) JavaMethodType(paramNames, paramTypes)(restpeFn)
