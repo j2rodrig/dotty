@@ -2,24 +2,6 @@ import annotation._
 
 trait K {
 
-	class C(var cp1: AnyRef @polyread) {
-		@polyread var alias_cp1 = cp1
-		def retF() = cp1
-	}
-	trait Upward { def apply(): Unit }
-	def Cdef(cp1: AnyRef @polyread): Upward = {
-		@polyread var alias_cp1 = cp1
-		new Upward {
-			def apply(): Unit = { }
-		}
-	}
-	
-	var km: AnyRef @mutable
-	var kpr: AnyRef @polyread
-	var kr: AnyRef @readonly
-	
-	
-	
 	//type T
 
 	/*def afunction(afp1: AnyRef @polyread): AnyRef @polyread = {
@@ -48,6 +30,20 @@ trait K {
 		aclosure2(p)
 		aclosure3(p)
 	}*/
+	
+	class C {
+		def f(a: Int => Int): Unit = { a }
+		def f1[T](): Unit = {}
+	}
+	
+	def outer(list: List[AnyRef] @mutable, c: C @mutable): Int = {
+		var acc = 0
+		//val list_alias = list
+		//list.foreach ({ m: AnyRef => acc = acc + 1 })
+		c.f({ m => m+1 })
+		c.f1[C]()
+		acc
+	}
 	
 	def dbl(dp1: AnyRef @polyread)(dp2: AnyRef @polyread): AnyRef @polyread
 	

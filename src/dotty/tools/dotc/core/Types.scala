@@ -774,6 +774,7 @@ object Types {
     def finalResultType: Type = resultType match {
       case mt: MethodType => mt.resultType.finalResultType
       case pt: PolyType => pt.resultType.finalResultType
+      //case et: ExprType => et.resultType.finalResultType
       case _ => resultType
     }
 
@@ -1724,7 +1725,7 @@ object Types {
         false
     }
 	
-	def copyWithResultModifier(resultMod: Mutability.Tmt)(implicit ctx: Context): MethodType = {
+	/*def copyWithResultModifier(resultMod: Mutability.Tmt)(implicit ctx: Context): MethodType = {
 		val derivedMethod = {
 			val restpeFn = (x: MethodType) => this.resultType.subst(this, x)
 			if (isJava) JavaMethodType(paramNames, paramTypes)(restpeFn)
@@ -1733,7 +1734,7 @@ object Types {
 		}
 		derivedMethod.resultModifier = resultMod
 		derivedMethod
-	 }
+	 }*/
 
     override def computeHash = doHash(paramNames, resultType, paramTypes)
 

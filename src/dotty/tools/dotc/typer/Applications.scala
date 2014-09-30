@@ -495,11 +495,11 @@ trait Applications extends Compatibility { self: Typer =>
             val app =
               if (proto.argsAreTyped) new ApplyToTyped(tree, fun1, funRef, proto.typedArgs, pt)
               else new ApplyToUntyped(tree, fun1, funRef, proto, pt)
-            //val result = app.result
+            val result = app.result
 			//val result = app.modifiedResult
 			//val result = app.result withType Mutability.modifiedResultType(app.result.tpe, app.resultModifier)
 			//println(s"Applying ${app.methType.show}\n Result  ${app.result.tpe.show} with adaptations ${app.resultModifier}")
-			val result = app.result withType Mutability.methodResultWithAdapations(app.methType, app.result.tpe, app.resultModifier)
+			//val result = app.result withType Mutability.methodResultWithAdapations(app.methType, app.result.tpe, app.resultModifier)
 			//println(s" Adapted ${result.tpe.show}\n")
 			//println(s"\nApp result type: ${app.result.tpe.show} with mod ${app.resultModifier} -> ${result.tpe.show}\n")
 			//println ("   Result type: " + result.tpe)

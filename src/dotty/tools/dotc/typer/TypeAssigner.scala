@@ -273,9 +273,9 @@ trait TypeAssigner {
 
   def assignType(tree: untpd.Closure, meth: Tree, target: Tree)(implicit ctx: Context) = {
     //println(s"Method result passed to closure: ${meth.tpe.widen.asInstanceOf[MethodType].resultModifier}")
-    val methodType = Mutability.copyMethodWithModifiedResult(meth.tpe.widen, meth.tpe.widen.asInstanceOf[MethodType].resultModifier)
-    var funType = if (target.isEmpty) methodType.toFunctionType else target.tpe
-    //var funType = if (target.isEmpty) meth.tpe.widen.toFunctionType else target.tpe
+    //val methodType = Mutability.copyMethodWithModifiedResult(meth.tpe.widen, meth.tpe.widen.asInstanceOf[MethodType].resultModifier)
+    //var funType = if (target.isEmpty) methodType.toFunctionType else target.tpe
+    var funType = if (target.isEmpty) meth.tpe.widen.toFunctionType else target.tpe
 	//tree.env.foreach { argTree => println(s"Closure arg: ${argTree.tpe}") }
 	//println(s"   on function type: $funType\n")
     tree.withType(funType)

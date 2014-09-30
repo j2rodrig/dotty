@@ -368,7 +368,8 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
           case ref: TermRef if ref.symbol is (Mutable, butNot = Accessor) =>
 		    val rhs1 = typed(tree.rhs, ref.info)
 		  
-			// Make sure the prefix is not readonly.
+			// TODO: re-enable when ready
+			/*// Make sure the prefix is not readonly.
 			Mutability.tmt(ref.prefix) match {
 				case Mutability.Readonly() =>
 					typer.ErrorReporting.errorTree(lhs1, s"Field ${ref.name} cannot be written through a @readonly reference")
@@ -380,7 +381,7 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
 		  
 			if (!Mutability.mutabilitySubtype(rhs1.tpe, lhs1.tpe)) {
 				Mutability.tmtMismatch (rhs1, lhs1.tpe)
-			}
+			}*/
 		  
             assignType(cpy.Assign(tree, lhs1, rhs1))
           case _ =>
@@ -804,6 +805,8 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
   }
 
   def typedValDef(vdef: untpd.ValDef, sym: Symbol)(implicit ctx: Context) = track("typedValDef") {
+    //val vdef2 = Mutability.setValDefOrigin(vdef, sym)
+  
     val ValDef(mods, name, tpt, rhs) = vdef
     val mods1 = addTypedModifiersAnnotations(mods, sym)
     var tpt1 = typedType(tpt)
@@ -814,7 +817,8 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
 	
 	import Mutability._
 	
-	// Add mutability annotations on sym to sym's type.
+	// TODO: re-enable when ready
+	/*// Add mutability annotations on sym to sym's type.
 	// Allows expressions like `@readonly val x = y`.
 	sym.denot.annotations.foreach { annot =>
 		val tmtAnnot = tmt(annot)
@@ -837,37 +841,45 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
 		sym.denot.info = withResultTmt(sym.denot.info, tmtVal withOrigin defaultOrigin)
 	}
 
-	//if (Mutability.isParameter(sym) && Mutability.tmt(sym.info).isPolyread) {
-
-	//	sym.denot.info = Mutability.assignOrigin(sym.denot.info, sym)
-	//}
-	
-	// If the symbol is not a parameter, but has a polyread type, convert it to @readonly.
-	/*if (!Mutability.isParameter(sym) && Mutability.tmt(sym.info).isPolyread) {
-	
-		sym.denot.info = Mutability.withSimpleMutability(sym.denot.info, Mutability.Readonly())
-		
-		// Tell the programmer if @polyread was placed on the symbol.
-		if (sym.denot.hasAnnotation(ctx.definitions.PolyreadClass))
-			ctx.error(s"Only method parameters and return types can be declared @polyread", vdef.pos)
-
-		// Tell the programmer if @polyread was placed on the symbol's type.
-		// (but only issue the error if the type was not inferred from the right-hand-side.)
-		else if (rhs.isEmpty && Mutability.explicitSimpleMutability(tpt1.tpe).isPolyread)
-			ctx.error(s"Only method parameters and return types can be declared @polyread", tpt1.pos)
-	
-	}*/
-	
-	println(s"$sym: ${sym.info.show}")
-	
 	if (!Mutability.mutabilitySubtype(rhs1.tpe, sym.info)) {
 		Mutability.tmtMismatch(rhs1, sym.info)
-	}
+	}*/
   
+	//println(s"$sym: ${sym.info.show}")
+	
 	assignType(cpy.ValDef(vdef, mods1, name, tpt1, rhs1), sym)
   }
 
+
+  // OLDER VALDEF STUFF -->
+//if (Mutability.isParameter(sym) && Mutability.tmt(sym.info).isPolyread) {
+
+//	sym.denot.info = Mutability.assignOrigin(sym.denot.info, sym)
+//}
+
+// If the symbol is not a parameter, but has a polyread type, convert it to @readonly.
+/*if (!Mutability.isParameter(sym) && Mutability.tmt(sym.info).isPolyread) {
+
+	sym.denot.info = Mutability.withSimpleMutability(sym.denot.info, Mutability.Readonly())
+	
+	// Tell the programmer if @polyread was placed on the symbol.
+	if (sym.denot.hasAnnotation(ctx.definitions.PolyreadClass))
+		ctx.error(s"Only method parameters and return types can be declared @polyread", vdef.pos)
+
+	// Tell the programmer if @polyread was placed on the symbol's type.
+	// (but only issue the error if the type was not inferred from the right-hand-side.)
+	else if (rhs.isEmpty && Mutability.explicitSimpleMutability(tpt1.tpe).isPolyread)
+		ctx.error(s"Only method parameters and return types can be declared @polyread", tpt1.pos)
+
+}*/
+// <--
+
+
+
+
   def typedDefDef(ddef: untpd.DefDef, sym: Symbol)(implicit ctx: Context) = track("typedDefDef") {
+    //val ddef2 = Mutability.polyParamsWithOrigin(ddef, sym) // TODO: move to plug-in contact location
+  
     val DefDef(mods, name, tparams, vparamss, tpt, rhs) = ddef
     val mods1 = addTypedModifiersAnnotations(mods, sym)
     val tparams1 = tparams mapconserve (typed(_).asInstanceOf[TypeDef])
@@ -878,7 +890,8 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
 	
 	import Mutability._
 	
-	sym.denot.annotations.foreach { annot =>
+	// TODO: re-enable when ready
+	/*sym.denot.annotations.foreach { annot =>
 		val tmtAnnot = tmt(annot)
 		if (tmtAnnot.exists)
 			sym.denot.info = withResultTmt(sym.denot.info, tmtAnnot)
@@ -892,13 +905,17 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
 	
 	if (!Mutability.mutabilitySubtype(rhs1.tpe, sym.info.finalResultType)) {
 		Mutability.tmtMismatch(rhs1, sym.info.finalResultType)
-	}
+	}*/
 	
-	println(s"$sym: ${sym.info.show}")
+	//println(s"$sym: ${sym.info.show}; rhs: ${rhs1.tpe.show}")
+	println(s"${sym.name}: ${showSpecial(sym.info)}")
 	
     assignType(cpy.DefDef(ddef, mods1, name, tparams1, vparamss1, tpt1, rhs1), sym)
     //todo: make sure dependent method types do not depend on implicits or by-name params
 	
+	
+	//TODO: a special run of the compiler that flags methods where parameters could be polyread/readonly?
+	//  (instead of an analysis/inference tool)
   }
 
   def typedTypeDef(tdef: untpd.TypeDef, sym: Symbol)(implicit ctx: Context): Tree = track("typedTypeDef") {
@@ -906,7 +923,8 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
     val mods1 = addTypedModifiersAnnotations(mods, sym)
     val _ = typedType(rhs) // unused, typecheck only to remove from typedTree
 	
-	println("TypeDef: " + name.toString + ": " + sym.info)
+	//println("TypeDef: " + name.toString + ": " + sym.info)
+	//println(s"${name}: ${Mutability.showSpecial(sym.info)}")
 	
     assignType(cpy.TypeDef(tdef, mods1, name, TypeTree(sym.info)), sym)
   }
