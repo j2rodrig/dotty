@@ -1,0 +1,2 @@
+# Just run the compiler normally, showing output to the console.
+../bin/dotc tests/$1.scala

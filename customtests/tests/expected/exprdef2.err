@@ -1,0 +1,6 @@
+tests/exprdef2.scala:12: error: mutability mismatch:
+ found   : AnyRef @readonly(exprdef2.this.r1)
+ required: AnyRef @mutable
+	@mutable def me4 = r1  // should error
+                           ^
+one error found

@@ -1,0 +1,1 @@
+scalac -d compiled_tests/ -cp ./lib/scalatest_2.11-2.2.1.jar "$@"

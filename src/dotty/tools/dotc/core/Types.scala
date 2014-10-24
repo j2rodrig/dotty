@@ -774,7 +774,7 @@ object Types {
     def finalResultType: Type = resultType match {
       case mt: MethodType => mt.resultType.finalResultType
       case pt: PolyType => pt.resultType.finalResultType
-      //case et: ExprType => et.resultType.finalResultType
+      //case et: ExprType => et.resultType.finalResultType  // TODO: should this be here?
       case _ => resultType
     }
 
@@ -1081,7 +1081,7 @@ object Types {
     /** The denotation currently denoted by this type */
     final def denot(implicit ctx: Context): Denotation = {
       val now = ctx.period
-      Mutability.pluginNamedTypeDenot(this, if (checkedPeriod == now) lastDenotation else denotAt(now))
+      if (checkedPeriod == now) lastDenotation else denotAt(now)
     }
 
     /** A first fall back to do a somewhat more expensive calculation in case the first
@@ -1205,7 +1205,7 @@ object Types {
       else denot.symbol
     }
 
-    def info(implicit ctx: Context): Type = denot.info
+    def info(implicit ctx: Context): Type = Mutability.viewpointAdapt(denot.info, this)
 
     def isType = isInstanceOf[TypeRef]
     def isTerm = isInstanceOf[TermRef]
@@ -1270,12 +1270,15 @@ object Types {
 
     //assert(name.toString != "<local Coder>")
     override def underlying(implicit ctx: Context): Type = {
-      val d = denot
       //if (d.isOverloaded) NoType else
 	  //	Mutability.withSimpleMutability(d.info,
 	  //		Mutability.viewpointAdapt(
 	  //			Mutability.tmt(prefix), Mutability.tmt(d.info)))
-      if (d.isOverloaded) NoType else d.info
+	  
+	  if (isOverloaded) NoType else info
+	  
+      //val d = denot
+      //if (d.isOverloaded) NoType else d.info
     }
 
     override def signature(implicit ctx: Context): Signature = denot.signature

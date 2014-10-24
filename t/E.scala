@@ -34,7 +34,22 @@ trait E {
 	type U = F @mutable;   // OK: T and U are unrelated types
 	var t: T = new U()   // readonly
 	var u: U = new T()   // mutable
+	
+	def returnsF(t: T): F = t  // error: F is @mutable, t is @readonly
 
+	type S = T @mutable  // this is the interesting case...
+	def returnsT(s: S): T = s  // OK: adding @readonly to the reference is safe
+	
+	// inheritance case:
+	trait TR1 {
+		def baseMethod(t: T)
+	}
+	trait TR2 extends TR1 {
+		override def baseMethod(f: F)  // Error: cannot override @readonly with @mutable in parameter list
+	}
+	trait TR3 extends TR1 {
+		override def baseMethod(f: F @readonly)  // OK: readonly-ness is preserved
+	}
 
 
 /*	TypeDef(Modifiers(<trait>,,List()),G,

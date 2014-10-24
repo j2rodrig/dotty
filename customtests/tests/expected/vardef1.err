@@ -1,0 +1,11 @@
+tests/vardef1.scala:12: error: mutability mismatch:
+ found   : AnyRef @readonly(vardef1.this.r1)
+ required: AnyRef
+	var u4: AnyRef = r1  // should error
+                         ^
+tests/vardef1.scala:15: error: mutability mismatch:
+ found   : AnyRef @readonly(vardef1.this.r1)
+ required: AnyRef @mutable
+	var m4: AnyRef @mutable = r1  // should error
+                                  ^
+two errors found

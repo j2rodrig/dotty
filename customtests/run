@@ -1,0 +1,7 @@
+scala -cp ./lib/scalatest_2.11-2.2.1.jar org.scalatest.tools.Runner -R compiled_tests/ -q Spec -q Suite "$@"
+# Use -s to run a single test suite
+# Use -m to run all suites that are direct members of a package
+# Use -w to run all suites that are direct or indirect members of a package
+# With no options, all suites in the compiled_tests folder are run.
+# Add -q options to include suites with alternative suffixes.
+# For more options, see: http://www.scalatest.org/user_guide/using_the_runner

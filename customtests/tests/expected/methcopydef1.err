@@ -1,0 +1,11 @@
+tests/methcopydef1.scala:28: error: mutability mismatch:
+ found   : AnyRef @readonly
+ required: AnyRef(methcopydef1.this.u1)
+	u1 = ud4()  // should error
+                ^
+tests/methcopydef1.scala:30: error: mutability mismatch:
+ found   : AnyRef @readonly
+ required: AnyRef(methcopydef1.this.u1)
+	u1 = udd4()()  // should error
+                   ^
+two errors found

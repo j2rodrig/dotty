@@ -1,0 +1,6 @@
+tests/exprcopydef1.scala:20: error: mutability mismatch:
+ found   : => AnyRef @readonly(exprcopydef1.this.ue4)
+ required: AnyRef(exprcopydef1.this.u1)
+	u1 = ue4  // should error
+             ^
+one error found

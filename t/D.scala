@@ -1,6 +1,6 @@
 //package test
 
-import annotation._
+import annotation.tmt._
 
 //import annotation.{StaticAnnotation, TypeConstraint}
 
@@ -63,17 +63,17 @@ RefinedType(
 		var pr3 = pr
 		var ro3 = ro
 		mu3 = pr3   // should error
-		pr3 = ro3
+		pr3 = ro3   // should error
 		ro3 = pr3
 		@mutable var mPre1 = mu
 		@mutable var mPre2 = pr  // should error
 		@mutable var mPre3 = ro  // should error
-		@polyread var pPre1 = mu  // should error
-		@polyread var pPre2 = pr  // should error
-		@polyread var pPre3 = ro  // should error
-		var ptPre1: AnyRef @polyread = mu  // should error (or silently convert to readonly)
-		var ptPre2: AnyRef @polyread = pr  // should error (or silently convert to readonly)
-		var ptPre3: AnyRef @polyread = ro  // should error (or silently convert to readonly)
+		//@polyread var pPre1 = mu  // should error
+		//@polyread var pPre2 = pr  // should error
+		//@polyread var pPre3 = ro  // should error
+		//var ptPre1: AnyRef @polyread = mu  // should error (or silently convert to readonly)
+		//var ptPre2: AnyRef @polyread = pr  // should error (or silently convert to readonly)
+		//var ptPre3: AnyRef @polyread = ro  // should error (or silently convert to readonly)
 		@readonly var rPre1 = mu
 		@readonly var rPre2 = pr
 		@readonly var rPre3 = ro

@@ -1,6 +1,6 @@
 package test
 
-import annotation._
+import annotation.tmt._
 
 //import annotation.{StaticAnnotation, TypeConstraint}
 

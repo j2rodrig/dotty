@@ -1,0 +1,21 @@
+tests/methdef1.scala:12: error: mutability mismatch:
+ found   : AnyRef @readonly(methdef1.this.r1)
+ required: AnyRef
+	def ud4(): AnyRef = r1  // should error
+                            ^
+tests/methdef1.scala:15: error: mutability mismatch:
+ found   : AnyRef @readonly(methdef1.this.r1)
+ required: AnyRef @mutable
+	def md4(): AnyRef @mutable = r1  // should error
+                                     ^
+tests/methdef1.scala:22: error: mutability mismatch:
+ found   : AnyRef @readonly(methdef1.this.r1)
+ required: AnyRef
+	def udd4()(): AnyRef = r1  // should error
+                               ^
+tests/methdef1.scala:25: error: mutability mismatch:
+ found   : AnyRef @readonly(methdef1.this.r1)
+ required: AnyRef @mutable
+	def mdd4()(): AnyRef @mutable = r1  // should error
+                                        ^
+four errors found

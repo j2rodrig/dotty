@@ -18,6 +18,7 @@ import Decorators._
 import Denotations._
 import Periods._
 import Types._
+import typer.ProtoTypes._
 import printing.Texts.Text
 
 object Mutability {
@@ -163,6 +164,9 @@ Solution alternative 4: ... work in progress ...
 			override def adaptations = _adaptations
 		}
 	
+	//ctx.warning(s"No origin set for this @polyread annotation", annot.tree.pos)
+
+	//------- Simple Subtyping Relationships -------
 
 	/// Least upper bound.
 	def lub(tmt1: Tmt, tmt2: Tmt): Tmt =
@@ -189,8 +193,293 @@ Solution alternative 4: ... work in progress ...
 		else if (tmt1.isPolyread) tmt1   // any polyread is below readonly
 		else if (tmt2.isPolyread) tmt2
 		else Readonly()
+
+	//--- Conversions to/from annotations ---//
+
+	/// Special annotation that carries extra TMT information.
+	class TmtAnnotation(tree: Tree, val tmt: Tmt) extends ConcreteAnnotation(tree) {
+		override def toText(implicit ctx: Context): Text = tmt.toString
+	}
+
+	/// Finds the TMT of the given annotation.
+	def tmt(annot: Annotation)(implicit ctx: Context): Tmt =
+		annot match {
+			case annot: TmtAnnotation => annot.tmt   // This annotation carries TMT information.
+			case _ =>  // get TMT based on annotation class.
+				if (annot matches ctx.definitions.ReadonlyClass) Readonly()
+				else if (annot matches ctx.definitions.PolyreadClass) Polyread()
+				else if (annot matches ctx.definitions.MutableClass) Mutable()
+				else UnannotatedTmt()
+		}
+
+	/// Builds a TmtAnnotation from the given TMT.
+	def toAnnot(tm: Tmt)(implicit ctx: Context): Annotation =
+		new TmtAnnotation(
+			New (
+				tm match {
+					case tm: Mutable  => ctx.definitions.MutableClass.typeRef
+					case tm: Polyread => ctx.definitions.PolyreadClass.typeRef
+					case tm: Readonly => ctx.definitions.ReadonlyClass.typeRef
+				},
+				Nil
+			),
+			tm)
+
+	//------- TMT subtyping -------
 	
-	// Subtype relation: is tmt1 <:< tmt2?
+	def tmtSubtypeOf(tp1: Type, tp2: Type)(implicit ctx: Context): Boolean =
+		(tmt(tp1) <:< tmt(tp2)) && tmtUnderlyingSubtypeOf(tp1, tp2)
+		
+	private[this] def tmtUnderlyingSubtypeOf(tp1: Type, tp2: Type)(implicit ctx: Context): Boolean =
+		refinedSubtypeOf(tp1, tp2) //&& methodicSubtypeOf(tp1, tp2)
+	
+	/*private[this] def dep_tmtUnderlyingSubtypeOf(tp1: Type, tp2: Type)(implicit ctx: Context): Boolean = tp1 match {
+		case TypeBounds(lo1, hi1) =>
+		
+		
+		//tmtSubtypeOf(lo1, tp2) && tmtSubtypeOf(hi1, tp2)  // treat TypeBounds like AndType, since mutabilities are not tied to Scala type bounds
+	
+		case tp1 @ RefinedType(parent1, refinedName) =>
+			val tm1 = tmt(tp1.refinedInfo)
+			//tp2.member(refinedName).alternatives.forall { denot =>
+			//	if (denot.isType) {
+			//	tmtWithVariance
+			//	} else true
+			//}
+			val (tm2, variance2) = tmtTypeMemberWithVariance(tp2, refinedName)
+			tmtSubtypeOf(tm1, tm2, variance2) && tmtSubtypeOf(parent1, tp2)
+	
+		case _ => true
+	}*/
+	
+	private[this] def typeVariance(tp: Type)(implicit ctx: Context): Int = tp match {
+		case tp: TypeBounds => tp.variance
+		case tp: TypeProxy => typeVariance(tp.underlying)
+		case _ => 0
+	}
+	
+	private[this] def refinedSubtypeOf(tp1: Type, tp2: Type)(implicit ctx: Context): Boolean = {
+		refinedMemberNames(tp1).forall { name =>
+			tp1.member(name).alternatives.forall { denot1Member =>
+				tp2.member(name).alternatives.forall { denot2Member =>
+					val variance2 = typeVariance(denot2Member.info)
+					if (variance2 == 1)
+						tmtSubtypeOf(denot1Member.info, denot2Member.info)
+					else if (variance2 == -1)
+						tmtSubtypeOf(denot2Member.info, denot1Member.info)
+					else
+						tmtSubtypeOf(denot1Member.info, denot2Member.info) &&
+						tmtSubtypeOf(denot2Member.info, denot1Member.info)
+				}
+			}
+		}
+	}
+
+	private[this] def refinedMemberNames(tp: Type)(implicit ctx: Context): Set[Name] = tp match {
+		case tp: RefinedType =>
+			val ns = refinedMemberNames(tp.parent)
+			if (tp.refinedName.isTypeName) ns + tp.refinedName else ns
+		case tp: TypeProxy =>
+			refinedMemberNames(tp.underlying)
+		case tp: AndType =>
+			refinedMemberNames(tp.tp1) | refinedMemberNames(tp.tp2)
+		case tp: OrType =>
+			refinedMemberNames(tp.tp1) & refinedMemberNames(tp.tp2)
+		case _ =>
+			Set()
+	}
+
+
+	
+	/*def tmtSubtypeOf(tm1: Tmt, tm2: Tmt, variance: Int): Boolean =
+		if (variance == 1) tm1 <:< tm2
+		else if (variance == -1) tm2 <:< tm1
+		else (tm1 <:< tm2) && (tm2 <:< tm1)*/
+
+	//------- TMT queries -------
+
+	/// Finds the TMT of the given type.
+	def tmt(tp: Type)(implicit ctx: Context): Tmt =
+		tp.finalResultType match {
+			case AnnotatedType(annot, underlying) =>
+				val tm = tmt(annot)
+				if (tm.exists) tm else tmt(underlying)  // skip non-TMT annotations
+			case tp @ TypeBounds(lo, hi) => tmtFromTypeBounds(lo, hi)
+			case tp @ AndType(tp1, tp2) => glb(tmt(tp1), tmt(tp2))
+			case tp @ OrType(tp1, tp2) => lub(tmt(tp1), tmt(tp2))
+			case tp: TypeProxy => tmt(tp.underlying)
+			case tp: ErrorType => ErrorTmt()
+			case _ => UnannotatedTmt()
+		}
+
+	/// Finds the immediate TMT of the given type. Does not traverse type aliases or proxy types.
+	def immTmt(tp: Type)(implicit ctx: Context): Tmt =
+		tp.finalResultType match {
+			case AnnotatedType(annot, underlying) =>
+				val tm = tmt(annot)
+				if (tm.exists) tm else tmt(underlying)  // skip non-TMT annotations
+			case tp: ErrorType => ErrorTmt()
+			case _ => UnannotatedTmt()
+		}
+
+	/// Finds the TMT for a type bounds declaration, e.g., T <: A >: B.
+	def tmtFromTypeBounds(lo: Type, hi: Type)(implicit ctx: Context): Tmt = {
+		/// If a TMT annotation is immediately present (not via an alias or proxy),
+		/// then only consider immediate annotations.
+		val (tmtLo, tmtHi) = (immTmt(lo), immTmt(hi))
+		if (tmtLo.exists || tmtHi.exists)
+			lub(tmtLo, tmtHi)
+		else
+			lub(tmt(lo), tmt(hi))  // default: look through alias/proxy types.
+	}
+
+	/*/// Finds the TMT and variance of the given type.
+	def tmtWithVariance(tp: Type)(implicit ctx: Context): (Tmt, Int) =
+		tp.finalResultType match {
+			case AnnotatedType(annot, underlying) =>
+				val tm = tmt(annot)
+				if (tm.exists) (tm, 0) else tmtWithVariance(underlying)  // skip non-TMT annotations
+			case tp @ TypeBounds(lo, hi) => tmtWithVariance(tmtFromTypeBounds(lo, hi), tp.variance)
+			case tp @ AndType(tp1, tp2) =>
+				val (tm1, variance1) = tmtWithVariance(tp1)
+				val (tm2, variance2) = tmtWithVariance(tp2)
+				val variance = if (variance1 == variance2) variance1 else 0  // invariant if variances don't match
+				(glb(tm1, tm2), variance)
+			case tp @ OrType(tp1, tp2) =>
+				val (tm1, variance1) = tmtWithVariance(tp1)
+				val (tm2, variance2) = tmtWithVariance(tp2)
+				val variance = if (variance1 == variance2) variance1 else 0  // invariant if variances don't match
+				(lub(tm1, tm2), variance)
+			case tp: TypeProxy => tmtWithVariance(tp.underlying)
+			case tp: ErrorType => (ErrorTmt(), 0)
+			case _ => (UnannotatedTmt(), 0)
+		}*/
+	
+	/*/// Refinement subtyping: Is tmRefined <:< tmOrig with respect to the variance tmVarianceOrig?
+	def tmtRefinementSubtype(tmRefined: Tmt, tmOrig: Tmt, tmVarianceOrig: Int)(implicit ctx: Context): Boolean = {
+		if (tmVarianceOrig == -1) tmOrig <:< tmRefined
+		else if (tmVarianceOrig == 1) tmRefined <:< tmOrig
+		else (tmOrig <:< tmRefined) && (tmRefined <:< tmOrig)
+	}*/
+	
+	/*/// Finds the named type member of the given type, returning its TMT and variance.
+	def tmtTypeMemberWithVariance(tp2: Type, name: Name)(implicit ctx: Context): (Tmt, Int) =
+		tp2.member(refinedName).alternatives.forall { denot =>
+			if (denot.isType) {
+			tmtWithVariance
+			} else true
+		}*/
+	/*tp2 match {
+	
+		// Find the named member inside a class or trait.
+		case ClassInfo(prefix, cls, classParents, decls, selfInfo) =>
+			var tm: Tmt = UnannotatedTmt()
+			var variance: Int = 2  // special variance 2 means nothing found yet
+			cls.denot.findMember(name, prefix, EmptyFlags).alternatives.foreach { d =>
+				if (d.isType) {
+					val (tmMember, varianceMember) = tmtWithVariance(d.info)
+					tm = lub(tm, tmMember)
+					if (variance == 2) variance = varianceMember
+					else if (variance != varianceMember) variance = 0
+				}
+			}
+			if (variance == 2) variance = 0
+			(tm, variance)
+
+		// RefinedType: if the refinedName matches name, return refinedInfo's TMT/variance.
+		case tp2 @ RefinedType(parent, refinedName) =>
+			if (name == refinedName) tmtWithVariance(tp2.refinedInfo)  // found the named member here
+			else tmtTypeMemberWithVariance(parent, name)   // not found here - search parent
+
+		case AndType(tp21, tp22) =>
+			val (tm1, variance1) = tmtTypeMemberWithVariance(tp21, name)
+			val (tm2, variance2) = tmtTypeMemberWithVariance(tp21, name)
+			val variance = if (variance1 == variance2) variance1 else 0  // invariant if variances don't match
+			(glb(tm1, tm2), variance)
+
+		case OrType(tp21, tp22) =>
+			val (tm1, variance1) = tmtTypeMemberWithVariance(tp21, name)
+			val (tm2, variance2) = tmtTypeMemberWithVariance(tp21, name)
+			val variance = if (variance1 == variance2) variance1 else 0  // invariant if variances don't match
+			(lub(tm1, tm2), variance)
+		
+		case tp2: TypeProxy =>
+			tmtTypeMemberWithVariance(tp2.underlying, name)
+
+		case _ =>
+			(UnannotatedTmt(), 0)
+	}*/
+	
+	/*def tmtRefinementSubtype(tmRefined: Tmt, tp2: Type, name2: Name)(implicit ctx: Context): Boolean = {
+		val (tm2, variance2) = tmtMemberWithVariance(tp2, name2)
+		tmtRefinementSubtype(tmRefined, tm2, variance2)
+	}
+	
+	def tmtRefinementSubtype(tp1: RefinedType, tp2: Type)(implicit ctx: Context): Boolean = {
+	}*/
+	
+	/*def tmtMethodSubtype(tp1: MethodType, tp2: MethodType)(implicit ctx: Context): Boolean = {
+		val MethodType(_, paramTypes1) = tp1
+		val MethodType(_, paramTypes2) = tp2
+		var i = 0
+		while (i < paramTypes1.size) {
+			if (tmtRefinementSubtype(tmt(paramTypes1[i]), paramTypes2[i], -1))
+			i = i + 1
+		}
+		tmtSubtypeOf(tp1.resultType, tp2.resultType, 1)  // TODO: need to carry variance along with types in tmtSubtypeOf
+	}*/
+	
+	// --- There are 2 kinds of subtyping: checked with variance (for type refinements),
+	// and checked without variance (for assignments/defintions).
+	// Checked with variance: all type refinements - recursively examine named type membership.
+	// Checked without variance: all top-level TMTs. 
+
+	/// Wraps a TMT annotation around the given type. For Methodic types, wraps the final result type.
+	def addTmt(tp: Type, tm: Tmt)(implicit ctx: Context): Type = tp match {
+	
+		case tp @ MethodType(paramNames, paramTypes) =>
+			tp.derivedMethodType(paramNames, paramTypes, addTmt(tp.resultType, tm))
+		
+		case tp: ExprType =>
+			tp.derivedExprType(addTmt(tp.resultType, tm))
+		
+		case tp @ PolyType(paramNames) =>
+			tp.derivedPolyType(paramNames, tp.paramBounds, addTmt(tp.resultType, tm))
+		
+		case AnnotatedType(annot, underlying) =>
+			if (tmt(annot).exists) addTmt(underlying, tm)  // existing top-level TMT annotations are removed
+			else new AnnotatedType(toAnnot(tm), tp)
+		
+		case _ =>
+			if (!tm.isUnannotated) new AnnotatedType(toAnnot(tm), tp)
+			else if (tmt(tp).exists) new AnnotatedType(toAnnot(Mutable()), tp)  // add @mutable to mask underlying stuff
+			else tp  // tp and tmt are both unannotated -- no action needed
+	}
+	
+	/// Viewpoint Adapation: Where a type's info member needs to be modified.
+	/// The viewpoint is a NamedType. The viewpoint's `prefix` member is the type
+	///  the inf parameter should be viewed from.
+	def viewpointAdapt(inf: Type, viewpoint: Type)(implicit ctx: Context): Type =
+		viewpoint match {
+			case TermRef(prefix, name) =>
+				val viewedTmt = lub(tmt(inf), tmt(prefix))
+				if (!(viewedTmt <:< tmt(inf))) addTmt(inf, viewedTmt) // if the TMT needs to be changed...
+				else inf
+			case _ => inf
+		}
+	
+	/// Adds a TMT to a type. Issues an error if TMT is less restrictive than what's already on the type.
+	/*def addTmtRestriction(tp: Type, tm: Tmt, location: Tree)(implicit ctx: Context): Type =
+		if (tmt(tp) <:< tm)
+			addTmt(tp, tmt)
+		else {
+			typer.ErrorReporting.errorTree(location, s"$tm is less restrictive than ${tmt(tp)}")
+			tp
+		}*/
+	
+	//--- Interfacing with the Scala type system: Subtype checking ---//
+
+	/// Subtype relation: is tmt1 <:< tmt2?
 	def tmtSubtypeOf(tmt1: Tmt, tmt2: Tmt): Boolean =
 		// Don't fail subtypes if a type error already exists. Prevents generation of spurious error messages.
 		if (tmt1.isError || tmt2.isError) true
@@ -210,166 +499,161 @@ Solution alternative 4: ... work in progress ...
 				case UnannotatedTmt() => !tmt1.isReadonly && !tmt1.isPolyread
 			}
 
-
-	//--- Tree transformations ---//
-
-	/*def setOrigin(mods: untpd.Modifiers, origin: Symbol)(implicit ctx: Context): untpd.Modifiers = {
-		val annotations1 = mods.annotations mapconserve { annot =>
-			val tm = tmt(annot)
-			if (tm.isPolyread) toAnnot(tm withOrigin origin)
-			else annot
-		}
-		Modifiers(mods.flags, mods.privateWithin, annotations1)
-	}*/
-	
-	/*def typeTreeWithOrigin(tree: untpd.Tree, origin: Symbol)(implicit ctx: Context): untpd.Tree =
-		tree match {
-			case untpd.Annotated(annot, arg) =>
-				val annot1 = typedExpr(annot, defn.AnnotationClass.typeRef)
-				if (tmt(annot1.tpe).isPolyread)
-					cpy.Annotated(tree, annot1 withType, arg)
-			case _ =>
-				tree
-		}
-	
-	def polyParamsWithOrigin(ddef: untpd.DefDef, sym: Symbol)(implicit ctx: Context): untpd.DefDef = {
-		val DefDef(mods, name, tparams, vparamss, tpt, rhs) = ddef
-		val vparamss1 = vparamss nestedMapconserve { vdef =>
-			val ValDef(vmods, vname, vtpt, vrhs) = vdef
-			
-			val vtpt1 = typeTreeWithOrigin(vtpt, sym)
-			
-			val Modifiers(flags, privateWithin, annotations) = vmods
-			val annotations1 = annotations mapconserve { annotation =>
-				val tm = tmt(annotation)
-				if (tm.isPolyread) toAnnot(tm withOrigin sym)
-				else annotation
+	/// Finds the TMT of a named member of a type. Returns UnannotatedTmt if member was not found.
+	def memberTmt(tp: Type, name: Name)(implicit ctx: Context): Tmt = tp match {
+		// Search for the member in a ClassInfo.
+		// If more than one member matches, then take the upper bound of all matched members.
+		case tp @ ClassInfo(prefix, cls, classParents, decls, selfInfo) =>
+			var tm: Tmt = UnannotatedTmt()
+			cls.denot.findMember(name, prefix, EmptyFlags).alternatives.foreach { d =>
+				tm = lub(tm, tmt(d.info))
 			}
+			tm
+	
+		// RefinedTypes: either the member is named here, or the parent type is searched.
+		case tp @ RefinedType(parent, refinedName) =>
+			if (name eq refinedName)
+				tmt(tp.refinedInfo)      // found the member here
+			else
+				memberTmt(parent, name)  // search the parent for the member
+		
+		// AndType: Lower bound of named members found on both types.
+		case tp @ AndType(tp1, tp2) =>
+			glb(memberTmt(tp1, name), memberTmt(tp2, name))
+	
+		// OrType: Upper bound of named members found on both types.
+		case tp @ OrType(tp1, tp2) =>
+			lub(memberTmt(tp1, name), memberTmt(tp2, name))
+	
+		case tp: TypeProxy =>
+			memberTmt(tp.underlying, name)
+	
+		case _ =>
+			UnannotatedTmt()
+	}
+	
+	/*/// Method types are subtypes of types that have compatible parameters and
+	/// compatible result types.
+	private[this] def methodSubtype(tp1: MethodType, tp2: Type)(implicit ctx: Context): Boolean =
+		tp2 match {
+			case tp2 @ MethodType(_, paramTypes2) =>
+				val MethodType(_, paramTypes1) = tp1
+				val paramsCompatible = (paramTypes1 zip paramTypes2) forall { case (paramTp1, paramTp2) =>
+					tmtSubtypeOf(paramTp2, paramTp1)  // parameter types are contravariant, so paramTp2 <:< paramTp1
+				}
+				val resultCompatiable = tmtSubtypeOf(tp1.resultType, tp2.resultType)
+				paramsCompatible && resultCompatible
+				
+			case tp2: PolyType =>  // we're not really interested in PolyTypes directly, only their underlying MethodTypes
+				methodSubtype(tp1, tp2.result)
+				
+			case AndType(tp21, tp22) =>
+				methodSubtype(tp1, tp21) && methodSubtype(tp1, tp22)
 			
-			cpy.ValDef(cpy.Modifiers(flags, privateWithin, annotations1), vname, vtpt1, vrhs)
+			case OrType(tp21, tp22) =>
+				methodSubtype(tp1, tp21) || methodSubtype(tp1, tp22)
+			
+			case tp2: TypeProxy =>  // perhaps the MethodType we're looking for is buried in the underlying type
+				methodSubtype(tp1, tp2.underlying)
+			
+			case _ => false  // don't know what tp2 is - it's certainly not a method type.
+		}*/
+
+	/// Refined types are subtypes of types with compatible named members, and
+	/// compatible parent types.
+	/*private[this] def refinementSubtype(tp1: RefinedType, tp2: Type)(implicit ctx: Context): Boolean =
+		tp2 match {
+			// Search for the named member in a ClassInfo.
+			// If more than one member matches, then take the upper bound of all matched members.
+			case ClassInfo(prefix, cls, classParents, decls, selfInfo) =>
+				val RefinedType(parent1, refinedName1) = tp1
+				cls.denot.findMember(refinedName1, prefix, EmptyFlags).alternatives.forall { d =>
+					tmtSubtypeOf(tp1.refinedInfo, d.info)
+				}
+	
+			// RefinedTypes: either the member is named here, or the parent type is searched.
+			case tp2 @ RefinedType(parent2, refinedName2) =>
+				val RefinedType(parent1, refinedName1) = tp1
+				if (refinedName1 eq refinedName2) {
+					val compatibleRefinement = tmtSubtypeOf(tp1.refinedInfo, tp2.refinedInfo)  // tp2 has a matching refinement
+					val compatible
+				} else
+					refinementSubtype(tp1, parent2)                 // look at tp2's parent for refinements
+			
+			case AndType(tp21, tp22) =>
+				refinementSubtype(tp1, tp21) && refinementSubtype(tp1, tp22)
+	
+			case OrType(tp21, tp22) =>
+				refinementSubtype(tp1, tp21) || refinementSubtype(tp1, tp22)
+	
+			case tp2: TypeProxy =>  // check the underlying type
+				refinementSubtype(tp1, tp2.underlying)
+	
+			case _ => false  // don't know what tp2 is - but it shouldn't contain named types.
+		}*/
+	
+	/*/// More advanced subtyping relationship that handles method types, generic types, etc.
+	def tmtSubtypeOf(tp1: Type, tp2: Type)(implicit ctx: Context): Boolean =
+		tp1 match {
+			case tp1: MethodType => methodSubtype(tp1, tp2)
+			case tp1: RefinedType => refinedSubtype(tp1, tp2)
+		}*/
+	
+	
+	
+		//if (!tmtSubtypeOf(tmt(tp1), tmt(tp2))) false
+		//else {
+		//}
+
+	/// Searches for 
+	/*def recursiveSubtypingRel(tp1: Type, tp2: Type): Boolean = tp1 match {
+		case tp1: RefinedType => 
+		case _ => 
+	}
+	
+	def refinedSubtypeOf(tp1: RefinedType, tp2: Type): Boolean = {
+		val RefinedType(parent, refinedName) = tp1
+		(tmt(tp1.refinedInfo) <:< memberTmt(tp2, refinedName)) && recursiveSubtypingRel()
+	}
+
+	def typeRefinementMutabilitySubtype(t1: Type, t2: Type)(implicit ctx: Context): Boolean = t2 match {
+		case t2 @ RefinedType(parent, refinedName) => {
+			val mutability1 = simpleMemberMutability(t1, refinedName)
+			val mutability2 = simpleMemberMutability(t2, refinedName)
+			// Possibilities:
+			// * mutability1 is notfound -- should not happen if t1 is really a subtype of t2,
+			//   but I am ignoring PolyTypes and a few other things, so we'll just return true in this case.
+			// * mutability1 is something else -- simple mutability subtyping applies.
+			// Also makes sure refinements in the parent type are OK.
+			tmtSubtypeOf(mutability1, mutability2) && typeRefinementMutabilitySubtype(t1, parent)
 		}
-		cpy.DefDef(ddef, mods, name, tparams, vparamss1, tpt, rhs)
+
+		// TODO: And/Or/Bounds/etc.?
+
+		case t2: TypeProxy =>
+			typeRefinementMutabilitySubtype(t1, t2.underlying)
+
+		case _ => true   // can't reject the subtype relation based on type refinements
+	}
+
+	/// Subtyping relationship of RefinedTypes.
+	def refinedSubtypeOf(tp1: RefinedType, tp2: Type): Boolean = {
+		/// For a RefinedType to be a subtype of a second type, the second type must
+		/// contain a type member that is a subtype of the refinedInfo.
+		
 	}*/
 
 
-	//--- Conversions to/from annotations ---//
-
-	/// Special annotation that carries extra TMT information.
-	class TmtAnnotation(tree: Tree, val tmt: Tmt) extends ConcreteAnnotation(tree) {
-		override def toText(implicit ctx: Context): Text = tmt.toString
-	}
-	
-	/// Finds the TMT of the given annotation.
-	def tmt(annot: Annotation)(implicit ctx: Context): Tmt =
-		annot match {
-			case annot: TmtAnnotation => annot.tmt   // This annotation carries TMT information.
-			case _ =>  // get TMT based on annotation class.
-				if (annot matches ctx.definitions.ReadonlyClass) Readonly()
-				else if (annot matches ctx.definitions.PolyreadClass) Polyread()
-				else if (annot matches ctx.definitions.MutableClass) Mutable()
-				else UnannotatedTmt()
-		}
-	
-	/// Builds a TmtAnnotation from the given TMT.
-	def toAnnot(tm: Tmt)(implicit ctx: Context): Annotation =
-		new TmtAnnotation(
-			New (
-				tm match {
-					case tm: Mutable  => ctx.definitions.MutableClass.typeRef
-					case tm: Polyread => ctx.definitions.PolyreadClass.typeRef
-					case tm: Readonly => ctx.definitions.ReadonlyClass.typeRef
-				},
-				Nil
-			),
-			tm)
-
-	//--- Interfacing with the Scala type system ---//
-	
-	/// Finds the TMT of the given type.
-	def tmt(tp: Type)(implicit ctx: Context): Tmt =
-		tp dealias match {  // type aliases are removed.
-			case AnnotatedType(annot, underlying) =>
-				val tm = tmt(annot)
-				if (tm.exists) tm else tmt(underlying)
-			case tp @ TypeBounds(lo, hi) => tmtFromTypeBounds(lo, hi)  // TODO: deal with type bounds in typer?
-			case tp @ AndType(tp1, tp2) => glb(tmt(tp1), tmt(tp2))
-			case tp @ OrType(tp1, tp2) => lub(tmt(tp1), tmt(tp2))
-			case tp: TypeProxy => tmt(tp.underlying)
-			case tp: ErrorType => ErrorTmt()
-			case _ => UnannotatedTmt()
-		}
-
-	/// Finds the TMT of the given type, but only if tp is an AnnotatedType (type aliases and proxies return UnannotatedTmt).
-	/// TODO: Maybe type bounds are best taken care of by examining type trees -- transform type trees (to add annots directly?)
-	def tmtNoRecurse(tp: Type)(implicit ctx: Context): Tmt =
-		tp match {
-			case AnnotatedType(annot, underlying) =>
-				val tm = tmt(annot)
-				if (tm.exists) tm else tmt(underlying)
-			case tp: ErrorType => ErrorTmt()
-			case _ => UnannotatedTmt()
-		}
-
-	/// Finds the TMT for a type bounds declaration, e.g., T <: A >: B.
-	def tmtFromTypeBounds(lo: Type, hi: Type)(implicit ctx: Context): Tmt = {
-		/// If a TMT annotation is immediately present (not via an alias or proxy),
-		/// then only consider immediate annotations.
-		val (tmtLo, tmtHi) = (tmtNoRecurse(lo), tmtNoRecurse(hi))
-		if (tmtLo.exists || tmtHi.exists)
-			lub(tmtLo, tmtHi)
-		else
-			lub(tmt(lo), tmt(hi))  // default: look through alias/proxy types.
-	}
-
-	/** Adds the given TMT to the given type. Existing top-level TMT annotations are removed.
-	    Assumes the given type is not a methodic type - annotating methodic types directly can break stuff. **/
-	def withTmt(tp: Type, tm: Tmt)(implicit ctx: Context): Type =
-		if (tmt(tp).isError) tp
-		else
-			tp dealias match {  // remove type aliases (to find annotations underneath)
-				case AnnotatedType(annot, underlying) =>
-					if (tmt(annot).exists)   // this is a TMT annotation: remove it
-						withTmt(underlying, tm)
-					else  // this is not a TMT annotation (but may have a TMT annotation underneath): keep it
-						new AnnotatedType(annot, withTmt(underlying, tm))
-				case _ =>
-					if (!tm.isUnannotated) new AnnotatedType(toAnnot(tm), tp)
-					else if (tmt(tp).exists) new AnnotatedType(toAnnot(Mutable()), tp)  // add @mutable to mask underlying stuff
-					else tp  // tp and tmt are both unannotated -- no action needed
-			}
-
-	/** Adds the given TMT to the given type. For methodic types, adds the TMT to the result type. **/
-	def withResultTmt(tp: Type, tm: Tmt)(implicit ctx: Context): Type =
-		tp dealias match {
-			//case mt @ MethodType(paramNames, paramTypes) =>
-			//	mt.derivedMethodType(paramNames, paramTypes, withResultTmt(mt.resultType, tm))
-			
-			//case ex @ ExprType(resultType) =>
-			//	ex.derivedExprType(withResultTmt(resultType, tm))
-			
-			//case pt @ PolyType(paramNames) =>
-			//	pt.derivedPolyType(paramNames, pt.paramBounds, withResultTmt(pt.resultType, tm))
-			
-			case _ => withTmt(tp, tm)
-		}
-	
-	
-	def assignOrigin(tp: Type, origin: Symbol)(implicit ctx: Context): Type = {
-		val tm = tmt(tp)
-		val tmAssigned = tm withOrigin origin
-		if (tm == tmAssigned) tp
-		else withTmt(tp, tmAssigned)
-	}
 
 	//--- Function/method applications ---//
 
 	/** Finds the TMT adaptation for a given argument. **/
-	def adaptToArg(argument: Type, parameter: Type)(implicit ctx: Context): Tmt =
+	/*def adaptToArg(argument: Type, parameter: Type)(implicit ctx: Context): Tmt =
 		// if parameter is polyread, returns argument TMT.
-		if (tmt(parameter).isPolyread) tmt(argument) else UnannotatedTmt()
+		if (tmt(parameter).isPolyread) tmt(argument) else UnannotatedTmt()*/
 
 	/****/
-	private[this] def partiallyAppliedResultType(tp: Type, adaptations: Tmt)(implicit ctx: Context): Type =
+	/*private[this] def partiallyAppliedResultType(tp: Type, adaptations: Tmt)(implicit ctx: Context): Type =
 		tp match {
 			case mt @ MethodType(paramNames, paramTypes) =>
 				mt.derivedMethodType(paramNames, paramTypes, partiallyAppliedResultType(mt.resultType, adaptations))
@@ -383,20 +667,10 @@ Solution alternative 4: ... work in progress ...
 					withTmt(tp, resultTmt withAdaptations adaptations)
 				}
 				else tp
-		}
+		}*/
 
 	/** Adaptations should include adaptations on the method's final result type. **/
-	private[this] def resultTypeWithAdaptations(resultType: Type, adaptations: Tmt)(implicit ctx: Context): Type =
-		// if result type is a method, partially apply.
-		/*resultType match {
-			case mt: MethodicType if (tmt(mt.finalResultType).isPolyread) =>
-				val partialTmt = tmt(mt.finalResultType) withAdaptations adaptations
-				withResultTmt(mt.finalResultType, partialTmt)
-			case _ if (tmt(resultType).isPolyread) =>
-				withResultTmt(resultType, adaptations)
-			case _ =>
-				resultType // no change: result is not a @polyread
-		}*/
+	/*private[this] def resultTypeWithAdaptations(resultType: Type, adaptations: Tmt)(implicit ctx: Context): Type =
 		resultType match {
 			case mt: MethodType =>  // perform a partial application
 				partiallyAppliedResultType(mt, adaptations)
@@ -410,12 +684,12 @@ Solution alternative 4: ... work in progress ...
 					withTmt(resultType, adaptations)
 				}
 				else resultType
-		}
+		}*/
 
 	/** Finds the TMT-annotated result type of the given method, after the LUB of all argument
 	adaptations are applied. See adaptToArg to get the adaptation of an individual argument. **/
-	def methodResultWithAdapations(/*termRef: TermRef,*/ methType: Type, resultType: Type, argAdaptations: Tmt)(implicit ctx: Context): Type = {
-		methType match {
+	//def methodResultWithAdapations(/*termRef: TermRef,*/ methType: Type, resultType: Type, argAdaptations: Tmt)(implicit ctx: Context): Type = {
+	/*	methType match {
 			case methType: MethodType =>
 				//val receiverTmt = tmt(termRef.prefix)  // TODO: how do we know if the method's `this` parameter is polyread?
 				val resultAdaptations = tmt(methType.finalResultType).adaptations
@@ -424,36 +698,8 @@ Solution alternative 4: ... work in progress ...
 				resultTypeWithAdaptations(resultType, allAdaptations)
 			case et: ErrorType => et
 		}
-	}
+	}*/
 	
-	//--- Modifiers for denotations ---//
-	
-	def pluginSymDenot(denot: SymDenotation): SymDenotation = denot
-	/*def pluginSymDenot(denot: SymDenotation): SymDenotation =
-		var newInfo = denot.info
-		// transfer annotations on the symbol to annotations on the symbol's type.
-		denot.annotations.foreach { annot =>
-			if (tmt(annot).exists)   // only transfer if really a TMT annotation
-				//denot.info match {
-				//	case _: MethodicType
-				//}
-		}
-	//denot.symbol.
-	//copySymDenotation(info = )*/
-
-	def pluginNamedTypeDenot(tp: Type, denot: Denotation)(implicit ctx: Context): Denotation =
-		denot /*match {  // TODO: selection
-			case denot: SingleDenotation =>
-				tp match {
-					case TermRef(prefix, name) =>  // adapt denot to viewpoint: prefix.name
-						val derivedTmt = lub(tmt(denot.info), tmt(prefix))  // TODO: What about methods? receiver (prefix) for a method is actually an argument
-						denot.derivedSingleDenotation(denot.symbol, withResultTmt(denot.info, derivedTmt))
-					case _ => denot  // type does not cause denotation to change
-				}
-			case _ => denot  // denotation was overloaded -- do nothing
-		}*/
-
-	//ctx.warning(s"No origin set for this @polyread annotation", annot.tree.pos)
 
 
 	/// Text representation of a type, with special formatting.
@@ -487,6 +733,7 @@ Solution alternative 4: ... work in progress ...
 			case mt @ MethodType(paramNames, paramTypes) =>
 				var (sig, i) = ("", 0)
 				while (i < paramNames.size) {
+					if (i > 0) sig = sig + ",\n"+indent(indents)
 					sig = sig + s"${paramNames(i)}: ${showSpecial(paramTypes(i),indents+1)}"
 					i = i + 1
 				}
@@ -500,6 +747,7 @@ Solution alternative 4: ... work in progress ...
 			case pt @ PolyType(paramNames) =>
 				var (sig, i) = ("", 0)
 				while (i < paramNames.size) {
+					if (i > 0) sig = sig + ",\n"+indent(indents)
 					sig = sig + s"${paramNames(i)}: ${showSpecial(pt.paramBounds(i),indents+1)}"
 					i = i + 1
 				}
@@ -513,6 +761,42 @@ Solution alternative 4: ... work in progress ...
 			case ExprType(resultType) =>
 				s"ExprType(${showSpecial(resultType,indents)})"
 			
+			case IgnoredProto(ignored) =>
+				s"IgnoredProto(${showSpecial(ignored,indents)})"
+			
+			case SelectionProto(name, memberProto, compat) =>
+				s"SelectionProto($name, ${showSpecial(memberProto,indents)})"
+		
+			case FunProto(args, resultType, typer) =>
+				s"FunProto(\n" +
+				(if (args.size > 0) indent(indents) + s"${args mkString "\n"}\n" else "") +
+				indent(indents) + s"=>\n" +
+				indent(indents) + s"${showSpecial(resultType,indents+1)}\n" +
+				indent(indents-1) + s")"
+			
+			case ViewProto(argType, resultType) =>
+				s"ViewProto(\n" +
+				indent(indents) + s"${showSpecial(argType,indents+1)}\n" +
+				indent(indents) + s"=>\n" +
+				indent(indents) + s"${showSpecial(resultType,indents+1)}\n" +
+				indent(indents-1) + s")"
+		
+			case PolyProto(targs, resultType) =>
+				var (sig, i) = ("", 0)
+				while (i < targs.size) {
+					if (i > 0) sig = sig + ",\n"+indent(indents)
+					sig = sig + s"${showSpecial(targs(i),indents+1)}"
+					i = i + 1
+				}
+				s"PolyProto(\n" +
+				(if (targs.size > 0) indent(indents) + s"$sig\n" else "") +
+				indent(indents) + s"=>\n" +
+				indent(indents) + s"${showSpecial(resultType,indents+1)}\n" +
+				indent(indents-1) + s")"
+		
+			case tp @ PolyParam(binder, paramNum) =>
+				s"PolyParam(${binder.paramNames(paramNum)} => ${showSpecial(tp.underlying,indents)})"
+		
 			case RefinedThis(binder) =>
 				s"RefinedThis(${showSpecial(binder,indents)})"
 			
@@ -536,7 +820,7 @@ Solution alternative 4: ... work in progress ...
 			
 			case AnnotatedType(annot, underlying) =>
 				val tm = tmt(annot)
-				val text = if (tm.isUnannotated) annot.toString else tm.toString
+				val text = if (tm.isUnannotated) s"<non-TMT>@${annot.toString}" else tm.toString
 				text + s"(${showSpecial(underlying,indents)})"
 			
 			case tp: ImportType =>
@@ -835,57 +1119,6 @@ Solution alternative 4: ... work in progress ...
 		case _ => UnannotatedTmt()
 	}*/
 
-	/*def simpleMemberMutability(tp: Type, name: Name)(implicit ctx: Context): Tmt = tp match {
-		// Search for the member in a ClassInfo.
-		// If more than one member matches, then take the upper bound of all matched members.
-		case tp @ ClassInfo(prefix, cls, classParents, decls, selfInfo) =>
-			var mut: Tmt = notfound()
-			cls.denot.findMember(name, prefix, EmptyFlags).alternatives.foreach { d =>
-				if (mut.exists) mut = lub(mut, tmt(d.info))
-				else mut = tmt(d.info)
-			}
-			mut
-			
-		case tp @ RefinedType(parent, refinedName) =>
-			if (name eq refinedName)
-				tmt(tp.refinedInfo)
-			else
-				simpleMemberMutability(parent, name)
-				
-		case tp @ AndType(tp1, tp2) =>
-			glb(simpleMemberMutability(tp1, name), simpleMemberMutability(tp2, name))
-			
-		case tp @ OrType(tp1, tp2) =>
-			lub(simpleMemberMutability(tp1, name), simpleMemberMutability(tp2, name))
-			
-		case tp: TypeProxy =>
-			simpleMemberMutability(tp.underlying, name)
-			
-		//case tp: MethodOrPoly =>
-		//	simpleMemberMutability(tp.resultType, name)
-			
-		case _ => notfound()
-	}*/
-	
-	/*def typeRefinementMutabilitySubtype(t1: Type, t2: Type)(implicit ctx: Context): Boolean = t2 match {
-		case t2 @ RefinedType(parent, refinedName) => {
-			val mutability1 = simpleMemberMutability(t1, refinedName)
-			val mutability2 = simpleMemberMutability(t2, refinedName)
-			// Possibilities:
-			// * mutability1 is notfound -- should not happen if t1 is really a subtype of t2,
-			//   but I am ignoring PolyTypes and a few other things, so we'll just return true in this case.
-			// * mutability1 is something else -- simple mutability subtyping applies.
-			// Also makes sure refinements in the parent type are OK.
-			tmtSubtypeOf(mutability1, mutability2) && typeRefinementMutabilitySubtype(t1, parent)
-		}
-		
-		// TODO: And/Or/Bounds/etc.?
-		
-		case t2: TypeProxy =>
-			typeRefinementMutabilitySubtype(t1, t2.underlying)
-		
-		case _ => true   // can't reject the subtype relation based on type refinements
-	}*/
 	
 	/*def mutabilitySubtype(t1: Type, t2: Type)(implicit ctx: Context): Boolean = {
 		// Simple test: if same type, then same mutability

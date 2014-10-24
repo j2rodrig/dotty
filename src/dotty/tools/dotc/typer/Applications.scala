@@ -365,7 +365,7 @@ trait Applications extends Compatibility { self: Typer =>
 	  val adaptedArg = adaptInterpolated(arg, formal.widenExpr, EmptyTree)
 	  typedArgBuf += adaptedArg
 	  // For each arg: adaptation applied is @readonly if argument is a non-parameter @polyread
-	  resultModifier = Mutability.lub(resultModifier, Mutability.adaptToArg(adaptedArg.tpe, formal.widenExpr))
+	  //resultModifier = Mutability.lub(resultModifier, Mutability.adaptToArg(adaptedArg.tpe, formal.widenExpr))
 	  /*if (Mutability.tmt(formal.widenExpr).isPolyread) {
         var argTmt = Mutability.tmt(adaptedArg.tpe)
 	    adaptedArg.tpe match {
@@ -480,6 +480,14 @@ trait Applications extends Compatibility { self: Typer =>
     def realApply(implicit ctx: Context): Tree = track("realApply") {
       var proto = new FunProto(tree.args, IgnoredProto(pt), this)
       val fun1 = typedExpr(tree.fun, proto)
+	  
+	  /*pt match {
+		  case TypeRef(_, name) if (name.toString equals "Annotation") => // nothing
+		  case _ =>
+			  println(s"pt (typedApply): ${Mutability.showSpecial(pt)}")
+			  println(s"proto (realApply): ${Mutability.showSpecial(proto)}")
+			  println("")
+	  }*/
 
       // Warning: The following line is dirty and fragile. We record that auto-tupling was demanded as
       // a side effect in adapt. If it was, we assume the tupled proto-type in the rest of the application.

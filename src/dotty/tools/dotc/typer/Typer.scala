@@ -371,22 +371,30 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
         lhsCore.tpe match {
           case ref: TermRef if ref.symbol is (Mutable, butNot = Accessor) =>
 		    val rhs1 = typed(tree.rhs, ref.info)
-		  
+			
+			// Assignments:
+			// Rule 1. The prefix type must be mutable.
+			// Rule 2. The RHS must be compatible with the LHS with respect to mutability.
+			import Mutability._
+			//println(s"${showSpecial(rhs1.tpe)}")
+			//println(s"Computed RHS TMT: ${tmt(rhs1.tpe)}. (Type = ${showSpecial(rhs1.tpe,1)})\n")
+			//println(s"Computed LHS TMT: ${tmt(ref)}. (Type = ${showSpecial(ref,1)})")
 			// TODO: re-enable when ready
-			/*// Make sure the prefix is not readonly.
+			// Make sure the prefix is not readonly.
 			Mutability.tmt(ref.prefix) match {
 				case Mutability.Readonly() =>
 					typer.ErrorReporting.errorTree(lhs1, s"Field ${ref.name} cannot be written through a @readonly reference")
-				case Mutability.minpolyread() => ctx.error(s"Unexpected minpolyread mutability in assignment")
+				//case Mutability.minpolyread() => ctx.error(s"Unexpected minpolyread mutability in assignment")
 				case Mutability.Polyread() =>
 					typer.ErrorReporting.errorTree(lhs1, s"Field ${ref.name} cannot be written through a @polyread reference")
-				case _ => // do nothing
+				case _ =>
+					// Check rule 2: RHS must be compatible with LHS
+					if (!Mutability.tmtSubtypeOf(rhs1.tpe, lhs1.tpe)) {
+						Mutability.tmtMismatch (rhs1, lhs1.tpe)
+					}
 			}
-		  
-			if (!Mutability.mutabilitySubtype(rhs1.tpe, lhs1.tpe)) {
-				Mutability.tmtMismatch (rhs1, lhs1.tpe)
-			}*/
-		  
+			
+			
             assignType(cpy.Assign(tree, lhs1, rhs1))
           case _ =>
             def reassignmentToVal =
@@ -810,7 +818,7 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
 
   def typedValDef(vdef: untpd.ValDef, sym: Symbol)(implicit ctx: Context) = track("typedValDef") {
     //val vdef2 = Mutability.setValDefOrigin(vdef, sym)
-  
+	
     val ValDef(mods, name, tpt, rhs) = vdef
     val mods1 = addTypedModifiersAnnotations(mods, sym)
     var tpt1 = typedType(tpt)
@@ -820,6 +828,12 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
     }
 	
 	import Mutability._
+	
+	// Let mutability annotations on the symbol be mutability annotation on the symbol's type.
+	// Allows expressions like `@readonly val x = y`.
+	sym.denot.annotations.foreach { annot => if (tmt(annot).exists)
+		sym.denot.info = addTmt(sym.denot.info, tmt(annot))
+	}
 	
 	// TODO: re-enable when ready
 	/*// Add mutability annotations on sym to sym's type.
@@ -849,6 +863,8 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
 		Mutability.tmtMismatch(rhs1, sym.info)
 	}*/
   
+	if (!tmtSubtypeOf(rhs1.tpe, sym.info)) tmtMismatch (rhs1, sym.info)
+	
 	//println(s"$sym: ${sym.info.show}")
 	
 	assignType(cpy.ValDef(vdef, mods1, name, tpt1, rhs1), sym)
@@ -894,6 +910,17 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
 	
 	import Mutability._
 	
+	// Let mutability annotations on the symbol be mutability annotation on the symbol's type.
+	// Allows expressions like `@readonly def m = y`.
+	sym.denot.annotations.foreach { annot => if (tmt(annot).exists)
+		sym.denot.info = addTmt(sym.denot.info, tmt(annot))
+	}
+	
+	// println(s"${sym.name} tmt = ${tmt(sym.info)}")
+	//sym.denot.annotations.foreach { annot =>
+	//	sym.denot.info = addTmtRestriction(sym.denot.info, tmt(annot), annot.tree)
+	//}
+	
 	// TODO: re-enable when ready
 	/*sym.denot.annotations.foreach { annot =>
 		val tmtAnnot = tmt(annot)
@@ -911,8 +938,13 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
 		Mutability.tmtMismatch(rhs1, sym.info.finalResultType)
 	}*/
 	
-	//println(s"$sym: ${sym.info.show}; rhs: ${rhs1.tpe.show}")
-	println(s"${sym.name}: ${showSpecial(sym.info)}")
+	if (!tmtSubtypeOf(rhs1.tpe, sym.info.finalResultType))
+		tmtMismatch (rhs1, sym.info.finalResultType)
+	
+	//println(s"${sym.name}: ${sym.info.show}")
+	//println(s"${sym.name}: ${sym.denot.signature}")
+	//println(s"${sym.name}: ${showSpecial(sym.info)}")
+	//println(s"${sym.name}: ${showSpecial(sym.denot.termRef)}")
 	
     assignType(cpy.DefDef(ddef, mods1, name, tparams1, vparamss1, tpt1, rhs1), sym)
     //todo: make sure dependent method types do not depend on implicits or by-name params

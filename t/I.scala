@@ -1,4 +1,4 @@
-import annotation._
+import annotation.tmt._
 
 trait I {
 	trait A {

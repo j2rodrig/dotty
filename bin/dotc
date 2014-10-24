@@ -4,12 +4,12 @@
 
 
 # Configuration
-SCALA_VERSION=2.11.1
+SCALA_VERSION=2.11.2
 SCALA_BINARY_VERSION=2.11
 DOTTY_VERSION=0.1
 bootcp=true
 default_java_opts="-Xmx768m -Xms768m"
-SCALA_LIBRARY_JAR=$SCALA_HOME/lib/scala-library  # change location of library classpath
+#SCALA_LIBRARY_JAR=$SCALA_HOME/lib/scala-library  # change location of library classpath
 programName=$(basename "$0")
 # uncomment next line to enable debug output
 #debug=true
