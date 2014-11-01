@@ -37,7 +37,9 @@ object Scopes {
    */
   private final val MaxRecursions = 1000
 
-  class ScopeEntry private[Scopes] (val name: Name, val sym: Symbol, val owner: Scope) {
+  class ScopeEntry private[Scopes] (val name: Name, _sym: Symbol, val owner: Scope) {
+
+    var sym: Symbol = _sym
 
     /** the next entry in the hash bucket
      */
@@ -104,7 +106,10 @@ object Scopes {
       def next(): Symbol = { val r = e.sym; e = lookupNextEntry(e); r }
     }
 
-    /** The denotation set of all the symbols with given name in this scope */
+    /** The denotation set of all the symbols with given name in this scope
+     *  Symbols occur in the result in reverse order relative to their occurrence
+     *  in `this.toList`.
+     */
     final def denotsNamed(name: Name, select: SymDenotation => Boolean = selectAll)(implicit ctx: Context): PreDenotation = {
       var syms: PreDenotation = NoDenotation
       var e = lookupEntry(name)
@@ -114,6 +119,20 @@ object Scopes {
         e = lookupNextEntry(e)
       }
       syms
+    }
+
+    /** The scope that keeps only those symbols from this scope that match the
+     *  given predicates. If all symbols match, returns the scope itself, otherwise
+     *  a copy with the matching symbols.
+     */
+    final def filteredScope(p: Symbol => Boolean)(implicit ctx: Context): Scope = {
+      var result: MutableScope = null
+      for (sym <- iterator)
+        if (!p(sym)) {
+          if (result == null) result = cloneScope
+          result.unlink(sym)
+        }
+      if (result == null) this else result
     }
 
     def implicitDecls(implicit ctx: Context): List[TermRef] = Nil
@@ -176,9 +195,9 @@ object Scopes {
 
     /** enter a symbol in this scope. */
     final def enter[T <: Symbol](sym: T)(implicit ctx: Context): T = {
-      if (sym.isType) {
+      if (sym.isType && ctx.phaseId <= ctx.typerPhase.id) {
         assert(lookup(sym.name) == NoSymbol,
-          s"duplicate type ${sym.debugString}; previous was ${lookup(sym.name).debugString}") // !!! DEBUG
+          s"duplicate ${sym.debugString}; previous was ${lookup(sym.name).debugString}") // !!! DEBUG
       }
       newScopeEntry(sym)
       sym
@@ -249,6 +268,18 @@ object Scopes {
       }
     }
 
+    /** Replace symbol `prev` (if it exists in current scope) by symbol `replacement`.
+     *  @pre `prev` and `replacement` have the same name.
+     */
+    final def replace(prev: Symbol, replacement: Symbol)(implicit ctx: Context): Unit = {
+      require(prev.name == replacement.name)
+      var e = lookupEntry(prev.name)
+      while (e ne null) {
+        if (e.sym == prev) e.sym = replacement
+        e = lookupNextEntry(e)
+      }
+    }
+
     /** Lookup a symbol entry matching given name.
      */
     override final def lookupEntry(name: Name)(implicit ctx: Context): ScopeEntry = {
@@ -298,7 +329,7 @@ object Scopes {
       while (e ne null) {
         if (e.sym is Implicit) {
           val d = e.sym.denot
-          irefs += TermRef.withSig(NoPrefix, e.sym.asTerm.name, d.signature, e.sym.denot)
+          irefs += TermRef.withSigAndDenot(NoPrefix, d.name.asTermName, d.signature, d)
         }
         e = e.prev
       }

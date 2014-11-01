@@ -5,8 +5,11 @@ import org.scalatest._
 
 class BasicTmtSpec extends FlatSpec with Matchers {
 
+	val location = "basic/"
+
 	def tryTest(testName: String) = {
-		if (!TestRunCompiler(testName)) fail(s"""Test "$testName" failed.""")
+		if (!TestRunCompiler(location + testName))
+			fail(s"""Test "$testName" failed.""" + TestRunCompiler.getLastOutput)
 	}
 
 	"A variable" should "require its right-hand-side TMT to be compatible with its declared TMT" in {
@@ -55,8 +58,8 @@ class BasicTmtSpec extends FlatSpec with Matchers {
 	}
 	
 	"A method application" should "check that arguments match parameters" in {
-		//assert(TestRunCompiler("arguments1"))
-		//TestRunCompiler("arguments2")
+		tryTest("arguments1")   // NOTE: re-examine test when parameter checking is implemented
+		tryTest("arguments2")   // NOTE: re-examine test when parameter checking is implemented
 	}
 		
 	it should "result in correct TMT constraints" in {

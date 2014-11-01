@@ -5,27 +5,19 @@ package typer
 import core._
 import ast._
 import Scopes._, Contexts._, Constants._, Types._, Symbols._, Names._, Flags._, Decorators._
-import ErrorReporting._, Annotations._, Denotations._, SymDenotations._, StdNames._
+import ErrorReporting._, Annotations._, Denotations._, SymDenotations._, StdNames._, TypeErasure._
 import util.Positions._
 import config.Printers._
 
 trait TypeAssigner {
   import tpd._
 
-  /** The enclosing class, except if we are in a super call, in which case
-   *  it is the next outer one.
-   */
-  def effectiveEnclosingClass(implicit ctx: Context) = {
-    val enclClass = ctx.owner.enclosingClass
-    if ((ctx.mode is Mode.InSuperCall) && enclClass.exists) enclClass.owner.enclosingClass
-    else enclClass
-  }
-
   /** The qualifying class of a this or super with prefix `qual` (which might be empty).
    *  @param packageOk   The qualifier may refer to a package.
    */
   def qualifyingClass(tree: untpd.Tree, qual: Name, packageOK: Boolean)(implicit ctx: Context): Symbol = {
-    effectiveEnclosingClass.ownersIterator.find(o => qual.isEmpty || o.isClass && o.name == qual) match {
+    def qualifies(sym: Symbol) = sym.isClass && (qual.isEmpty || sym.name == qual)
+    ctx.outersIterator.map(_.owner).find(qualifies) match {
       case Some(c) if packageOK || !(c is Package) =>
         c
       case _ =>
@@ -57,7 +49,7 @@ trait TypeAssigner {
             case TypeAlias(ref) =>
               apply(ref)
             case info: ClassInfo =>
-              mapOver(info.instantiatedParents.reduceLeft(AndType(_, _)))
+              mapOver(info.instantiatedParents.reduceLeft(ctx.typeComparer.andType(_, _)))
             case _ =>
               mapOver(tp)
           }
@@ -74,9 +66,6 @@ trait TypeAssigner {
     }
     widenMap(tp)
   }
-
-  def localSyms(stats: List[tpd.Tree])(implicit ctx: Context): List[Symbol] =
-    for (stat <- stats if stat.isDef) yield stat.symbol
 
   def seqToRepeated(tree: Tree)(implicit ctx: Context): Tree =
     Typed(tree, TypeTree(tree.tpe.widen.translateParameterized(defn.SeqClass, defn.RepeatedParamClass)))
@@ -102,8 +91,28 @@ trait TypeAssigner {
   /** If `tpe` is a named type, check that its denotation is accessible in the
    *  current context. Return the type with those alternatives as denotations
    *  which are accessible.
+   *
+   *  Also performs the following normalizations on the type `tpe`.
+   *  (1) parameter accessors are alwys dereferenced.
+   *  (2) if the owner of the denotation is a package object, it is assured
+   *      that the package object shows up as the prefix.
    */
   def ensureAccessible(tpe: Type, superAccess: Boolean, pos: Position)(implicit ctx: Context): Type = {
+
+    def tryInsertPackageObj(tpe: NamedType, d: Denotation): Type = {
+      def tryInsert: Type =
+        if (!(d.symbol.maybeOwner is Package)) {
+          val symOwner = d.alternatives.head.symbol.owner
+          if (symOwner.isPackageObject) tpe.derivedSelect(symOwner.thisType)
+          else tpe
+        } else tpe
+      tpe.prefix match {
+        case pre: ThisType if pre.cls is Package => tryInsert
+        case pre: TermRef if pre.symbol is Package => tryInsert
+        case _ => tpe
+      }
+    }
+
     def test(tpe: Type, firstTry: Boolean): Type = tpe match {
       case tpe: NamedType =>
         val pre = tpe.prefix
@@ -132,10 +141,11 @@ trait TypeAssigner {
               ctx.error(d"$what cannot be accessed as a member of $pre$where.$whyNot", pos)
             ErrorType
           }
-        } else if (d.symbol is TypeParamAccessor) // always dereference type param accessors
+        }
+        else if (d.symbol is TypeParamAccessor) // always dereference type param accessors
           ensureAccessible(d.info.bounds.hi, superAccess, pos)
         else
-          tpe withDenot d
+          tryInsertPackageObj(tpe withDenot d, d)
       case _ =>
         tpe
     }
@@ -173,22 +183,22 @@ trait TypeAssigner {
   def assignType(tree: untpd.Ident, tp: Type)(implicit ctx: Context) =
     tree.withType(tp)
 
-  def assignType(tree: untpd.Select, qual: Tree)(implicit ctx: Context): tpd.Select = {
-	//println(s"QUAL: ${Mutability.tmt(qual.tpe)}  SELECTION(${tree.name}): ${Mutability.tmt(accessibleSelectionType(tree, qual))}")
-	//println(accessibleSelectionType(tree, qual))
-	
-	//val qualTmt = Mutability.tmt(qual.tpe)
-	//val selectedTmt = Mutability.tmt(accessibleSelectionType(tree, qual))
-	//val adaptedTmt = Mutability.viewpointAdapt(qualTmt, selectedTmt)
-    //tree.withType(Mutability.withSimpleMutability(accessibleSelectionType(tree, qual), adaptedTmt))
-	
-    /*val finalType = accessibleSelectionType(tree, qual)
-    val qualMut = Mutability.tmt(qual.tpe.widenIfUnstable)
-	val unadaptedMut = Mutability.tmt(finalType)
-	val adaptedMut = Mutability.viewpointAdapt(qualMut, unadaptedMut)
-	println(s"${Mutability.withSimpleMutability(finalType,adaptedMut).show} -- from ${qualMut} . ${unadaptedMut}")
-	tree.withType(Mutability.withSimpleMutability(finalType,adaptedMut))*/
-    tree.withType(accessibleSelectionType(tree, qual))
+  def assignType(tree: untpd.Select, qual: Tree)(implicit ctx: Context): Select = {
+    def qualType = qual.tpe.widen
+    def arrayElemType = {
+      val JavaArrayType(elemtp) = qualType
+      elemtp
+    }
+    val p = nme.primitive
+    val tp = tree.name match {
+      case p.arrayApply => MethodType(defn.IntType :: Nil, arrayElemType)
+      case p.arrayUpdate => MethodType(defn.IntType :: arrayElemType :: Nil, defn.UnitType)
+      case p.arrayLength => MethodType(Nil, defn.IntType)
+      case p.arrayConstructor => MethodType(defn.IntType :: Nil, qualType)
+      case nme.clone_ if qualType.isInstanceOf[JavaArrayType] => MethodType(Nil, qualType)
+      case _ => accessibleSelectionType(tree, qual)
+    }
+    tree.withType(tp)
   }
 
   def assignType(tree: untpd.SelectFromTypeTree, qual: Tree)(implicit ctx: Context) =
@@ -199,10 +209,11 @@ trait TypeAssigner {
 
   def assignType(tree: untpd.Literal)(implicit ctx: Context) =
     tree.withType {
-      tree.const.tag match {
+      val value = tree.const
+      value.tag match {
         case UnitTag => defn.UnitType
         case NullTag => defn.NullType
-        case _ => ConstantType(tree.const)
+        case _ => if (ctx.erasedTypes) value.tpe else ConstantType(value)
       }
     }
 
@@ -225,15 +236,18 @@ trait TypeAssigner {
     }
     val owntype =
       if (!mix.isEmpty) findMixinSuper(cls.info)
-      else if (inConstrCall) cls.info.firstParent
-      else cls.info.parents.reduceLeft((x: Type, y: Type) => AndType(x, y))
+      else if (inConstrCall || ctx.erasedTypes) cls.info.firstParent
+      else {
+        val ps = cls.info.parents
+        if (ps.isEmpty) defn.AnyType else ps.reduceLeft((x: Type, y: Type) => x & y)
+      }
     tree.withType(SuperType(cls.thisType, owntype))
   }
 
   def assignType(tree: untpd.Apply, fn: Tree, args: List[Tree])(implicit ctx: Context) = {
     val ownType = fn.tpe.widen match {
       case fntpe @ MethodType(_, ptypes) =>
-        if (sameLength(ptypes, args)) fntpe.instantiate(args.tpes)
+        if (sameLength(ptypes, args) || ctx.phase.prev.relaxedTyping) fntpe.instantiate(args.tpes)
         else errorType(i"wrong number of parameters for ${fn.tpe}; expected: ${ptypes.length}", tree.pos)
       case t =>
         errorType(i"${err.exprStr(fn)} does not take parameters", tree.pos)
@@ -245,7 +259,7 @@ trait TypeAssigner {
     val ownType = fn.tpe.widen match {
       case pt: PolyType =>
         val argTypes = args.tpes
-        if (sameLength(argTypes, pt.paramNames)) pt.instantiate(argTypes)
+        if (sameLength(argTypes, pt.paramNames)|| ctx.phase.prev.relaxedTyping) pt.instantiate(argTypes)
         else errorType(d"wrong number of type parameters for ${fn.tpe}; expected: ${pt.paramNames.length}", tree.pos)
       case _ =>
         errorType(i"${err.exprStr(fn)} does not take type parameters", tree.pos)
@@ -271,15 +285,10 @@ trait TypeAssigner {
   def assignType(tree: untpd.If, thenp: Tree, elsep: Tree)(implicit ctx: Context) =
     tree.withType(thenp.tpe | elsep.tpe)
 
-  def assignType(tree: untpd.Closure, meth: Tree, target: Tree)(implicit ctx: Context) = {
-    //println(s"Method result passed to closure: ${meth.tpe.widen.asInstanceOf[MethodType].resultModifier}")
-    //val methodType = Mutability.copyMethodWithModifiedResult(meth.tpe.widen, meth.tpe.widen.asInstanceOf[MethodType].resultModifier)
-    //var funType = if (target.isEmpty) methodType.toFunctionType else target.tpe
-    var funType = if (target.isEmpty) meth.tpe.widen.toFunctionType else target.tpe
-	//tree.env.foreach { argTree => println(s"Closure arg: ${argTree.tpe}") }
-	//println(s"   on function type: $funType\n")
-    tree.withType(funType)
-  }
+  def assignType(tree: untpd.Closure, meth: Tree, target: Tree)(implicit ctx: Context) =
+    tree.withType(
+        if (target.isEmpty) meth.tpe.widen.toFunctionType(tree.env.length)
+        else target.tpe)
 
   def assignType(tree: untpd.CaseDef, body: Tree)(implicit ctx: Context) =
     tree.withType(body.tpe)

@@ -2,7 +2,7 @@ package dotty.tools.dotc
 package transform
 
 import core._
-import core.transform.Erasure.ErasedValueType
+import TypeErasure.ErasedValueType
 import Types._
 import Contexts._
 import Symbols._
@@ -13,18 +13,17 @@ import language.implicitConversions
 
 object TypeUtils {
   implicit def decorateTypeUtils(tpe: Type): TypeUtils = new TypeUtils(tpe)
-
 }
 
-/** A decorator that provides methods for type transformations
- *  that are needed in the transofmer pipeline (not needed right now)
+/** A decorator that provides methods on types
+ *  that are needed in the transformer pipeline.
  */
 class TypeUtils(val self: Type) extends AnyVal {
+  import TypeUtils._
 
   def isErasedValueType(implicit ctx: Context): Boolean =
     self.isInstanceOf[ErasedValueType]
 
   def isPrimitiveValueType(implicit ctx: Context): Boolean =
     self.classSymbol.isPrimitiveValueClass
-
- }
+}

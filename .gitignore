@@ -24,3 +24,10 @@ classes/
 .idea
 .idea_modules
 /.worksheet/
+
+# custom
+ToBeDone.txt
+*.out
+*.err
+deprecated/
+customtests/deprecated/

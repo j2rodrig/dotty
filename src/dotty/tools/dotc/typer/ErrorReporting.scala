@@ -56,10 +56,12 @@ object ErrorReporting {
       else ""
 
     def expectedTypeStr(tp: Type): String = tp match {
+      case tp: PolyProto =>
+        d"type arguments [${tp.targs}%, %] and ${expectedTypeStr(tp.resultType)}"
       case tp: FunProto =>
         val result = tp.resultType match {
-          case tp: WildcardType => ""
-          case tp => d"and expected result type $tp"
+          case _: WildcardType | _: IgnoredProto => ""
+          case tp => d" and expected result type $tp"
         }
         d"arguments (${tp.typedArgs.tpes}%, %)$result"
       case _ =>
@@ -97,19 +99,21 @@ object ErrorReporting {
       errorTree(tree, typeMismatchStr(tree.tpe, pt) + implicitFailure.postscript)
     }
 
+    /** A subtype log explaining why `found` does not conform to `expected` */
+    def whyNoMatchStr(found: Type, expected: Type) =
+      if (ctx.settings.explaintypes.value)
+        "\n" + ctx.typerState.show + "\n" + TypeComparer.explained((found <:< expected)(_))
+      else
+        ""
+
     def typeMismatchStr(found: Type, expected: Type) = disambiguated { implicit ctx =>
-      val (typerStateStr, explanationStr) =
-        if (ctx.settings.explaintypes.value)
-          ("\n" + ctx.typerState.show, "\n" + TypeComparer.explained((found <:< expected)(_)))
-        else
-          ("", "")
       def infoStr = found match { // DEBUG
           case tp: TypeRef => s"with info ${tp.info} / ${tp.prefix.toString} / ${tp.prefix.dealias.toString}"
           case _ => ""
         }
       d"""type mismatch:
            | found   : $found
-           | required: $expected""".stripMargin + typerStateStr + explanationStr
+           | required: $expected""".stripMargin + whyNoMatchStr(found, expected)
     }
   }
 

@@ -6,9 +6,18 @@ import sys.process._
 import java.io.ByteArrayInputStream
 
 object TestRunCompiler {
+	var lastOutput: String = ""
+	var lastError: String = ""
+	var lastExpectedOutput: String = ""
+	var lastExpectedError: String = ""
+
 	def apply(testName: String): Boolean = {
 		apply(s"tests/$testName.scala", s"tests/expected/$testName.out", s"tests/expected/$testName.err")
 	}
+	
+	def getLastOutput() =
+		s"Output:\n$lastOutput\nError Output:\n$lastError" +
+		s"Expected Output:\n$lastExpectedOutput\nExpected Error Output:\n$lastExpectedError"
 	
 	/// Runs the Dotty compiler on a given input file, testing its standard output and standard error
 	/// against the contents of the given output/error files.
@@ -21,9 +30,15 @@ object TestRunCompiler {
 			o => outbuffer ++= s"$o\n",
 			e => errbuffer ++= s"$e\n")
 		s"../bin/dotc ${inputFile}" ! logger
+		
+		lastOutput = outbuffer.toString
+		lastError = errbuffer.toString
 
-		outbuffer.toString.equals(s"cat ${expectedOutputFile}"!!) &&
-			errbuffer.toString.equals(s"cat ${expectedErrorFile}"!!)
+		lastExpectedOutput = s"cat ${expectedOutputFile}"!!;
+		lastExpectedError = s"cat ${expectedErrorFile}"!!;
+
+		outbuffer.toString.equals(lastExpectedOutput) &&
+			errbuffer.toString.equals(lastExpectedError)
 	}
 }
 

@@ -21,6 +21,23 @@ import Types._
 import typer.ProtoTypes._
 import printing.Texts.Text
 
+/***
+
+A bug in Dotty makes it unsafe to place TMT constraints on abstract types.
+However, I still hope to get some mileage out of placing constraints on concrete types.
+E.g.:
+	var l = List[AnyRef @readonly]  // OK
+
+	type T <: AnyRef @readonly
+	var l = List[T]                 // OK
+	
+	trait MyList[A @readonly] {}
+	var l = MyList[AnyRef]          // drops constraint
+
+
+***/
+
+
 object Mutability {
 
 // Type System 2:
@@ -220,6 +237,7 @@ Solution alternative 4: ... work in progress ...
 					case tm: Mutable  => ctx.definitions.MutableClass.typeRef
 					case tm: Polyread => ctx.definitions.PolyreadClass.typeRef
 					case tm: Readonly => ctx.definitions.ReadonlyClass.typeRef
+					case tm: ErrorTmt => ctx.definitions.ReadonlyClass.typeRef  // we don't have an @error annotation, so just use @readonly
 				},
 				Nil
 			),
@@ -228,10 +246,97 @@ Solution alternative 4: ... work in progress ...
 	//------- TMT subtyping -------
 	
 	def tmtSubtypeOf(tp1: Type, tp2: Type)(implicit ctx: Context): Boolean =
-		(tmt(tp1) <:< tmt(tp2)) && tmtUnderlyingSubtypeOf(tp1, tp2)
+		(tmt(tp1) <:< tmt(tp2)) && recursiveSubtypeOf(tp1, tp2, Set())
 		
-	private[this] def tmtUnderlyingSubtypeOf(tp1: Type, tp2: Type)(implicit ctx: Context): Boolean =
-		refinedSubtypeOf(tp1, tp2) //&& methodicSubtypeOf(tp1, tp2)
+		//refinedSubtypeOf(tp1, tp2, ignore + tp1)
+		//&& methodicSubtypeOf(tp1, tp2)?
+
+	    /** The class of types.
+	     *  The principal subclasses and sub-objects are as follows:
+	     *
+	     *  Type -+- ProxyType --+- NamedType ----+--- TypeRef
+	     *        |              |                 \
+	     *        |              +- SingletonType-+-+- TermRef
+	     *        |              |                |
+	     *        |              |                +--- ThisType
+	     *        |              |                +--- SuperType
+	     *        |              |                +--- ConstantType
+	     *        |              +- TypeBounds
+	     *        |              +- AnnotatedType
+	     *        |              +- TypeVar
+	     *        |
+	     *        +- GroundType -+- ClassInfo
+	     *                       |
+	     *                       +- NoType
+	     *                       +- NoPrefix
+	     *                       +- ErrorType
+	     *                       +- WildcardType
+	     */
+	
+	/// Recursively examine underlying type structure. Specifically for checking type refinements and method parameter types.
+	/// namesChecked is to prevent infinite recursion on circularly-defined refined types: each name is only checked once.
+	private[this] def recursiveSubtypeOf(tp1: Type, tp2: Type, namesChecked: Set[Name])(implicit ctx: Context): Boolean = {
+		//println(s"\tRecSubtype: ${showSpecial(tp1,2)} <:< ${showSpecial(tp2,2)}")
+		tp1 match {
+			case tp1: ExprType =>
+				recursiveSubtypeOf(tp1.resultType, tp2, namesChecked)  // forward to checking result type
+				
+			case tp1: MethodType =>   // TODO: check parameters
+				recursiveSubtypeOf(tp1.resultType, tp2, namesChecked)  // forward to checking result type
+				
+			case tp1: PolyType =>     // TODO: check parameters
+				recursiveSubtypeOf(tp1.resultType, tp2, namesChecked)  // forward to checking result type
+				
+			case AndType(tp11, tp12) => recursiveSubtypeOf(tp11, tp2, namesChecked) && recursiveSubtypeOf(tp12, tp2, namesChecked)
+			
+			case OrType(tp11, tp12) => recursiveSubtypeOf(tp11, tp2, namesChecked) || recursiveSubtypeOf(tp12, tp2, namesChecked)
+			
+			case tp1: RefinedType =>
+				if (namesChecked.contains(tp1.refinedName)) true  // don't re-check a previously-checked name
+				else {
+					//println(s"Checking refinement: ${tp1.refinedName}")
+					val nmchk = namesChecked + tp1.refinedName
+					val denot2 = tp2.member(tp1.refinedName)  // find named member in tp2
+					val isRefinedSubtype =
+						if (denot2.isOverloaded) true        // make sure member denotation is not overloaded: default to true
+						else {  // check subtyping of refined info. Also check for matching variance.
+							val variance1 = typeVariance(tp1.refinedInfo)
+							val variance2 = typeVariance(denot2.info)
+							(variance2 < 0 || (tmt(tp1.refinedInfo) <:< tmt(denot2.info))) && //recursiveSubtypeOf(tp1.refinedInfo, denot2.info, nmchk))) &&  //tmtSubtypeOf(tp1.refinedInfo, denot2.info)) &&
+								(variance2 > 0 || (tmt(denot2.info) <:< tmt(tp1.refinedInfo))) //&& recursiveSubtypeOf(denot2.info, tp1.refinedInfo, nmchk)))     //tmtSubtypeOf(denot2.info, tp1.refinedInfo))
+							/*val variancesMatch =
+								(variance2 == 0 && variance1 == 0) ||
+								(variance2 > 0 && variance1 >= 0) ||
+								(variance2 < 0 && variance1 <= 0)
+							val subtypesMatch =
+								(variance2 < 0 || (tmt(tp1.refinedInfo) <:< tmt(denot2.info))) && //recursiveSubtypeOf(tp1.refinedInfo, denot2.info, nmchk))) &&  //tmtSubtypeOf(tp1.refinedInfo, denot2.info)) &&
+								(variance2 > 0 || (tmt(denot2.info) <:< tmt(tp1.refinedInfo))) //&& recursiveSubtypeOf(denot2.info, tp1.refinedInfo, nmchk)))     //tmtSubtypeOf(denot2.info, tp1.refinedInfo))
+							variancesMatch && subtypesMatch //&& recursiveSubtypeOf(tp1.refinedInfo, denot2.info, nmchk)
+							*/
+						}
+					isRefinedSubtype && recursiveSubtypeOf(tp1.parent, tp2, nmchk)
+				}
+			//case tp1: TypeBounds =>   // same behaviour as TypeProxy
+			//case tp1: BoundType => true  // ignore underlying structure of bound types
+			case tp1: TypeProxy => recursiveSubtypeOf(tp1.underlying, tp2, namesChecked)  // recursively examine other proxy types
+			case _ => true  // ignore underlying structure of other ground types
+		}
+	}
+	
+	/*private[this] def recursiveSubtypeOf(tp1: Type, tp2: Type)(implicit ctx: Context): Boolean =
+		tp2 match {
+			case tp2: BoundType => true  // ignore underlying structure of bound types
+			case tp2: ExprType => recursiveSubtypeOf(tp1, tp2.resultType)  // compare with result type
+			//case tp2: MethodType =>
+			//case tp2: PolyType =>
+			case AndType(tp21, tp22) => recursiveSubtypeOf(tp1, tp21) && recursiveSubtypeOf(tp1, tp22)
+			case OrType(tp21, tp22) => recursiveSubtypeOf(tp1, tp21) || recursiveSubtypeOf(tp1, tp22)
+			case tp2: GroundType => true  // other ground types have no further underlying structure we care about
+			case _ => recursiveSubtypeOf2(tp1, tp2)
+		}*/
+
+		
+	
 	
 	/*private[this] def dep_tmtUnderlyingSubtypeOf(tp1: Type, tp2: Type)(implicit ctx: Context): Boolean = tp1 match {
 		case TypeBounds(lo1, hi1) =>
@@ -258,7 +363,7 @@ Solution alternative 4: ... work in progress ...
 		case _ => 0
 	}
 	
-	private[this] def refinedSubtypeOf(tp1: Type, tp2: Type)(implicit ctx: Context): Boolean = {
+	/*private[this] def refinedSubtypeOf(tp1: Type, tp2: Type)(implicit ctx: Context): Boolean = {
 		refinedMemberNames(tp1).forall { name =>
 			tp1.member(name).alternatives.forall { denot1Member =>
 				tp2.member(name).alternatives.forall { denot2Member =>
@@ -287,7 +392,7 @@ Solution alternative 4: ... work in progress ...
 			refinedMemberNames(tp.tp1) & refinedMemberNames(tp.tp2)
 		case _ =>
 			Set()
-	}
+	}*/
 
 
 	
@@ -297,20 +402,29 @@ Solution alternative 4: ... work in progress ...
 		else (tm1 <:< tm2) && (tm2 <:< tm1)*/
 
 	//------- TMT queries -------
+	
+	/// A cache for TMTs.
+	//private[this] var tmtCache = Map[Type,Tmt]()
 
 	/// Finds the TMT of the given type.
-	def tmt(tp: Type)(implicit ctx: Context): Tmt =
-		tp.finalResultType match {
-			case AnnotatedType(annot, underlying) =>
-				val tm = tmt(annot)
-				if (tm.exists) tm else tmt(underlying)  // skip non-TMT annotations
-			case tp @ TypeBounds(lo, hi) => tmtFromTypeBounds(lo, hi)
-			case tp @ AndType(tp1, tp2) => glb(tmt(tp1), tmt(tp2))
-			case tp @ OrType(tp1, tp2) => lub(tmt(tp1), tmt(tp2))
-			case tp: TypeProxy => tmt(tp.underlying)
-			case tp: ErrorType => ErrorTmt()
-			case _ => UnannotatedTmt()
-		}
+	def tmt(tp: Type)(implicit ctx: Context): Tmt = {
+		//if (tmtCache contains tp) tmtCache(tp)
+		//else {
+			//val tm =
+			tp.finalResultType match {
+				case AnnotatedType(annot, underlying) =>
+					val tm = tmt(annot)
+					if (tm.exists) tm else tmt(underlying)  // skip non-TMT annotations
+				case tp @ AndType(tp1, tp2) => glb(tmt(tp1), tmt(tp2))
+				case tp @ OrType(tp1, tp2) => lub(tmt(tp1), tmt(tp2))
+				case tp: TypeProxy => tmt(tp.underlying)
+				case tp: ErrorType => ErrorTmt()
+				case _ => UnannotatedTmt()
+			}
+			//if (tp.isInstanceOf[CachedType]) tmtCache += ((tp, tm))
+			//tm
+		//}
+	}
 
 	/// Finds the immediate TMT of the given type. Does not traverse type aliases or proxy types.
 	def immTmt(tp: Type)(implicit ctx: Context): Tmt =
@@ -322,16 +436,28 @@ Solution alternative 4: ... work in progress ...
 			case _ => UnannotatedTmt()
 		}
 
-	/// Finds the TMT for a type bounds declaration, e.g., T <: A >: B.
-	def tmtFromTypeBounds(lo: Type, hi: Type)(implicit ctx: Context): Tmt = {
+	/*/// Finds the TMT for a type bounds declaration, e.g., T <: A >: B @readonly.
+	def tmtFromTypeBounds(lo: Type, hi: Type, ignore: Set[Type])(implicit ctx: Context): Tmt = {
 		/// If a TMT annotation is immediately present (not via an alias or proxy),
 		/// then only consider immediate annotations.
 		val (tmtLo, tmtHi) = (immTmt(lo), immTmt(hi))
 		if (tmtLo.exists || tmtHi.exists)
 			lub(tmtLo, tmtHi)
 		else
-			lub(tmt(lo), tmt(hi))  // default: look through alias/proxy types.
-	}
+			lub(tmt(lo, ignore), tmt(hi, ignore))  // default: look through alias/proxy types.
+	}*/
+	
+	/*def annotatedTypeBounds(lo: Type, hi: Type)(implicit ctx: Context): Type = {
+		/// If a TMT annotation is immediately present (not via an alias or proxy),
+		/// then only consider immediate annotations.
+		val (tmtLo, tmtHi) = (immTmt(lo), immTmt(hi))
+		val tm =
+			if (tmtLo.exists || tmtHi.exists)
+				lub(tmtLo, tmtHi)
+			else
+				lub(tmt(lo), tmt(hi))  // default: look through alias/proxy types.
+		addTmt(TypeBounds(lo, hi), tm)
+	}*/
 
 	/*/// Finds the TMT and variance of the given type.
 	def tmtWithVariance(tp: Type)(implicit ctx: Context): (Tmt, Int) =
@@ -435,37 +561,46 @@ Solution alternative 4: ... work in progress ...
 	// Checked without variance: all top-level TMTs. 
 
 	/// Wraps a TMT annotation around the given type. For Methodic types, wraps the final result type.
-	def addTmt(tp: Type, tm: Tmt)(implicit ctx: Context): Type = tp match {
+	/// If removeExisting is true, then immediate TMT annotations are removed before adding the given TMT.
+	def addTmt(tp: Type, tm: Tmt, removeExisting: Boolean = true)(implicit ctx: Context): Type = tp match {
 	
 		case tp @ MethodType(paramNames, paramTypes) =>
-			tp.derivedMethodType(paramNames, paramTypes, addTmt(tp.resultType, tm))
+			tp.derivedMethodType(paramNames, paramTypes, addTmt(tp.resultType, tm, removeExisting))
 		
 		case tp: ExprType =>
-			tp.derivedExprType(addTmt(tp.resultType, tm))
+			tp.derivedExprType(addTmt(tp.resultType, tm, removeExisting))
 		
 		case tp @ PolyType(paramNames) =>
-			tp.derivedPolyType(paramNames, tp.paramBounds, addTmt(tp.resultType, tm))
+			tp.derivedPolyType(paramNames, tp.paramBounds, addTmt(tp.resultType, tm, removeExisting))
 		
-		case AnnotatedType(annot, underlying) =>
-			if (tmt(annot).exists) addTmt(underlying, tm)  // existing top-level TMT annotations are removed
-			else new AnnotatedType(toAnnot(tm), tp)
+		case AnnotatedType(annot, underlying) if removeExisting =>
+			if (tmt(annot).exists) addTmt(underlying, tm, true)  // existing top-level TMT annotations are removed
+			else new AnnotatedType(annot, addTmt(underlying, tm, true))  // but preserve non-TMT annotations
+		
+		case _ if tp.isError => tp  // don't add anything to an ErrorType
 		
 		case _ =>
-			if (!tm.isUnannotated) new AnnotatedType(toAnnot(tm), tp)
+			if (!tm.isUnannotated) new AnnotatedType(toAnnot(tm), tp)   // if the given tm is valid, then add it
 			else if (tmt(tp).exists) new AnnotatedType(toAnnot(Mutable()), tp)  // add @mutable to mask underlying stuff
 			else tp  // tp and tmt are both unannotated -- no action needed
 	}
 	
+	/// Wraps a TMT annotation around a type if the type's existing TMT is incompatiable with the given TMT.
+	def forceMinimumTmt(tp: Type, tm: Tmt)(implicit ctx: Context): Type = {
+		val existingTm = tmt(tp)
+		// Special case: if existingTm is unannotated, then force tm regardless of subtyping.
+		if (existingTm.isUnannotated || existingTm <:< tm) addTmt(tp, tm, true) else tp
+	}
+	
 	/// Viewpoint Adapation: Where a type's info member needs to be modified.
 	/// The viewpoint is a NamedType. The viewpoint's `prefix` member is the type
-	///  the inf parameter should be viewed from.
-	def viewpointAdapt(inf: Type, viewpoint: Type)(implicit ctx: Context): Type =
-		viewpoint match {
-			case TermRef(prefix, name) =>
-				val viewedTmt = lub(tmt(inf), tmt(prefix))
-				if (!(viewedTmt <:< tmt(inf))) addTmt(inf, viewedTmt) // if the TMT needs to be changed...
-				else inf
-			case _ => inf
+	///  the info parameter should be viewed from.
+	def viewpointAdapt(info: Type, viewedFrom: Type)(implicit ctx: Context): Type =
+		viewedFrom match {
+			case TermRef(prefix, name) if (!info.isInstanceOf[MethodicType]) =>
+				addTmt(info, lub(tmt(info), tmt(prefix)))
+				//forceMinimumTmt(info, lub(tmt(info), tmt(prefix)))
+			case _ => info
 		}
 	
 	/// Adds a TMT to a type. Issues an error if TMT is less restrictive than what's already on the type.
@@ -704,37 +839,41 @@ Solution alternative 4: ... work in progress ...
 
 	/// Text representation of a type, with special formatting.
 	/// If this method breaks a line, the new line must be indented by the indents amount.
-	def showSpecial(tp: Type, indents: Int = 1)(implicit ctx: Context): String =
-		tp match {
+	def showSpecial(tp: Type, indents: Int = 1, layers: Int = 20)(implicit ctx: Context): String =
+		if (layers <= 0) "..."
+		else tp match {
 
 			case tp @ TypeRef(prefix, name) =>
 				if (tp.underlying.isInstanceOf[ClassInfo])
 					s"TypeRef($name)"
 				else
-					s"TypeRef($name => ${showSpecial(tp.underlying,indents)})"
+					s"TypeRef($name => ${showSpecial(tp.underlying,indents,layers-1)})"
 		
 			case tp @ TermRef(prefix, name) =>
-				s"TermRef(${showSpecial(prefix,indents)}.$name => ${showSpecial(tp.underlying,indents)})"
+				s"TermRef(${showSpecial(prefix,indents)}.$name => ${showSpecial(tp.underlying,indents,layers-1)})"
 	
 			case tp @ ThisType(cls) =>
 				s"this(${cls.name})"
 		
 			case tp @ SuperType(thistpe,supertpe) =>
-				s"super(${thistpe.asInstanceOf[ThisType].cls.name} => ${showSpecial(supertpe,indents)})"
+				s"super(${thistpe.asInstanceOf[ThisType].cls.name} => ${showSpecial(supertpe,indents,layers-1)})"
 	
 			case ConstantType(value) =>
 				value.toString
 	
+			case tp: LazyRef =>
+				s"LazyRef(${showSpecial(tp.underlying,indents,layers-1)})"
+	
 			case rt @ RefinedType(parent, refinedName) =>
-				s"RefinedType(${showSpecial(parent,indents+1)}" + " {\n" +
-				indent(indents) + s"${refinedName} => ${showSpecial(rt.refinedInfo,indents+1)}\n" +
+				s"RefinedType(${showSpecial(parent,indents+1,layers-1)}" + " {\n" +
+				indent(indents) + s"${refinedName} => ${showSpecial(rt.refinedInfo,indents+1,layers-1)}\n" +
 				indent(indents-1) + "})"
 	
 			case mt @ MethodType(paramNames, paramTypes) =>
 				var (sig, i) = ("", 0)
 				while (i < paramNames.size) {
 					if (i > 0) sig = sig + ",\n"+indent(indents)
-					sig = sig + s"${paramNames(i)}: ${showSpecial(paramTypes(i),indents+1)}"
+					sig = sig + s"${paramNames(i)}: ${showSpecial(paramTypes(i),indents+1,layers-1)}"
 					i = i + 1
 				}
 				val ret = showSpecial(mt.resultType, indents+1)
@@ -748,7 +887,7 @@ Solution alternative 4: ... work in progress ...
 				var (sig, i) = ("", 0)
 				while (i < paramNames.size) {
 					if (i > 0) sig = sig + ",\n"+indent(indents)
-					sig = sig + s"${paramNames(i)}: ${showSpecial(pt.paramBounds(i),indents+1)}"
+					sig = sig + s"${paramNames(i)}: ${showSpecial(pt.paramBounds(i),indents+1,layers-1)}"
 					i = i + 1
 				}
 				val ret = showSpecial(pt.resultType, indents+1)
@@ -759,52 +898,52 @@ Solution alternative 4: ... work in progress ...
 					indent(indents-1) + s")"
 			
 			case ExprType(resultType) =>
-				s"ExprType(${showSpecial(resultType,indents)})"
+				s"ExprType(${showSpecial(resultType,indents,layers-1)})"
 			
 			case IgnoredProto(ignored) =>
-				s"IgnoredProto(${showSpecial(ignored,indents)})"
+				s"IgnoredProto(${showSpecial(ignored,indents,layers-1)})"
 			
 			case SelectionProto(name, memberProto, compat) =>
-				s"SelectionProto($name, ${showSpecial(memberProto,indents)})"
+				s"SelectionProto($name, ${showSpecial(memberProto,indents,layers-1)})"
 		
 			case FunProto(args, resultType, typer) =>
 				s"FunProto(\n" +
 				(if (args.size > 0) indent(indents) + s"${args mkString "\n"}\n" else "") +
 				indent(indents) + s"=>\n" +
-				indent(indents) + s"${showSpecial(resultType,indents+1)}\n" +
+				indent(indents) + s"${showSpecial(resultType,indents+1,layers-1)}\n" +
 				indent(indents-1) + s")"
 			
 			case ViewProto(argType, resultType) =>
 				s"ViewProto(\n" +
-				indent(indents) + s"${showSpecial(argType,indents+1)}\n" +
+				indent(indents) + s"${showSpecial(argType,indents+1,layers-1)}\n" +
 				indent(indents) + s"=>\n" +
-				indent(indents) + s"${showSpecial(resultType,indents+1)}\n" +
+				indent(indents) + s"${showSpecial(resultType,indents+1,layers-1)}\n" +
 				indent(indents-1) + s")"
 		
 			case PolyProto(targs, resultType) =>
 				var (sig, i) = ("", 0)
 				while (i < targs.size) {
 					if (i > 0) sig = sig + ",\n"+indent(indents)
-					sig = sig + s"${showSpecial(targs(i),indents+1)}"
+					sig = sig + s"${showSpecial(targs(i),indents+1,layers-1)}"
 					i = i + 1
 				}
 				s"PolyProto(\n" +
 				(if (targs.size > 0) indent(indents) + s"$sig\n" else "") +
 				indent(indents) + s"=>\n" +
-				indent(indents) + s"${showSpecial(resultType,indents+1)}\n" +
+				indent(indents) + s"${showSpecial(resultType,indents+1,layers-1)}\n" +
 				indent(indents-1) + s")"
 		
 			case tp @ PolyParam(binder, paramNum) =>
-				s"PolyParam(${binder.paramNames(paramNum)} => ${showSpecial(tp.underlying,indents)})"
+				s"PolyParam(${binder.paramNames(paramNum)} => ${showSpecial(tp.underlying,indents,layers-1)})"
 		
 			case RefinedThis(binder) =>
-				s"RefinedThis(${showSpecial(binder,indents)})"
+				s"RefinedThis(${showSpecial(binder,indents,layers-1)})"
 			
 			case tp: TypeVar =>
 				s"TypeVar(\n" +
-				indent(indents) + s"${showSpecial(tp.origin,indents+1)}\n" +
+				indent(indents) + s"${showSpecial(tp.origin,indents+1,layers-1)}\n" +
 				(if (tp.inst.exists)
-					indent(indents) + s"=>\n" + indent(indents) + s"${showSpecial(tp.inst,indents+1)}\n") +
+					indent(indents) + s"=>\n" + indent(indents) + s"${showSpecial(tp.inst,indents+1,layers-1)}\n") +
 				indent(indents-1) + s")"
 			
 			case tp @ ClassInfo(prefix, cls, parents, decls, selfInfo) =>
@@ -815,19 +954,19 @@ Solution alternative 4: ... work in progress ...
 					if (tp.variance == 0) ""
 					else if (tp.variance == 1) "<cov> "
 					else "<contra> "
-				if (lo eq hi) s"TypeAlias($variance${showSpecial(hi,indents)})"
-				else s"$variance${showSpecial(lo,indents)} to ${showSpecial(hi,indents)}"
+				if (lo eq hi) s"TypeAlias($variance${showSpecial(hi,indents,layers-1)})"
+				else s"$variance${showSpecial(lo,indents,layers-1)} to ${showSpecial(hi,indents,layers-1)}"
 			
 			case AnnotatedType(annot, underlying) =>
 				val tm = tmt(annot)
 				val text = if (tm.isUnannotated) s"<non-TMT>@${annot.toString}" else tm.toString
-				text + s"(${showSpecial(underlying,indents)})"
+				text + s"(${showSpecial(underlying,indents,layers-1)})"
 			
 			case tp: ImportType =>
 				s"ImportType"
 			
 			case WildcardType(bounds) =>
-				s"WildcardType(${showSpecial(bounds,indents)})"
+				s"WildcardType(${showSpecial(bounds,indents,layers-1)})"
 			
 			case _ =>
 				if (tp eq NoType) "NoType"

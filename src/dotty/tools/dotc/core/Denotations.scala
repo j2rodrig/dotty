@@ -13,11 +13,12 @@ import Periods._
 import Flags._
 import DenotTransformers._
 import Decorators._
-import transform.Erasure
+import dotc.transform.Erasure
 import printing.Texts._
 import printing.Printer
 import io.AbstractFile
 import config.Config
+import typer.Mode
 import util.common._
 import collection.mutable.ListBuffer
 import Decorators.SymbolIteratorDecorator
@@ -190,6 +191,11 @@ object Denotations {
     def requiredMethod(name: PreName)(implicit ctx: Context): TermSymbol =
       info.member(name.toTermName).requiredSymbol(_ is Method).asTerm
 
+    def requiredMethod(name: PreName, argTypes: List[Type])(implicit ctx: Context): TermSymbol =
+      info.member(name.toTermName).requiredSymbol(x=>
+        (x is Method) && x.info.paramTypess == List(argTypes)
+      ).asTerm
+
     def requiredValue(name: PreName)(implicit ctx: Context): TermSymbol =
       info.member(name.toTermName).requiredSymbol(_.info.isParameterless).asTerm
 
@@ -202,7 +208,7 @@ object Denotations {
     def matchingDenotation(site: Type, targetType: Type)(implicit ctx: Context): SingleDenotation =
       if (isOverloaded)
         atSignature(targetType.signature).matchingDenotation(site, targetType)
-      else if (exists && !(site.memberInfo(symbol) matches targetType))
+      else if (exists && !site.memberInfo(symbol).matchesLoosely(targetType))
         NoDenotation
       else
         asSingleDenotation
@@ -231,13 +237,16 @@ object Denotations {
           else if (denot1.signature matches denot2.signature) {
             val info1 = denot1.info
             val info2 = denot2.info
+            val sym1 = denot1.symbol
             val sym2 = denot2.symbol
             val sym2Accessible = sym2.isAccessibleFrom(pre)
-            if (sym2Accessible && info2 <:< info1) denot2
+            def prefer(info1: Type, sym1: Symbol, info2: Type, sym2: Symbol) =
+              info1 <:< info2 &&
+              (sym1.isAsConcrete(sym2) || !(info2 <:< info1))
+            if (sym2Accessible && prefer(info2, sym2, info1, sym1)) denot2
             else {
-              val sym1 = denot1.symbol
               val sym1Accessible = sym1.isAccessibleFrom(pre)
-              if (sym1Accessible && info1 <:< info2) denot1
+              if (sym1Accessible && prefer(info1, sym1, info2, sym2)) denot1
               else if (sym1Accessible && sym2.exists && !sym2Accessible) denot1
               else if (sym2Accessible && sym1.exists && !sym1Accessible) denot2
               else {
@@ -421,7 +430,7 @@ object Denotations {
      *  and at signature `NotAMethod`.
      */
     def valRef(implicit ctx: Context): TermRef =
-      TermRef.withSig(symbol.owner.thisType, symbol.name.asTermName, Signature.NotAMethod, this)
+      TermRef.withSigAndDenot(symbol.owner.thisType, symbol.name.asTermName, Signature.NotAMethod, this)
 
     /** The TermRef representing this term denotation at its original location
      *  at the denotation's signature.
@@ -429,7 +438,7 @@ object Denotations {
      *         denotation via a call to `info`.
      */
     def termRefWithSig(implicit ctx: Context): TermRef =
-      TermRef.withSig(symbol.owner.thisType, symbol.name.asTermName, signature, this)
+      TermRef.withSigAndDenot(symbol.owner.thisType, symbol.name.asTermName, signature, this)
 
     /** The NamedType representing this denotation at its original location.
      *  Same as either `typeRef` or `termRefWithSig` depending whether this denotes a type or not.
@@ -492,7 +501,7 @@ object Denotations {
           d.validFor = Period(ctx.period.runId, d.validFor.firstPhaseId, d.validFor.lastPhaseId)
           d = d.nextInRun
         } while (d ne denot)
-        initial.syncWithParents
+        syncWithParents
       case _ =>
         if (coveredInterval.containsPhaseId(ctx.phaseId)) staleSymbolError
         else NoDenotation
@@ -521,7 +530,7 @@ object Denotations {
         assert(false)
       }
 
-      if (valid.runId != currentPeriod.runId) bringForward.current
+      if (valid.runId != currentPeriod.runId) initial.bringForward.current
       else {
         var cur = this
         if (currentPeriod.code > valid.code) {
@@ -550,7 +559,9 @@ object Denotations {
                 startPid = cur.validFor.firstPhaseId
               else {
                 next match {
-                  case next: ClassDenotation => next.resetFlag(Frozen)
+                  case next: ClassDenotation =>
+                    assert(!next.is(Package), s"illegal transfomation of package denotation by transformer ${ctx.withPhase(transformer).phase}")
+                    next.resetFlag(Frozen)
                   case _ =>
                 }
                 next.nextInRun = cur.nextInRun
@@ -571,7 +582,11 @@ object Denotations {
             //println(s"searching: $cur at $currentPeriod, valid for ${cur.validFor}")
             cur = cur.nextInRun
             cnt += 1
-            assert(cnt <= MaxPossiblePhaseId, demandOutsideDefinedMsg)
+            if (cnt > MaxPossiblePhaseId)
+              if (ctx.mode is Mode.FutureDefsOK)
+                return current(ctx.withPhase(coveredInterval.firstPhaseId))
+              else
+                throw new NotDefinedHere(demandOutsideDefinedMsg)
           }
           cur
         }
@@ -588,26 +603,26 @@ object Denotations {
      */
     protected def installAfter(phase: DenotTransformer)(implicit ctx: Context): Unit = {
       val targetId = phase.next.id
-      assert(ctx.phaseId == targetId,
-        s"denotation update for $this called in phase ${ctx.phase}, expected was ${phase.next}")
-      val current = symbol.current
-      // println(s"installing $this after $phase/${phase.id}, valid = ${current.validFor}")
-      // printPeriods(current)
-      this.nextInRun = current.nextInRun
-      this.validFor = Period(ctx.runId, targetId, current.validFor.lastPhaseId)
-      if (current.validFor.firstPhaseId == targetId) {
-        // replace current with this denotation
-        var prev = current
-        while (prev.nextInRun ne current) prev = prev.nextInRun
-        prev.nextInRun = this
-        current.validFor = Nowhere
-      }
+      if (ctx.phaseId != targetId) installAfter(phase)(ctx.withPhase(phase.next))
       else {
-        // insert this denotation after current
-        current.validFor = Period(ctx.runId, current.validFor.firstPhaseId, targetId - 1)
-        current.nextInRun = this
-      }
+        val current = symbol.current
+        // println(s"installing $this after $phase/${phase.id}, valid = ${current.validFor}")
+        // printPeriods(current)
+        this.nextInRun = current.nextInRun
+        this.validFor = Period(ctx.runId, targetId, current.validFor.lastPhaseId)
+        if (current.validFor.firstPhaseId == targetId) {
+          // replace current with this denotation
+          var prev = current
+          while (prev.nextInRun ne current) prev = prev.nextInRun
+          prev.nextInRun = this
+          current.validFor = Nowhere
+        } else {
+          // insert this denotation after current
+          current.validFor = Period(ctx.runId, current.validFor.firstPhaseId, targetId - 1)
+          current.nextInRun = this
+        }
       // printPeriods(this)
+      }
     }
 
     def staleSymbolError(implicit ctx: Context) = {
@@ -666,6 +681,7 @@ object Denotations {
     // ------ PreDenotation ops ----------------------------------------------
 
     final def first = this
+    final def last = this
     final def toDenot(pre: Type)(implicit ctx: Context): Denotation = this
     final def containsSym(sym: Symbol): Boolean = hasUniqueSym && (symbol eq sym)
     final def containsSig(sig: Signature)(implicit ctx: Context) =
@@ -751,8 +767,9 @@ object Denotations {
     /** A denotation in the group exists */
     def exists: Boolean
 
-    /** First denotation in the group */
+    /** First/last denotation in the group */
     def first: Denotation
+    def last: Denotation
 
     /** Convert to full denotation by &-ing all elements */
     def toDenot(pre: Type)(implicit ctx: Context): Denotation
@@ -817,6 +834,7 @@ object Denotations {
     assert(denots1.exists && denots2.exists, s"Union of non-existing denotations ($denots1) and ($denots2)")
     def exists = true
     def first = denots1.first
+    def last = denots2.last
     def toDenot(pre: Type)(implicit ctx: Context) =
       (denots1 toDenot pre) & (denots2 toDenot pre, pre)
     def containsSym(sym: Symbol) =
@@ -883,6 +901,11 @@ object Denotations {
   /** An exception for accessing symbols that are no longer valid in current run */
   class StaleSymbol(msg: => String) extends Exception {
     util.Stats.record("stale symbol")
+    override def getMessage() = msg
+  }
+
+  class NotDefinedHere(msg: => String) extends Exception {
+    util.Stats.record("not defined here")
     override def getMessage() = msg
   }
 }

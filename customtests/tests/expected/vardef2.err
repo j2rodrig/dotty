@@ -1,6 +1,0 @@
-tests/vardef2.scala:12: error: mutability mismatch:
- found   : AnyRef @readonly(vardef2.this.r1)
- required: AnyRef @mutable
-	@mutable var m4 = r1  // should error
-                          ^
-one error found

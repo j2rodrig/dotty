@@ -26,7 +26,7 @@ object EtaExpansion {
       val name = ctx.freshName(prefix).toTermName
       val sym = ctx.newSymbol(ctx.owner, name, EmptyFlags, expr.tpe.widen, coord = positionCoord(expr.pos))
       defs += ValDef(sym, expr)
-      Ident(sym.valRef)
+      ref(sym.valRef)
     }
 
   /** Lift out common part of lhs tree taking part in an operator assignment such as
@@ -35,9 +35,9 @@ object EtaExpansion {
    */
   def liftAssigned(defs: mutable.ListBuffer[Tree], tree: Tree)(implicit ctx: Context): Tree = tree match {
     case Apply(fn @ Select(pre, name), args) =>
-      cpy.Apply(tree, cpy.Select(fn, lift(defs, pre), name), liftArgs(defs, fn.tpe, args))
+      cpy.Apply(tree)(cpy.Select(fn)(lift(defs, pre), name), liftArgs(defs, fn.tpe, args))
     case Select(pre, name) =>
-      cpy.Select(tree, lift(defs, pre), name)
+      cpy.Select(tree)(lift(defs, pre), name)
     case _ =>
       tree
   }
@@ -80,17 +80,29 @@ object EtaExpansion {
    */
   def liftApp(defs: mutable.ListBuffer[Tree], tree: Tree)(implicit ctx: Context): Tree = tree match {
     case Apply(fn, args) =>
-      cpy.Apply(tree, liftApp(defs, fn), liftArgs(defs, fn.tpe, args))
+      cpy.Apply(tree)(liftApp(defs, fn), liftArgs(defs, fn.tpe, args))
     case TypeApply(fn, targs) =>
-      cpy.TypeApply(tree, liftApp(defs, fn), targs)
+      cpy.TypeApply(tree)(liftApp(defs, fn), targs)
     case Select(pre, name) if isPureRef(tree) =>
-      cpy.Select(tree, liftApp(defs, pre), name)
+      cpy.Select(tree)(liftPrefix(defs, pre), name)
     case Block(stats, expr) =>
       liftApp(defs ++= stats, expr)
     case New(tpt) =>
       tree
     case _ =>
       lift(defs, tree)
+  }
+
+  /** Lift prefix `pre` of an application `pre.f(...)` to
+   *
+   *     val x0 = pre
+   *     x0.f(...)
+   *
+   *  unless `pre` is a `New` or `pre` is idempotent.
+   */
+  def liftPrefix(defs: mutable.ListBuffer[Tree], tree: Tree)(implicit ctx: Context): Tree = tree match {
+    case New(_) => tree
+    case _ => if (isIdempotentExpr(tree)) tree else lift(defs, tree)
   }
 
   /** Eta-expanding a tree means converting a method reference to a function value.
