@@ -407,7 +407,7 @@ trait Applications extends Compatibility { self: Typer =>
     private var typedArgBuf = new mutable.ListBuffer[Tree]
     private var liftedDefs: mutable.ListBuffer[Tree] = null
     private var myNormalizedFun: Tree = fun
-	private[dotc] var resultModifier: Mutability.Tmt = Mutability.UnannotatedTmt() /*methType match {
+	private[dotc] var resultModifier: TransitiveMutabilityTypes.Tmt = TransitiveMutabilityTypes.UnannotatedTmt() /*methType match {
 		case mt: MethodType => Mutability.UnannotatedTmt()  //mt.resultModifier
 		case _: ErrorType => Mutability.errortype()
 	}*/
@@ -421,6 +421,17 @@ trait Applications extends Compatibility { self: Typer =>
       //typedArgBuf += adaptInterpolated(arg, formal.widenExpr, EmptyTree)
 	  val adaptedArg = adaptInterpolated(arg, formal.widenExpr, EmptyTree)
 	  typedArgBuf += adaptedArg
+	  
+	  import TransitiveMutabilityTypes._
+	  
+	  // if formal parameter is polyread, then add the argument to the result adaptation
+	  if (tmt(formal).isPolyread) resultModifier = lub(resultModifier, tmt(adaptedArg.tpe))
+	  
+	  else
+	    // otherwise check that argument is compatible with formal parameter
+	    if (!tmtSubtypeOf(adaptedArg.tpe, formal)) tmtMismatch(adaptedArg, formal)
+	  
+	  
 	  // For each arg: adaptation applied is @readonly if argument is a non-parameter @polyread
 	  //resultModifier = Mutability.lub(resultModifier, Mutability.adaptToArg(adaptedArg.tpe, formal.widenExpr))
 	  /*if (Mutability.tmt(formal.widenExpr).isPolyread) {

@@ -1,0 +1,2 @@
+# Script that calls dotc with the same arguments as the dotty compiler test
+bin/dotc -Yno-deep-subtypes -Ycheck:patternMatcher,gettersSetters,lambdaLift "$@"

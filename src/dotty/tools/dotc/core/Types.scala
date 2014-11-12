@@ -1291,7 +1291,7 @@ object Types {
       if (checkedPeriod.runId == ctx.runId) lastSymbol
       else symbol
 
-    def info(implicit ctx: Context): Type = Mutability.viewpointAdapt(denot.info, this)
+    def info(implicit ctx: Context): Type = denot.info
 
     def isType = isInstanceOf[TypeRef]
     def isTerm = isInstanceOf[TermRef]
@@ -1376,18 +1376,10 @@ object Types {
 
     type ThisType = TermRef
 
+	override def info(implicit ctx: Context): Type = TransitiveMutabilityTypes.termRef(denot.info, this)
+
     //assert(name.toString != "<local Coder>")
-    override def underlying(implicit ctx: Context): Type = {
-      //if (d.isOverloaded) NoType else
-	  //	Mutability.withSimpleMutability(d.info,
-	  //		Mutability.viewpointAdapt(
-	  //			Mutability.tmt(prefix), Mutability.tmt(d.info)))
-	  
-	  if (isOverloaded) NoType else info
-	  
-      //val d = denot
-      //if (d.isOverloaded) NoType else d.info
-    }
+    override def underlying(implicit ctx: Context): Type = if (denot.isOverloaded) NoType else info
 
     override def signature(implicit ctx: Context): Signature = denot.signature
 
@@ -1406,6 +1398,8 @@ object Types {
   abstract case class TypeRef(override val prefix: Type, name: TypeName) extends NamedType {
 
     type ThisType = TypeRef
+
+	override def info(implicit ctx: Context): Type = TransitiveMutabilityTypes.typeRef(denot.info, this)
 
     override def underlying(implicit ctx: Context): Type = info
   }
@@ -1859,7 +1853,7 @@ object Types {
     def isImplicit = false
 
 	// LUB of arguments previously applied to polyread parameters
-	var resultModifier: Mutability.Tmt = Mutability.UnannotatedTmt()
+	var resultModifier: TransitiveMutabilityTypes.Tmt = TransitiveMutabilityTypes.UnannotatedTmt()
 
     private[this] var myIsDependent: Boolean = _
     private[this] var myIsDepKnown = false

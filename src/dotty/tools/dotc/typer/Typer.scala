@@ -384,23 +384,23 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
 			// Assignments:
 			// Rule 1. The prefix type must be mutable.
 			// Rule 2. The RHS must be compatible with the LHS with respect to mutability.
-			import Mutability._
+			import TransitiveMutabilityTypes._
 			//println(s"${showSpecial(rhs1.tpe)}")
 			//println(s"Computed RHS TMT: ${tmt(rhs1.tpe)}. (Type = ${showSpecial(rhs1.tpe,1)})\n")
 			//println(s"Computed LHS TMT: ${tmt(ref)}. (Type = ${showSpecial(ref,1)})")
 			// TODO: re-enable when ready
 			// Make sure the prefix is not readonly.
-			Mutability.tmt(ref.prefix) match {
-				case Mutability.Readonly() =>
+			tmt(ref.prefix) match {
+				case tm: Readonly =>
 					typer.ErrorReporting.errorTree(lhs1, s"Field ${ref.name} cannot be written through a @readonly reference")
 				//case Mutability.minpolyread() => ctx.error(s"Unexpected minpolyread mutability in assignment")
-				case Mutability.Polyread() =>
+				case tm: Polyread =>
 					typer.ErrorReporting.errorTree(lhs1, s"Field ${ref.name} cannot be written through a @polyread reference")
 				case _ =>
 					// Check rule 2: RHS must be compatible with LHS
 					//println(s"Checking assignment subtype:\n\t${showSpecial(rhs1.tpe,2)}\n\t${showSpecial(lhs1.tpe,2)}")
-					if (!Mutability.tmtSubtypeOf(rhs1.tpe, lhs1.tpe)) {
-						Mutability.tmtMismatch (rhs1, lhs1.tpe)
+					if (!tmtSubtypeOf(rhs1.tpe, lhs1.tpe)) {
+						tmtMismatch (rhs1, lhs1.tpe)
 					}
 			}
 			
@@ -792,12 +792,12 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
     var lo1 = typed(lo)
     var hi1 = typed(hi)
 	
-	import Mutability._
+	import TransitiveMutabilityTypes._
 	val (immLo, immHi) = (immTmt(lo1.tpe), immTmt(hi1.tpe))
 	val assignedTmt = if (immLo.exists || immHi.exists) lub(immLo, immHi) else lub(tmt(lo1.tpe), tmt(hi1.tpe))
 	
-	lo1 = lo1 withType addTmt(lo1.tpe, assignedTmt)
-	hi1 = hi1 withType addTmt(hi1.tpe, assignedTmt)
+	lo1 = lo1 withType withTmt(lo1.tpe, assignedTmt)
+	hi1 = hi1 withType withTmt(hi1.tpe, assignedTmt)
 	
     if (!(lo1.tpe <:< hi1.tpe))
       ctx.error(d"lower bound ${lo1.tpe} does not conform to upper bound ${hi1.tpe}", tree.pos)
@@ -843,12 +843,12 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
       case _ => typedExpr(rhs, tpt1.tpe)
     }
 	
-	import Mutability._
+	import TransitiveMutabilityTypes._
 	
 	// Let mutability annotations on the symbol be mutability annotation on the symbol's type.
 	// Allows expressions like `@readonly val x = y`.
 	sym.denot.annotations.foreach { annot => if (tmt(annot).exists)
-		sym.denot.info = addTmt(sym.denot.info, tmt(annot))
+		sym.denot.info = withTmt(sym.denot.info, tmt(annot))
 	}
 	
 	// TODO: re-enable when ready
@@ -925,17 +925,17 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
     val tpt1 = typedType(tpt)
     val rhs1 = typedExpr(rhs, tpt1.tpe)
 	
-	import Mutability._
+	import TransitiveMutabilityTypes._
 	
 	// Let mutability annotations on the symbol be mutability annotation on the symbol's type.
 	// Allows expressions like `@readonly def m = y`.
 	sym.denot.annotations.foreach { annot => if (tmt(annot).exists)
-		sym.denot.info = addTmt(sym.denot.info, tmt(annot))
+		sym.denot.info = withTmt(sym.denot.info, tmt(annot))
 	}
 	
 	// println(s"${sym.name} tmt = ${tmt(sym.info)}")
 	//sym.denot.annotations.foreach { annot =>
-	//	sym.denot.info = addTmtRestriction(sym.denot.info, tmt(annot), annot.tree)
+	//	sym.denot.info = withTmtRestriction(sym.denot.info, tmt(annot), annot.tree)
 	//}
 	
 	// TODO: re-enable when ready

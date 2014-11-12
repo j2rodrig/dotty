@@ -350,7 +350,7 @@ object Symbols {
         denot = denot.current.asInstanceOf[SymDenotation]
         lastDenot = denot
       }
-      denot  //Mutability.pluginSymDenot(denot)
+      denot
     }
 
     private[core] def defRunId: RunId =
