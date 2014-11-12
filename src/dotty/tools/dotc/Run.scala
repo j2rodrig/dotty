@@ -3,6 +3,7 @@ package dotc
 
 import core._
 import Contexts._, Periods._, Symbols._, Phases._, Decorators._
+import dotty.tools.dotc.transform.TreeTransforms.TreeTransformer
 import io.PlainFile
 import util.{SourceFile, NoSource, Stats, SimpleMap}
 import reporting.Reporter
@@ -45,7 +46,7 @@ class Run(comp: Compiler)(implicit ctx: Context) {
         .filterNot(ctx.settings.Yskip.value.containsPhase(_)) // TODO: skip only subphase
       for (phase <- phasesToRun)
         if (!ctx.reporter.hasErrors) {
-          phase.runOn(units)
+          units = phase.runOn(units)
           def foreachUnit(op: Context => Unit)(implicit ctx: Context): Unit =
             for (unit <- units) op(ctx.fresh.setPhase(phase.next).setCompilationUnit(unit))
           if (ctx.settings.Xprint.value.containsPhase(phase))
@@ -60,7 +61,10 @@ class Run(comp: Compiler)(implicit ctx: Context) {
 
   private def printTree(ctx: Context) = {
     val unit = ctx.compilationUnit
-    println(s"result of $unit after ${ctx.phase.prev}:")
+    val prevPhase = ctx.phase.prev // can be a mini-phase
+    val squahsedPhase = ctx.squashed(prevPhase)
+
+    println(s"result of $unit after ${squahsedPhase}:")
     println(unit.tpdTree.show(ctx))
   }
 

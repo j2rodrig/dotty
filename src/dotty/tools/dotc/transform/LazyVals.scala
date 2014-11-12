@@ -74,7 +74,7 @@ class LazyValsTransform extends MiniPhaseTransform with IdentityDenotTransformer
       * dotty.runtime(eg dotty.runtime.LazyInt)
       */
     def transformLocalValDef(x: ValDef)(implicit ctx: Context) = x match {
-      case x@ValDef(mods, name, tpt, rhs) =>
+      case x@ValDef(name, tpt, rhs) =>
         val valueInitter = rhs
         val holderName = ctx.freshName(name.toString + StdNames.nme.LAZY_LOCAL).toTermName
         val tpe = x.tpe.widen
@@ -141,12 +141,12 @@ class LazyValsTransform extends MiniPhaseTransform with IdentityDenotTransformer
     }
 
     def transformFieldValDefNonVolatile(x: ValDef)(implicit ctx: Context) = x match {
-      case x@ValDef(mods, name, tpt, rhs) if (mods is Flags.Lazy) =>
+      case x@ValDef(name, tpt, rhs) if (x.mods is Flags.Lazy) =>
         val claz = x.symbol.owner.asClass
         val tpe = x.tpe.widen
-        assert(!(mods is Flags.Mutable))
+        assert(!(x.mods is Flags.Mutable))
         val containerName = ctx.freshName(name.toString + StdNames.nme.LAZY_LOCAL).toTermName
-        val containerSymbol = ctx.newSymbol(claz, containerName, (mods &~ Flags.Lazy | containerFlags).flags, tpe, coord = x.symbol.coord).enteredAfter(this)
+        val containerSymbol = ctx.newSymbol(claz, containerName, (x.mods &~ Flags.Lazy | containerFlags).flags, tpe, coord = x.symbol.coord).enteredAfter(this)
 
         val containerTree = ValDef(containerSymbol, initValue(tpe))
         if (x.tpe.isNotNull && tpe <:< defn.AnyRefType) { // can use 'null' value instead of flag
@@ -217,18 +217,15 @@ class LazyValsTransform extends MiniPhaseTransform with IdentityDenotTransformer
       val compute = {
         val handlerSymbol = ctx.newSymbol(methodSymbol, "$anonfun".toTermName, Flags.Synthetic,
           MethodType(List("x$1".toTermName), List(defn.ThrowableType), defn.IntType))
-
-        val handler = Closure(handlerSymbol, {
-          args =>
-            val exception = args.head.head
-            val complete = setFlagState.appliedTo(thiz, offset, initState, Literal(Constant(ord)))
-            Block(List(complete), Throw(exception))
-        })
+        val caseSymbol = ctx.newSymbol(methodSymbol, nme.DEFAULT_EXCEPTION_NAME, Flags.Synthetic, defn.ThrowableType)
+        val complete = setFlagState.appliedTo(thiz, offset, initState, Literal(Constant(ord)))
+        val handler = CaseDef(Bind(caseSymbol, ref(caseSymbol)), EmptyTree,
+          Block(List(complete), Throw(ref(caseSymbol))
+        ))
 
         val compute = Assign(ref(resultSymbol), rhs)
-        val tr = Try(compute, handler, EmptyTree)
+        val tr = Try(compute, List(handler), EmptyTree)
         val assign = Assign(ref(target), ref(resultSymbol))
-        val complete = setFlagState.appliedTo(thiz, offset, computedState, Literal(Constant(ord)))
         val noRetry = Assign(ref(retrySymbol), Literal(Constants.Constant(false)))
         val body = If(casFlag.appliedTo(thiz, offset, ref(flagSymbol), computeState, Literal(Constant(ord))),
           Block(tr :: assign :: complete :: noRetry :: Nil, Literal(Constant(()))),
@@ -263,8 +260,8 @@ class LazyValsTransform extends MiniPhaseTransform with IdentityDenotTransformer
     }
 
     def transformFieldValDefVolatile(x: ValDef)(implicit ctx: Context) = x match {
-      case x@ValDef(mods, name, tpt, rhs) if (mods is Flags.Lazy) =>
-        assert(!(mods is Flags.Mutable))
+      case x@ValDef(name, tpt, rhs) if (x.mods is Flags.Lazy) =>
+        assert(!(x.mods is Flags.Mutable))
 
         val tpe = x.tpe.widen
         val claz = x.symbol.owner.asClass
@@ -306,7 +303,7 @@ class LazyValsTransform extends MiniPhaseTransform with IdentityDenotTransformer
         }
 
         val containerName = ctx.freshName(name.toString + StdNames.nme.LAZY_LOCAL).toTermName
-        val containerSymbol = ctx.newSymbol(claz, containerName, (mods &~ Flags.Lazy | containerFlags).flags, tpe, coord = x.symbol.coord).enteredAfter(this)
+        val containerSymbol = ctx.newSymbol(claz, containerName, (x.mods &~ Flags.Lazy | containerFlags).flags, tpe, coord = x.symbol.coord).enteredAfter(this)
         val containerTree = ValDef(containerSymbol, initValue(tpe))
 
         val offset = Select(ref(companion), offsetSymbol.name)

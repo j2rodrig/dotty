@@ -236,9 +236,10 @@ trait TypeAssigner {
     tree.withType(cls.thisType)
   }
 
-  def assignType(tree: untpd.Super, qual: Tree, inConstrCall: Boolean)(implicit ctx: Context) = {
+  def assignType(tree: untpd.Super, qual: Tree, inConstrCall: Boolean, mixinClass: Symbol = NoSymbol)(implicit ctx: Context) = {
     val mix = tree.mix
-    val cls = qual.tpe.widen.typeSymbol
+    val qtype @ ThisType(_) = qual.tpe
+    val cls = qtype.cls
 
     def findMixinSuper(site: Type): Type = site.parents filter (_.name == mix) match {
       case p :: Nil =>
@@ -249,7 +250,8 @@ trait TypeAssigner {
         errorType("ambiguous parent class qualifier", tree.pos)
     }
     val owntype =
-      if (!mix.isEmpty) findMixinSuper(cls.info)
+      if (mixinClass.exists) mixinClass.typeRef
+      else if (!mix.isEmpty) findMixinSuper(cls.info)
       else if (inConstrCall || ctx.erasedTypes) cls.info.firstParent
       else {
         val ps = cls.info.parents
@@ -313,9 +315,9 @@ trait TypeAssigner {
   def assignType(tree: untpd.Return)(implicit ctx: Context) =
     tree.withType(defn.NothingType)
 
-  def assignType(tree: untpd.Try, expr: Tree, handler: Tree)(implicit ctx: Context) = {
-    val handlerTypeArgs = handler.tpe.baseArgTypesHi(defn.FunctionClass(1))
-    tree.withType(if (handlerTypeArgs.nonEmpty) expr.tpe | handlerTypeArgs(1) else expr.tpe)
+  def assignType(tree: untpd.Try, expr: Tree, cases: List[CaseDef])(implicit ctx: Context) = {
+    if (cases.isEmpty) tree.withType(expr.tpe)
+    else tree.withType(ctx.typeComparer.lub(expr.tpe :: cases.tpes))
   }
 
   def assignType(tree: untpd.Throw)(implicit ctx: Context) =

@@ -15,7 +15,7 @@ class tests extends CompilerTest {
 
   implicit val defaultOptions = noCheckOptions ++ List(
       "-Yno-deep-subtypes",
-      "-Ycheck:patternMatcher,gettersSetters,lambdaLift"
+      "-Ycheck:resolveSuper,mixin,restoreScopes"
   )
 
   val twice = List("#runs", "2", "-YnoDoubleBindings")
@@ -56,6 +56,7 @@ class tests extends CompilerTest {
   @Test def pos_approximateUnion = compileFile(posDir, "approximateUnion", doErase)
   @Test def pos_tailcall = compileDir(posDir + "tailcall/", doErase)
   @Test def pos_nullarify = compileFile(posDir, "nullarify", "-Ycheck:nullarify" :: doErase)
+  @Test def pos_subtyping = compileFile(posDir, "subtyping", doErase)
 
   @Test def pos_all = compileFiles(posDir, twice)
   @Test def new_all = compileFiles(newDir, twice)
@@ -95,20 +96,19 @@ class tests extends CompilerTest {
   @Test def neg_t1843_variances = compileFile(negDir, "t1843-variances", xerrors = 1)
   @Test def neg_t2660_ambi = compileFile(negDir, "t2660", xerrors = 2)
   @Test def neg_t2994 = compileFile(negDir, "t2994", xerrors = 2)
-  @Test def neg_subtyping = compileFile(negDir, "subtyping", xerrors = 1)
+  @Test def neg_subtyping = compileFile(negDir, "subtyping", xerrors = 2)
   @Test def neg_variances = compileFile(negDir, "variances", xerrors = 2)
   @Test def neg_badAuxConstr = compileFile(negDir, "badAuxConstr", xerrors = 2)
   @Test def neg_typetest = compileFile(negDir, "typetest", xerrors = 1)
   @Test def neg_t1569_failedAvoid = compileFile(negDir, "t1569-failedAvoid", xerrors = 1)
+  @Test def neg_cycles = compileFile(negDir, "cycles", xerrors = 6)
+
   @Test def dotc = compileDir(dotcDir + "tools/dotc", twice)(allowDeepSubtypes)
   @Test def dotc_ast = compileDir(dotcDir + "tools/dotc/ast", twice)
   @Test def dotc_config = compileDir(dotcDir + "tools/dotc/config", twice)
   @Test def dotc_core = compileDir(dotcDir + "tools/dotc/core", twice)(allowDeepSubtypes)
   @Test def dotc_core_pickling = compileDir(dotcDir + "tools/dotc/core/pickling", twice)(allowDeepSubtypes)
-
-  @Test def dotc_transform = compileDir(dotcDir + "tools/dotc/transform", twice)(defaultOptions ++ List("-Ycheck:pat,era,lam"))
-  //disabled, awaiting fix for call-by-name function types.
-
+  @Test def dotc_transform = compileDir(dotcDir + "tools/dotc/transform", twice)
   @Test def dotc_parsing = compileDir(dotcDir + "tools/dotc/parsing", twice)
   @Test def dotc_printing = compileDir(dotcDir + "tools/dotc/printing", twice)
   @Test def dotc_reporting = compileDir(dotcDir + "tools/dotc/reporting", twice)

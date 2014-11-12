@@ -1181,8 +1181,19 @@ object Types {
               if (newd.exists) newd else d.staleSymbolError
             }
           case d =>
-            if (d.validFor.runId == ctx.period.runId) d.current
-            else loadDenot
+            if (d.validFor.runId != ctx.period.runId)
+              loadDenot
+            // The following branch was used to avoid an assertErased error.
+            // It's idea was to void keeping non-sym denotations after erasure
+            // since they violate the assertErased contract. But the problem is
+            // that when seen again in an earlier phase the denotation is
+            // still seen as a SymDenotation, whereas it should be a SingleDenotation.
+            // That's why the branch is disabled.
+            //
+            //   else if (ctx.erasedTypes && lastSymbol != null)
+            //   denotOfSym(lastSymbol)
+            else
+              d.current
         }
         if (ctx.typerState.ephemeral) record("ephemeral cache miss: loadDenot")
         else if (d.exists) {
@@ -1514,7 +1525,7 @@ object Types {
      *  signature, if denotation is not yet completed.
      */
     def apply(prefix: Type, name: TermName, denot: Denotation)(implicit ctx: Context): TermRef = {
-      if ((prefix eq NoPrefix) || denot.symbol.isFresh)
+      if ((prefix eq NoPrefix) || denot.symbol.isFresh || ctx.erasedTypes)
         apply(prefix, denot.symbol.asTerm)
       else denot match {
         case denot: SymDenotation if denot.isCompleted => withSig(prefix, name, denot.signature)
@@ -1536,7 +1547,7 @@ object Types {
      *  (2) The name in the term ref need not be the same as the name of the Symbol.
      */
     def withSymAndName(prefix: Type, sym: TermSymbol, name: TermName)(implicit ctx: Context): TermRef =
-      if ((prefix eq NoPrefix) || sym.isFresh)
+      if ((prefix eq NoPrefix) || sym.isFresh || ctx.erasedTypes)
         withFixedSym(prefix, name, sym)
       else if (sym.defRunId != NoRunId && sym.isCompleted)
         withSig(prefix, name, sym.signature) withSym (sym, sym.signature)
@@ -1547,7 +1558,7 @@ object Types {
      *  (which must be completed).
      */
     def withSig(prefix: Type, sym: TermSymbol)(implicit ctx: Context): TermRef =
-      if ((prefix eq NoPrefix) || sym.isFresh) withFixedSym(prefix, sym.name, sym)
+      if ((prefix eq NoPrefix) || sym.isFresh || ctx.erasedTypes) withFixedSym(prefix, sym.name, sym)
       else withSig(prefix, sym.name, sym.signature).withSym(sym, sym.signature)
 
     /** Create a term ref with given prefix, name and signature */
@@ -1556,7 +1567,7 @@ object Types {
 
     /** Create a term ref with given prefix, name, signature, and initial denotation */
     def withSigAndDenot(prefix: Type, name: TermName, sig: Signature, denot: Denotation)(implicit ctx: Context): TermRef = {
-      if ((prefix eq NoPrefix) || denot.symbol.isFresh)
+      if ((prefix eq NoPrefix) || denot.symbol.isFresh || ctx.erasedTypes)
         withFixedSym(prefix, denot.symbol.asTerm.name, denot.symbol.asTerm)
       else
         withSig(prefix, name, sig)
@@ -1632,8 +1643,10 @@ object Types {
   final class CachedSuperType(thistpe: Type, supertpe: Type) extends SuperType(thistpe, supertpe)
 
   object SuperType {
-    def apply(thistpe: Type, supertpe: Type)(implicit ctx: Context): Type =
+    def apply(thistpe: Type, supertpe: Type)(implicit ctx: Context): Type = {
+      assert(thistpe != NoPrefix)
       unique(new CachedSuperType(thistpe, supertpe))
+    }
   }
 
   /** A constant type with  single `value`. */
@@ -1827,7 +1840,7 @@ object Types {
     }
     catch {
       case ex: AssertionError =>
-        println(i"failure while taking result signture of $resultType")
+        println(i"failure while taking result signture of $this: $resultType")
         throw ex
     }
 
@@ -1846,14 +1859,10 @@ object Types {
       (resultTypeExp: MethodType => Type)
     extends CachedGroundType with BindingType with TermType with MethodOrPoly with NarrowCached { thisMethodType =>
 
-	val resultType_ = resultTypeExp(this)
-    override def resultType = resultType_
-    assert(resultType != NoType)
+    override val resultType = resultTypeExp(this)
+    assert(resultType.exists)
     def isJava = false
     def isImplicit = false
-
-	// LUB of arguments previously applied to polyread parameters
-	var resultModifier: TransitiveMutabilityTypes.Tmt = TransitiveMutabilityTypes.UnannotatedTmt()
 
     private[this] var myIsDependent: Boolean = _
     private[this] var myIsDepKnown = false
@@ -1907,17 +1916,6 @@ object Types {
       case _ =>
         false
     }
-	
-	/*def copyWithResultModifier(resultMod: Mutability.Tmt)(implicit ctx: Context): MethodType = {
-		val derivedMethod = {
-			val restpeFn = (x: MethodType) => this.resultType.subst(this, x)
-			if (isJava) JavaMethodType(paramNames, paramTypes)(restpeFn)
-			else if (isImplicit) ImplicitMethodType(paramNames, paramTypes)(restpeFn)
-			else MethodType(paramNames, paramTypes)(restpeFn)
-		}
-		derivedMethod.resultModifier = resultMod
-		derivedMethod
-	 }*/
 
     override def computeHash = doHash(paramNames, resultType, paramTypes)
 

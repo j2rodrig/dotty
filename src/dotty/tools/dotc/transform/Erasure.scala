@@ -62,7 +62,7 @@ class Erasure extends Phase with DenotTransformer { thisTransformer =>
         }
       }
     case ref =>
-      ref.derivedSingleDenotation(ref.symbol, erasure(ref.info))
+      ref.derivedSingleDenotation(ref.symbol, eraseInfo(ref.info))
   }
 
   val eraser = new Erasure.Typer
@@ -94,7 +94,8 @@ class Erasure extends Phase with DenotTransformer { thisTransformer =>
     if (ctx.mode.isExpr)
       tree.tpe match {
         case ref: TermRef =>
-          assert(ref.denot.isInstanceOf[SymDenotation],
+          assert(ref.denot.isInstanceOf[SymDenotation] ||
+              ref.denot.isInstanceOf[UniqueRefDenotation],
             i"non-sym type $ref of class ${ref.getClass} with denot of class ${ref.denot.getClass} of $tree")
         case _ =>
       }
@@ -111,10 +112,10 @@ object Erasure extends TypeTestsCasts{
   object Boxing {
 
     def isUnbox(sym: Symbol)(implicit ctx: Context) =
-      sym.name == nme.unbox && (defn.ScalaBoxedClasses contains sym.owner)
+      sym.name == nme.unbox && (defn.ScalaBoxedClasses contains sym.owner.linkedClass)
 
     def isBox(sym: Symbol)(implicit ctx: Context) =
-      sym.name == nme.box && (defn.ScalaValueClasses contains sym.owner)
+      sym.name == nme.box && (defn.ScalaValueClasses contains sym.owner.linkedClass)
 
     def boxMethod(cls: ClassSymbol)(implicit ctx: Context) =
       cls.linkedClass.info.member(nme.box).symbol
@@ -247,6 +248,10 @@ object Erasure extends TypeTestsCasts{
       tree.withType(erased)
     }
 
+    override def typedLiteral(tree: untpd.Literal)(implicit ctc: Context): Literal =
+      if (tree.typeOpt.isRef(defn.UnitClass)) tree.withType(tree.typeOpt)
+      else super.typedLiteral(tree)
+
     /** Type check select nodes, applying the following rewritings exhaustively
      *  on selections `e.m`, where `OT` is the type of the owner of `m` and `ET`
      *  is the erased type of the selection's original qualifier expression.
@@ -277,7 +282,7 @@ object Erasure extends TypeTestsCasts{
           case _ => sym.name
         }
         untpd.cpy.Select(tree)(qual, sym.name)
-          .withType(NamedType.withSymAndName(qual.tpe, sym, name))
+          .withType(NamedType.withFixedSym(qual.tpe, sym))
       }
 
       def selectArrayMember(qual: Tree, erasedPre: Type): Tree =
@@ -350,7 +355,11 @@ object Erasure extends TypeTestsCasts{
 
     override def typedApply(tree: untpd.Apply, pt: Type)(implicit ctx: Context): Tree = {
       val Apply(fun, args) = tree
-      typedExpr(fun, FunProto(args, pt, this)) match {
+      if (tree.removeAttachment(ElimByName.ByNameArg).isDefined) {
+        val Select(qual, nme.apply) = fun
+        typedUnadapted(qual, pt)
+      }
+      else typedExpr(fun, FunProto(args, pt, this)) match {
         case fun1: Apply => // arguments passed in prototype were already passed
           fun1
         case fun1 =>
@@ -365,12 +374,20 @@ object Erasure extends TypeTestsCasts{
       }
     }
 
+    override def typedValDef(vdef: untpd.ValDef, sym: Symbol)(implicit ctx: Context): ValDef =
+      super.typedValDef(untpd.cpy.ValDef(vdef)(
+        tpt = untpd.TypedSplice(TypeTree(sym.info).withPos(vdef.tpt.pos))), sym)
+
     override def typedDefDef(ddef: untpd.DefDef, sym: Symbol)(implicit ctx: Context) = {
+      val restpe = sym.info.resultType
       val ddef1 = untpd.cpy.DefDef(ddef)(
         tparams = Nil,
         vparamss = ddef.vparamss.flatten :: Nil,
-        tpt = // keep UnitTypes intact in result position
-          untpd.TypedSplice(TypeTree(eraseResult(ddef.tpt.typeOpt)).withPos(ddef.tpt.pos)))
+        tpt = untpd.TypedSplice(TypeTree(restpe).withPos(ddef.tpt.pos)),
+        rhs = ddef.rhs match {
+          case id @ Ident(nme.WILDCARD) => untpd.TypedSplice(id.withType(restpe))
+          case _ => ddef.rhs
+        })
       super.typedDefDef(ddef1, sym)
     }
 

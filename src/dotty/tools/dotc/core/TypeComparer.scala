@@ -551,7 +551,7 @@ class TypeComparer(initctx: Context) extends DotClass {
           tp1 match {
             case tp1: NamedType =>
               val sym1 = tp1.symbol
-              (if (sym1 eq tp2.symbol) (
+              (if ((sym1 ne NoSymbol) && (sym1 eq tp2.symbol)) (
                    ctx.erasedTypes
                 || sym1.isStaticOwner
                 || { // Implements: A # X  <:  B # X
@@ -587,7 +587,7 @@ class TypeComparer(initctx: Context) extends DotClass {
             if (solvedConstraint && (constraint contains tp2)) isSubType(tp1, bounds(tp2).lo)
             else
               isSubTypeWhenFrozen(tp1, bounds(tp2).lo) || {
-                if (isConstrained(tp2)) addConstraint(tp2, tp1.widen, fromBelow = true)
+                if (isConstrained(tp2)) addConstraint(tp2, tp1.widenExpr, fromBelow = true)
                 else (ctx.mode is Mode.TypevarsMissContext) || secondTry(tp1, tp2)
               }
           }

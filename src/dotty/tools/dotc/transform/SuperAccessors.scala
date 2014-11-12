@@ -90,7 +90,7 @@ class SuperAccessors extends MacroTransform with IdentityDenotTransformer { this
       val superAcc = clazz.info.decl(supername).suchThat(_.signature == sym.signature).symbol orElse {
         ctx.debuglog(s"add super acc ${sym.showLocated} to $clazz")
         val acc = ctx.newSymbol(
-            clazz, supername, SuperAccessor | Private | Artifact,
+            clazz, supername, SuperAccessor | Private | Artifact | Method,
             ensureMethodic(sel.tpe.widenSingleton), coord = sym.coord).enteredAfter(thisTransformer)
         // Diagnostic for SI-7091
         if (!accDefs.contains(clazz))
@@ -224,7 +224,7 @@ class SuperAccessors extends MacroTransform with IdentityDenotTransformer { this
         case CaseDef(pat, guard, body) =>
           cpy.CaseDef(tree)(pat, transform(guard), transform(body))
 
-        case TypeDef(_, _, impl: Template) =>
+        case TypeDef(_, impl: Template) =>
           val cls = sym.asClass
           checkCompanionNameClashes(cls)
           expandQualifiedPrivates(cls)
@@ -295,7 +295,7 @@ class SuperAccessors extends MacroTransform with IdentityDenotTransformer { this
             val body1 = forwardParamAccessors(transformStats(impl.body, tree.symbol))
             accDefs -= currentClass
             ownStats ++= body1
-            cpy.Template(impl)(body = body1)
+            cpy.Template(impl)(body = ownStats.toList)
           }
           transformTemplate
 
@@ -368,7 +368,7 @@ class SuperAccessors extends MacroTransform with IdentityDenotTransformer { this
           }
           transformSelect
 
-        case tree@DefDef(_, _, _, _, _, rhs) =>
+        case tree @ DefDef(_, _, _, _, rhs) =>
           cpy.DefDef(tree)(
             rhs = if (isMethodWithExtension(sym)) withInvalidOwner(transform(rhs)) else transform(rhs))
 

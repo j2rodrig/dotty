@@ -5,7 +5,7 @@ import core._
 import Texts._, Types._, Flags._, Names._, Symbols._, NameOps._, Constants._, Denotations._
 import Contexts.Context, Scopes.Scope, Denotations.Denotation, Annotations.Annotation
 import StdNames.nme
-import ast.Trees._, ast.untpd
+import ast.Trees._, ast._
 import java.lang.Integer.toOctalString
 import config.Config.summarizeDepth
 import scala.annotation.switch
@@ -288,7 +288,7 @@ class PlainPrinter(_ctx: Context) extends Printer {
     else if (flags is Mutable) "variable"
     else if (sym.isClassConstructor && sym.isPrimaryConstructor) "primary constructor"
     else if (sym.isClassConstructor) "constructor"
-    else if (sym.isSourceMethod) "method"
+    else if (sym.is(Method)) "method"
     else if (sym.isTerm) "value"
     else ""
   }
@@ -296,14 +296,14 @@ class PlainPrinter(_ctx: Context) extends Printer {
   /** String representation of symbol's definition key word */
   protected def keyString(sym: Symbol): String = {
     val flags = sym.flagsUNSAFE
-    if (flags is JavaInterface) "interface"
+    if (flags is JavaTrait) "interface"
     else if ((flags is Trait) && !(flags is ImplClass)) "trait"
     else if (sym.isClass) "class"
     else if (sym.isType) "type"
     else if (flags is Mutable) "var"
     else if (flags is Package) "package"
     else if (flags is Module) "object"
-    else if (sym.isSourceMethod) "def"
+    else if (sym is Method) "def"
     else if (sym.isTerm && (!(flags is Param))) "val"
     else ""
   }

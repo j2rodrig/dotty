@@ -6,7 +6,7 @@ import transform.SymUtils._
 import core._
 import util.Positions._, Types._, Contexts._, Constants._, Names._, Flags._
 import SymDenotations._, Symbols._, StdNames._, Annotations._, Trees._, Symbols._
-import Denotations._, Decorators._
+import Denotations._, Decorators._, DenotTransformers._
 import config.Printers._
 import typer.Mode
 import collection.mutable
@@ -39,8 +39,8 @@ object tpd extends Trees.Instance[Type] with TypedTreeInfo {
   def This(cls: ClassSymbol)(implicit ctx: Context): This =
     untpd.This(cls.name).withType(cls.thisType)
 
-  def Super(qual: Tree, mix: TypeName, inConstrCall: Boolean)(implicit ctx: Context): Super =
-    ta.assignType(untpd.Super(qual, mix), qual, inConstrCall)
+  def Super(qual: Tree, mix: TypeName, inConstrCall: Boolean, mixinClass: Symbol = NoSymbol)(implicit ctx: Context): Super =
+    ta.assignType(untpd.Super(qual, mix), qual, inConstrCall, mixinClass)
 
   def Apply(fn: Tree, args: List[Tree])(implicit ctx: Context): Apply =
     ta.assignType(untpd.Apply(fn, args), fn, args)
@@ -113,8 +113,8 @@ object tpd extends Trees.Instance[Type] with TypedTreeInfo {
   def Return(expr: Tree, from: Tree)(implicit ctx: Context): Return =
     ta.assignType(untpd.Return(expr, from))
 
-  def Try(block: Tree, handler: Tree, finalizer: Tree)(implicit ctx: Context): Try =
-    ta.assignType(untpd.Try(block, handler, finalizer), block, handler)
+  def Try(block: Tree, cases: List[CaseDef], finalizer: Tree)(implicit ctx: Context): Try =
+    ta.assignType(untpd.Try(block, cases, finalizer), block, cases)
 
   def Throw(expr: Tree)(implicit ctx: Context): Throw =
     ta.assignType(untpd.Throw(expr))
@@ -165,7 +165,7 @@ object tpd extends Trees.Instance[Type] with TypedTreeInfo {
     ta.assignType(untpd.UnApply(fun, implicits, patterns), proto)
 
   def ValDef(sym: TermSymbol, rhs: Tree = EmptyTree)(implicit ctx: Context): ValDef =
-    ta.assignType(untpd.ValDef(Modifiers(sym), sym.name, TypeTree(sym.info), rhs), sym)
+    ta.assignType(untpd.ValDef(sym.name, TypeTree(sym.info), rhs), sym)
 
   def SyntheticValDef(name: TermName, rhs: Tree)(implicit ctx: Context): ValDef =
     ValDef(ctx.newSymbol(ctx.owner, name, Synthetic, rhs.tpe.widen, coord = rhs.pos), rhs)
@@ -198,12 +198,16 @@ object tpd extends Trees.Instance[Type] with TypedTreeInfo {
     val argss = vparamss.nestedMap(vparam => Ident(vparam.termRef))
     ta.assignType(
       untpd.DefDef(
-        Modifiers(sym), sym.name, tparams map TypeDef,
-        vparamss.nestedMap(ValDef(_)), TypeTree(rtp), rhsFn(targs)(argss)), sym)
+        sym.name,
+        tparams map TypeDef,
+        vparamss.nestedMap(ValDef(_)),
+        TypeTree(rtp),
+        rhsFn(targs)(argss)),
+      sym)
   }
 
   def TypeDef(sym: TypeSymbol)(implicit ctx: Context): TypeDef =
-    ta.assignType(untpd.TypeDef(Modifiers(sym), sym.name, TypeTree(sym.info)), sym)
+    ta.assignType(untpd.TypeDef(sym.name, TypeTree(sym.info)), sym)
 
   def ClassDef(cls: ClassSymbol, constr: DefDef, body: List[Tree], superArgs: List[Tree] = Nil)(implicit ctx: Context): TypeDef = {
     val firstParent :: otherParents = cls.info.parents
@@ -237,7 +241,7 @@ object tpd extends Trees.Instance[Type] with TypedTreeInfo {
       .orElse(ctx.newLocalDummy(cls))
     val impl = untpd.Template(constr, parents, selfType, newTypeParams ++ body)
       .withType(localDummy.nonMemberTermRef)
-    ta.assignType(untpd.TypeDef(Modifiers(cls), cls.name, impl), cls)
+    ta.assignType(untpd.TypeDef(cls.name, impl), cls)
   }
 
   def Import(expr: Tree, selectors: List[untpd.Tree])(implicit ctx: Context): Import =
@@ -263,7 +267,7 @@ object tpd extends Trees.Instance[Type] with TypedTreeInfo {
       case _ =>
         false
     }
-    try test
+    try test || tp.symbol.is(JavaStatic)
     catch { // See remark in SymDenotations#accessWithin
       case ex: NotDefinedHere => test(ctx.addMode(Mode.FutureDefsOK))
     }
@@ -367,10 +371,16 @@ object tpd extends Trees.Instance[Type] with TypedTreeInfo {
       } else foldOver(sym, tree)
   }
 
+  implicit class modsDeco(mdef: MemberDef)(implicit ctx: Context) extends ModsDeco {
+    def mods = if (mdef.hasType) Modifiers(mdef.symbol) else mdef.rawMods
+  }
+
   override val cpy = new TypedTreeCopier
 
   class TypedTreeCopier extends TreeCopier {
     def postProcess(tree: Tree, copied: untpd.Tree): copied.ThisTree[Type] =
+      copied.withTypeUnchecked(tree.tpe)
+    def postProcess(tree: Tree, copied: untpd.MemberDef): copied.ThisTree[Type] =
       copied.withTypeUnchecked(tree.tpe)
 
     override def Select(tree: Tree)(qualifier: Tree, name: Name)(implicit ctx: Context): Select = {
@@ -457,11 +467,11 @@ object tpd extends Trees.Instance[Type] with TypedTreeInfo {
     override def Return(tree: Tree)(expr: Tree, from: Tree)(implicit ctx: Context): Return =
       ta.assignType(untpd.cpy.Return(tree)(expr, from))
 
-    override def Try(tree: Tree)(expr: Tree, handler: Tree, finalizer: Tree)(implicit ctx: Context): Try = {
-      val tree1 = untpd.cpy.Try(tree)(expr, handler, finalizer)
+    override def Try(tree: Tree)(expr: Tree, cases: List[CaseDef], finalizer: Tree)(implicit ctx: Context): Try = {
+      val tree1 = untpd.cpy.Try(tree)(expr, cases, finalizer)
       tree match {
-        case tree: Try if (expr.tpe eq tree.expr.tpe) && (handler.tpe eq tree.handler.tpe) => tree1.withTypeUnchecked(tree.tpe)
-        case _ => ta.assignType(tree1, expr, handler)
+        case tree: Try if (expr.tpe eq tree.expr.tpe) && (sameTypes(cases, tree.cases)) => tree1.withTypeUnchecked(tree.tpe)
+        case _ => ta.assignType(tree1, expr, cases)
       }
     }
 
@@ -490,8 +500,8 @@ object tpd extends Trees.Instance[Type] with TypedTreeInfo {
       Closure(tree: Tree)(env, meth, tpt)
     override def CaseDef(tree: CaseDef)(pat: Tree = tree.pat, guard: Tree = tree.guard, body: Tree = tree.body)(implicit ctx: Context): CaseDef =
       CaseDef(tree: Tree)(pat, guard, body)
-    override def Try(tree: Try)(expr: Tree = tree.expr, handler: Tree = tree.handler, finalizer: Tree = tree.finalizer)(implicit ctx: Context): Try =
-      Try(tree: Tree)(expr, handler, finalizer)
+    override def Try(tree: Try)(expr: Tree = tree.expr, cases: List[CaseDef] = tree.cases, finalizer: Tree = tree.finalizer)(implicit ctx: Context): Try =
+      Try(tree: Tree)(expr, cases, finalizer)
   }
 
   implicit class TreeOps[ThisTree <: tpd.Tree](val tree: ThisTree) extends AnyVal {
@@ -527,13 +537,34 @@ object tpd extends Trees.Instance[Type] with TypedTreeInfo {
      */
     def changeOwner(from: Symbol, to: Symbol)(implicit ctx: Context): ThisTree = {
       def loop(from: Symbol, froms: List[Symbol], tos: List[Symbol]): ThisTree = {
-        if (from.isWeakOwner) loop(from.owner, from :: froms, to :: tos)
+        if (from.isWeakOwner && !from.owner.isClass)
+          loop(from.owner, from :: froms, to :: tos)
         else {
           //println(i"change owner ${from :: froms}%, % ==> $tos of $tree")
           new TreeTypeMap(oldOwners = from :: froms, newOwners = tos).apply(tree)
         }
       }
       loop(from, Nil, to :: Nil)
+    }
+
+    /** After phase `trans`, set the owner of every definition in this tree that was formerly
+     *  owner by `from` to `to`.
+     */
+    def changeOwnerAfter(from: Symbol, to: Symbol, trans: DenotTransformer)(implicit ctx: Context): ThisTree = {
+      assert(ctx.phase == trans.next)
+      val traverser = new TreeTraverser {
+        def traverse(tree: Tree) = tree match {
+          case tree: DefTree =>
+            val sym = tree.symbol
+            if (sym.denot(ctx.withPhase(trans)).owner == from)
+              sym.copySymDenotation(owner = to).installAfter(trans)
+            if (sym.isWeakOwner) traverseChildren(tree)
+          case _ =>
+            traverseChildren(tree)
+        }
+      }
+      traverser.traverse(tree)
+      tree
     }
 
     def select(name: Name)(implicit ctx: Context): Select =

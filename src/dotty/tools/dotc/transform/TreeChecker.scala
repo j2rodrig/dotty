@@ -50,7 +50,9 @@ class TreeChecker {
   }
 
   def check(phasesToRun: Seq[Phase], ctx: Context) = {
-    println(s"checking ${ctx.compilationUnit} after phase ${ctx.phase.prev}")
+    val prevPhase = ctx.phase.prev // can be a mini-phase
+    val squahsedPhase = ctx.squashed(prevPhase)
+    println(s"checking ${ctx.compilationUnit} after phase ${squahsedPhase}")
     val checkingCtx = ctx.fresh
       .setTyperState(ctx.typerState.withReporter(new ThrowingReporter(ctx.typerState.reporter)))
     val checker = new Checker(previousPhases(phasesToRun.toList)(ctx))
@@ -142,7 +144,7 @@ class TreeChecker {
     }
 
     override def typedClassDef(cdef: untpd.TypeDef, cls: ClassSymbol)(implicit ctx: Context) = {
-      val TypeDef(_, _, impl @ Template(constr, _, _, _)) = cdef
+      val TypeDef(_, impl @ Template(constr, _, _, _)) = cdef
       assert(cdef.symbol == cls)
       assert(impl.symbol.owner == cls)
       assert(constr.symbol.owner == cls)
@@ -178,7 +180,7 @@ class TreeChecker {
     override def typedStats(trees: List[untpd.Tree], exprOwner: Symbol)(implicit ctx: Context): List[Tree] = {
       for (tree <- trees) tree match {
         case tree: untpd.DefTree => checkOwner(tree)
-        case _: untpd.Thicket => assert(false, "unexpanded thicket in statement sequence")
+        case _: untpd.Thicket => assert(false, i"unexpanded thicket $tree in statement sequence $trees%\n%")
         case _ =>
       }
       super.typedStats(trees, exprOwner)
@@ -196,7 +198,7 @@ class TreeChecker {
           !pt.isInstanceOf[FunProto])
         assert(tree.tpe <:< pt,
             s"error at ${sourcePos(tree.pos)}\n" +
-            err.typeMismatchStr(tree.tpe, pt) + "tree = " + tree)
+            err.typeMismatchStr(tree.tpe, pt) + "\ntree = " + tree)
       tree
     }
   }

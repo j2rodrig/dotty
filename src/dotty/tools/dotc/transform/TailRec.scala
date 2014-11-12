@@ -81,7 +81,7 @@ class TailRec extends MiniPhaseTransform with DenotTransformer with FullParamete
 
   override def transformDefDef(tree: tpd.DefDef)(implicit ctx: Context, info: TransformerInfo): tpd.Tree = {
     tree match {
-      case dd@DefDef(mods, name, tparams, vparamss0, tpt, rhs0)
+      case dd@DefDef(name, tparams, vparamss0, tpt, rhs0)
         if (dd.symbol.isEffectivelyFinal) && !((dd.symbol is Flags.Accessor) || (rhs0 eq EmptyTree) || (dd.symbol is Flags.Label)) =>
         val mandatory = dd.symbol.hasAnnotation(defn.TailrecAnnotationClass)
         atGroupEnd { implicit ctx: Context =>
@@ -156,9 +156,8 @@ class TailRec extends MiniPhaseTransform with DenotTransformer with FullParamete
     def noTailTransform(tree: Tree)(implicit c: Context): Tree =
       transform(tree, noTailContext)
 
-
-    def noTailTransforms(trees: List[Tree])(implicit c: Context) =
-      trees map (noTailTransform)
+    def noTailTransforms[Tr <: Tree](trees: List[Tr])(implicit c: Context): List[Tr] =
+      trees.map(noTailTransform).asInstanceOf[List[Tr]]
 
     override def transform(tree: Tree)(implicit c: Context): Tree = {
       /* A possibly polymorphic apply to be considered for tail call transformation. */
@@ -232,26 +231,18 @@ class TailRec extends MiniPhaseTransform with DenotTransformer with FullParamete
       }
 
       def rewriteTry(tree: Try): Try = {
-        def transformHandlers(t: Tree): Tree = {
-          t match {
-            case Block(List((d: DefDef)), cl@Closure(Nil, _, EmptyTree)) =>
-              val newDef = cpy.DefDef(d)(rhs = transform(d.rhs))
-              Block(List(newDef), cl)
-            case _ => assert(false, s"failed to deconstruct try handler ${t.show}"); ???
-          }
-        }
         if (tree.finalizer eq EmptyTree) {
           // SI-1672 Catches are in tail position when there is no finalizer
           tpd.cpy.Try(tree)(
             noTailTransform(tree.expr),
-            transformHandlers(tree.handler),
+            transformSub(tree.cases),
             EmptyTree
           )
         }
         else {
           tpd.cpy.Try(tree)(
             noTailTransform(tree.expr),
-            noTailTransform(tree.handler),
+            noTailTransforms(tree.cases),
             noTailTransform(tree.finalizer)
           )
         }
@@ -305,8 +296,8 @@ class TailRec extends MiniPhaseTransform with DenotTransformer with FullParamete
           assert(false, "We should've never gotten inside a pattern")
           tree
 
-        case ValDef(_, _, _, _) | EmptyTree | Super(_, _) | This(_) |
-             Literal(_) | TypeTree(_) | DefDef(_, _, _, _, _, _) | TypeDef(_, _, _) =>
+        case ValDef(_, _, _) | EmptyTree | Super(_, _) | This(_) |
+             Literal(_) | TypeTree(_) | DefDef(_, _, _, _, _) | TypeDef(_, _) =>
           tree
 
         case Return(expr, from) =>

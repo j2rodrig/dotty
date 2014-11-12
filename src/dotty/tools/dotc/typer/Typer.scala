@@ -21,6 +21,7 @@ import Flags._
 import Decorators._
 import ErrorReporting._
 import EtaExpansion.etaExpand
+import dotty.tools.dotc.transform.Erasure.Boxing
 import util.Positions._
 import util.common._
 import util.SourcePosition
@@ -311,7 +312,7 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
       case templ: untpd.Template =>
         import untpd._
         val x = tpnme.ANON_CLASS
-        val clsDef = TypeDef(Modifiers(Final), x, templ)
+        val clsDef = TypeDef(x, templ).withFlags(Final)
         typed(cpy.Block(tree)(clsDef :: Nil, New(Ident(x), Nil)), pt)
       case _ =>
 	      val tpt1 = typedType(tree.tpt)
@@ -566,10 +567,7 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
       val inferredParams: List[untpd.ValDef] =
         for ((param, i) <- params.zipWithIndex) yield
           if (!param.tpt.isEmpty) param
-          else {
-            val paramTpt = untpd.TypeTree(inferredParamType(param, protoFormal(i)))
-            cpy.ValDef(param)(param.mods, param.name, paramTpt, param.rhs)
-          }
+          else cpy.ValDef(param)(tpt = untpd.TypeTree(inferredParamType(param, protoFormal(i))))
 
       // Define result type of closure as the expected type, thereby pushing
       // down any implicit searches. We do this even if the expected type is not fully
@@ -619,29 +617,34 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
         val selType = widenForMatchSelector(
             fullyDefinedType(sel1.tpe, "pattern selector", tree.pos))
 
-        /** gadtSyms = "all type parameters of enclosing methods that appear
-         *              non-variantly in the selector type" todo: should typevars
-         *              which appear with variances +1 and -1 (in different
-         *              places) be considered as well?
-         */
-        val gadtSyms: Set[Symbol] = ctx.traceIndented(i"GADT syms of $selType", gadts) {
-          val accu = new TypeAccumulator[Set[Symbol]] {
-            def apply(tsyms: Set[Symbol], t: Type): Set[Symbol] = {
-              val tsyms1 = t match {
-                case tr: TypeRef if (tr.symbol is TypeParam) && tr.symbol.owner.isTerm && variance == 0 =>
-                  tsyms + tr.symbol
-                case _ =>
-                  tsyms
-              }
-              foldOver(tsyms1, t)
-            }
-          }
-          accu(Set.empty, selType)
-        }
-
-        val cases1 = tree.cases mapconserve (typedCase(_, pt, selType, gadtSyms))
+        val cases1 = typedCases(tree.cases, selType, pt)
         assignType(cpy.Match(tree)(sel1, cases1), cases1)
     }
+  }
+
+  def typedCases(cases: List[untpd.CaseDef], selType: Type, pt: Type)(implicit ctx: Context) = {
+
+    /** gadtSyms = "all type parameters of enclosing methods that appear
+      *              non-variantly in the selector type" todo: should typevars
+      *              which appear with variances +1 and -1 (in different
+      *              places) be considered as well?
+      */
+    val gadtSyms: Set[Symbol] = ctx.traceIndented(i"GADT syms of $selType", gadts) {
+      val accu = new TypeAccumulator[Set[Symbol]] {
+        def apply(tsyms: Set[Symbol], t: Type): Set[Symbol] = {
+          val tsyms1 = t match {
+            case tr: TypeRef if (tr.symbol is TypeParam) && tr.symbol.owner.isTerm && variance == 0 =>
+              tsyms + tr.symbol
+            case _ =>
+              tsyms
+          }
+          foldOver(tsyms1, t)
+        }
+      }
+      accu(Set.empty, selType)
+    }
+
+    cases mapconserve (typedCase(_, pt, selType, gadtSyms))
   }
 
   def typedCase(tree: untpd.CaseDef, pt: Type, selType: Type, gadtSyms: Set[Symbol])(implicit ctx: Context): CaseDef = track("typedCase") {
@@ -688,9 +691,9 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
 
   def typedTry(tree: untpd.Try, pt: Type)(implicit ctx: Context): Try = track("typedTry") {
     val expr1 = typed(tree.expr, pt)
-    val handler1 = typed(tree.handler, defn.FunctionType(defn.ThrowableType :: Nil, pt))
+    val cases1 = typedCases(tree.cases, defn.ThrowableType, pt)
     val finalizer1 = typed(tree.finalizer, defn.UnitType)
-    assignType(cpy.Try(tree)(expr1, handler1, finalizer1), expr1, handler1)
+    assignType(cpy.Try(tree)(expr1, cases1, finalizer1), expr1, cases1)
   }
 
   def typedThrow(tree: untpd.Throw)(implicit ctx: Context): Throw = track("typedThrow") {
@@ -752,7 +755,7 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
     val tpt1 = if (tree.tpt.isEmpty) TypeTree(defn.ObjectType) else typedAheadType(tree.tpt)
     val refineClsDef = desugar.refinedTypeToClass(tree)
     val refineCls = createSymbol(refineClsDef).asClass
-    val TypeDef(_, _, Template(_, _, _, refinements1)) = typed(refineClsDef)
+    val TypeDef(_, Template(_, _, _, refinements1)) = typed(refineClsDef)
     assert(tree.refinements.length == refinements1.length, s"${tree.refinements} != $refinements1")
     def addRefinement(parent: Type, refinement: Tree): Type = {
       typr.println(s"adding refinement $refinement")
@@ -816,10 +819,9 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
     assignType(cpy.Alternative(tree)(trees1), trees1)
   }
 
-  def addTypedModifiersAnnotations(mods: untpd.Modifiers, sym: Symbol)(implicit ctx: Context): Modifiers = {
-    val mods1 = typedModifiers(mods, sym)
+  def addTypedModifiersAnnotations(mdef: untpd.MemberDef, sym: Symbol)(implicit ctx: Context): Unit = {
+    val mods1 = typedModifiers(untpd.modsDeco(mdef).mods, sym)
     for (tree <- mods1.annotations) sym.addAnnotation(Annotation(tree))
-    mods1
   }
 
   def typedModifiers(mods: untpd.Modifiers, sym: Symbol)(implicit ctx: Context): Modifiers = track("typedModifiers") {
@@ -833,11 +835,9 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
   }
 
   def typedValDef(vdef: untpd.ValDef, sym: Symbol)(implicit ctx: Context) = track("typedValDef") {
-    //val vdef2 = Mutability.setValDefOrigin(vdef, sym)
-	
-    val ValDef(mods, name, tpt, rhs) = vdef
-    val mods1 = addTypedModifiersAnnotations(mods, sym)
-    var tpt1 = typedType(tpt)
+    val ValDef(name, tpt, rhs) = vdef
+    addTypedModifiersAnnotations(vdef, sym)
+    val tpt1 = typedType(tpt)
     val rhs1 = rhs match {
       case Ident(nme.WILDCARD) => rhs withType tpt1.tpe
       case _ => typedExpr(rhs, tpt1.tpe)
@@ -884,7 +884,7 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
 	
 	//println(s"$sym: ${sym.info.show}")
 	
-    assignType(cpy.ValDef(vdef)(mods1, name, tpt1, rhs1), sym)
+    assignType(cpy.ValDef(vdef)(name, tpt1, rhs1), sym)
   }
 
 
@@ -915,10 +915,8 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
 
 
   def typedDefDef(ddef: untpd.DefDef, sym: Symbol)(implicit ctx: Context) = track("typedDefDef") {
-    //val ddef2 = Mutability.polyParamsWithOrigin(ddef, sym) // TODO: move to plug-in contact location
-  
-    val DefDef(mods, name, tparams, vparamss, tpt, rhs) = ddef
-    val mods1 = addTypedModifiersAnnotations(mods, sym)
+    val DefDef(name, tparams, vparamss, tpt, rhs) = ddef
+    addTypedModifiersAnnotations(ddef, sym)
     val tparams1 = tparams mapconserve (typed(_).asInstanceOf[TypeDef])
     val vparamss1 = vparamss nestedMapconserve (typed(_).asInstanceOf[ValDef])
     if (sym is Implicit) checkImplicitParamsNotSingletons(vparamss1)
@@ -964,7 +962,7 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
 	//println(s"${sym.name}: ${showSpecial(sym.info)}")
 	//println(s"${sym.name}: ${showSpecial(sym.denot.termRef)}")
 	
-    assignType(cpy.DefDef(ddef)(mods1, name, tparams1, vparamss1, tpt1, rhs1), sym)
+    assignType(cpy.DefDef(ddef)(name, tparams1, vparamss1, tpt1, rhs1), sym)
     //todo: make sure dependent method types do not depend on implicits or by-name params
 	
 	
@@ -973,18 +971,14 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
   }
 
   def typedTypeDef(tdef: untpd.TypeDef, sym: Symbol)(implicit ctx: Context): Tree = track("typedTypeDef") {
-    val TypeDef(mods, name, rhs) = tdef
-    val mods1 = addTypedModifiersAnnotations(mods, sym)
+    val TypeDef(name, rhs) = tdef
+    addTypedModifiersAnnotations(tdef, sym)
     val _ = typedType(rhs) // unused, typecheck only to remove from typedTree
-	
-	//println("TypeDef: " + name.toString + ": " + sym.info)
-	//println(s"${name}: ${Mutability.showSpecial(sym.info)}")
-	
-    assignType(cpy.TypeDef(tdef)(mods1, name, TypeTree(sym.info), Nil), sym)
+    assignType(cpy.TypeDef(tdef)(name, TypeTree(sym.info), Nil), sym)
   }
 
   def typedClassDef(cdef: untpd.TypeDef, cls: ClassSymbol)(implicit ctx: Context) = track("typedClassDef") {
-    val TypeDef(mods, name, impl @ Template(constr, parents, self, body)) = cdef
+    val TypeDef(name, impl @ Template(constr, parents, self, body)) = cdef
     val superCtx = ctx.superCallContext
     def typedParent(tree: untpd.Tree): Tree =
       if (tree.isType) typedType(tree)(superCtx)
@@ -995,7 +989,7 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
         result
       }
 
-    val mods1 = addTypedModifiersAnnotations(mods, cls)
+    addTypedModifiersAnnotations(cdef, cls)
     val constr1 = typed(constr).asInstanceOf[DefDef]
     val parentsWithClass = ensureFirstIsClass(parents mapconserve typedParent, cdef.pos.toSynthetic)
     val parents1 = ensureConstrCall(cls, parentsWithClass)(superCtx)
@@ -1006,7 +1000,7 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
     val impl1 = cpy.Template(impl)(constr1, parents1, self1, body1)
       .withType(dummy.nonMemberTermRef)
     checkVariance(impl1)
-    assignType(cpy.TypeDef(cdef)(mods1, name, impl1, Nil), cls)
+    assignType(cpy.TypeDef(cdef)(name, impl1, Nil), cls)
 
     // todo later: check that
     //  1. If class is non-abstract, it is instantiatable:
@@ -1194,8 +1188,7 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
       case Thicket(stats) :: rest =>
         traverse(stats ++ rest)
       case stat :: rest =>
-        val nestedCtx = if (exprOwner == ctx.owner) ctx else ctx.fresh.setOwner(exprOwner)
-        buf += typed(stat)(nestedCtx)
+        buf += typed(stat)(ctx.exprContext(stat, exprOwner))
         traverse(rest)
       case nil =>
         buf.toList
@@ -1398,6 +1391,8 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
           typed(etaExpand(tree, wtp, arity), pt)
         else if (wtp.paramTypes.isEmpty)
           adaptInterpolated(tpd.Apply(tree, Nil), pt, EmptyTree)
+        else if (wtp.isImplicit)
+          err.typeMismatch(tree, pt)
         else
           errorTree(tree,
             d"""missing arguments for $methodStr
