@@ -401,7 +401,10 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
 					// Check rule 2: RHS must be compatible with LHS
 					//println(s"Checking assignment subtype:\n\t${showSpecial(rhs1.tpe,2)}\n\t${showSpecial(lhs1.tpe,2)}")
 					if (!tmtSubtypeOf(rhs1.tpe, lhs1.tpe)) {
-						tmtMismatch (rhs1, lhs1.tpe)
+						ctx.error(
+							tmtExplainingSubtypeOf(rhs1.tpe, lhs1.tpe),
+							rhs1.pos)
+						//tmtMismatch (rhs1, lhs1.tpe)
 					}
 			}
 			
@@ -880,7 +883,11 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
 	}*/
   
 	//println(s"subtype check on ${sym.name}:\n\t${showSpecial(rhs1.tpe,2)}\n\t${showSpecial(sym.info,2)}")
-	if (!tmtSubtypeOf(rhs1.tpe, sym.info)) tmtMismatch (rhs1, sym.info)
+	//if (!tmtSubtypeOf(rhs1.tpe, sym.info)) tmtMismatch (rhs1, sym.info)
+	if (!tmtSubtypeOf(rhs1.tpe, sym.info))
+		ctx.error(
+			tmtExplainingSubtypeOf(rhs1.tpe, sym.info),
+			rhs1.pos)
 	
 	//println(s"$sym: ${sym.info.show}")
 	
@@ -954,8 +961,14 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
 	}*/
 	
 	//println(s"subtype check on ${sym.name}:\n${showSpecial(rhs1.tpe,2)}\n${showSpecial(sym.info.finalResultType,2)}")
+	
+	// Check that the final result type matches the right-hand-side type
 	if (!tmtSubtypeOf(rhs1.tpe, sym.info.finalResultType))
-		tmtMismatch (rhs1, sym.info.finalResultType)
+		ctx.error(
+			tmtExplainingSubtypeOf(rhs1.tpe, sym.info.finalResultType),
+			rhs1.pos)
+		//tmtMismatch (rhs1, sym.info.finalResultType)
+
 	
 	//println(s"${sym.name}: ${sym.info.show}")
 	//println(s"${sym.name}: ${sym.denot.signature}")

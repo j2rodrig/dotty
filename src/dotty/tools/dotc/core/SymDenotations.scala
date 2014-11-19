@@ -77,14 +77,6 @@ object SymDenotations {
     private[this] var myPrivateWithin: Symbol = initPrivateWithin
     private[this] var myAnnotations: List[Annotation] = Nil
 	
-	/** Applies automatic modifications of the symbol's type.
-	 *  Modifications include: application of mutability annotations
-	 *    as type annotations. Tagged as AutoType so that the consistency
-	 *    of the type annotations can be checked where needed.
-	 */
-	//def infoWithAutoTypes(implicit ctx: Context): Type =
-	//	Mutability.addAnnotations(myInfo, myAnnotations)
-	
     /** The owner of the symbol; overridden in NoDenotation */
     def owner: Symbol = ownerIfExists
 
@@ -139,7 +131,7 @@ object SymDenotations {
      */
     final def info(implicit ctx: Context): Type = myInfo match {
       case myInfo: LazyType => completeFrom(myInfo); info
-      case _ => myInfo  // infoWithAutoTypes
+      case _ => myInfo
     }
 
     /** The type info, or, if symbol is not yet completed, the completer */

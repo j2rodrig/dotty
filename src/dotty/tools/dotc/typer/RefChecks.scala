@@ -196,6 +196,8 @@ object RefChecks {
       }
 
       //Console.println(infoString(member) + " overrides " + infoString(other) + " in " + clazz);//DEBUG
+	  
+	  TransitiveMutabilityTypes.tmtCheckOverride(member, memberTp, other, otherTp)
 
       // return if we already checked this combination elsewhere
       if (member.owner != clazz) {
@@ -204,7 +206,7 @@ object RefChecks {
         def subMember(s: Symbol) = s derivesFrom member.owner
 
         if (subOther(member.owner) && deferredCheck) {
-          //Console.println(infoString(member) + " shadows1 " + infoString(other) " in " + clazz);//DEBUG
+          //Console.println(infoString(member) + " shadows1 " + infoString(other) + " in " + clazz);//DEBUG
           return
         }
         val parentSymbols = clazz.info.parents.map(_.typeSymbol)
@@ -296,7 +298,7 @@ object RefChecks {
             unit.deprecationWarning(member.pos, msg)
           }*/
     }
-
+	
     val opc = new OverridingPairs.Cursor(clazz)
     while (opc.hasNext) {
       checkOverride(opc.overriding, opc.overridden)

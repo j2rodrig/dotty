@@ -16,8 +16,9 @@ class RefinementSpec extends FlatSpec with Matchers {
 		tryTest("listtype1")  // NOTE: re-examine test when receiver/parameter mutability is implemented
 	}
 	it should "follow viewpoint adaptation rules" in {
-		tryTest("listtype3")  // NOTE: re-examine test when receiver/parameter mutability is implemented
 		tryTest("listtype2")  // NOTE: re-examine test when dotty's annotation-dropping bug is fixed
+		tryTest("listtype3")  // NOTE: re-examine test when receiver/parameter mutability is implemented
+		tryTest("listtype4")  // NOTE: re-examine test when receiver/parameter mutability is implemented
 	}
 
 	"Recursively-defined polymorphic parameters" should "not cause infinite loops" in {

@@ -1,0 +1,32 @@
+# Makes all tests. Be sure your compiler is functioning correctly before running this!
+./maketest basic/accesspath1
+./maketest basic/accesspath2
+./maketest basic/arguments1
+./maketest basic/arguments2
+./maketest basic/assignpath1
+./maketest basic/assignvars1
+./maketest basic/assignvars2
+./maketest basic/exprcopydef1
+./maketest basic/exprdef1
+./maketest basic/exprdef2
+./maketest basic/methcopydef1
+./maketest basic/methdef1
+./maketest basic/methdef2
+./maketest basic/results1
+./maketest basic/varcopydef1
+./maketest basic/vardef1
+./maketest basic/vardef2
+
+./maketest dotty/desugar
+./maketest dotty/hk
+./maketest dotty/t1053
+./maketest dotty/tailrec-2
+
+./maketest override/override1
+
+./maketest refinement/inheritance1
+./maketest refinement/listtype1
+./maketest refinement/listtype2
+./maketest refinement/listtype3
+./maketest refinement/listtype4
+./maketest refinement/polydef1

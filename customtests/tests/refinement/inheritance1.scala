@@ -4,9 +4,11 @@ import annotation.tmt._
 
 trait inheritance1 {
 
-	class LRm[AnyRef @readonly] extends List[AnyRef @mutable] {}
+	trait T {
+		type =+ = AnyRef @readonly
+	}
 
-	class LMr[AnyRef @mutable] extends List[AnyRef @reaonly] {}
+	//trait T[+A <: AnyRef @readonly] {}
 
 }
 

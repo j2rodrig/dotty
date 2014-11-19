@@ -1,17 +1,23 @@
-//import annotation.tmt._
+import annotation.tmt._
+
+// 3 errors expected
 
 trait override1 {
 
-	trait C {
-		type E <: AnyRef
-		//def method1(p: C): C = new D
+	class C {
+		def method1(p: C): C = new C
+		def method2(p: C @readonly): C = new C
+		
+		def x = this
+	}
+
+	class D extends C {
+		def method1(p: C): D @readonly = new D    // error expected: result types do not match
+		def method2(p: C): D = new D              // error expected: parameter p does not match
+		
+		@readonly def x = this                    // error expected: result types do not match
 	}
 	
-	trait D extends C {
-		type E >: Any
-		//override def method1(p: C): D = new D
-	}
+	class E extends D {}
 	
-	
-	class X extends D { type E = Int }
 }

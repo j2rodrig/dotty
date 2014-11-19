@@ -232,7 +232,7 @@ trait Checking {
   }
 
   /** Check that any top-level type arguments in this type are feasible, i.e. that
-   *  their lower bound conforms to their upper cound. If a type argument is
+   *  their lower bound conforms to their upper bound. If a type argument is
    *  infeasible, issue and error and continue with upper bound.
    */
   def checkFeasible(tp: Type, pos: Position, where: => String = "")(implicit ctx: Context): Type = tp match {
