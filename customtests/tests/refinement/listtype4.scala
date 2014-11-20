@@ -1,6 +1,6 @@
 import annotation.tmt._
 
-// 7 errors expected. 8 expected when receiver mutability is checked.
+// 11 errors expected. 12 expected when receiver mutability is checked.
 
 trait listtype4 {
 	var m: AnyRef @mutable
@@ -15,12 +15,15 @@ trait listtype4 {
 	var rm: List[List[AnyRef @mutable] @readonly]
 	var rr: List[List[AnyRef @readonly] @readonly]
 	
+	var mmm: List[List[List[AnyRef @mutable] @mutable] @mutable]
+	var mmr: List[List[List[AnyRef @readonly] @mutable] @mutable]
+	
 	uu = uu
 	uu = um
-	uu = ur   // Can't check this one due to imprecision in TMTs
+	uu = ur   // error expected
 	uu = mu
 	uu = mm
-	uu = mr   // Can't check this one due to imprecision in TMTs
+	uu = mr   // error expected
 	uu = ru   // error expected
 	uu = rm   // error expected
 	uu = rr   // error expected
@@ -35,8 +38,14 @@ trait listtype4 {
 	rr = rm
 	rr = rr
 	
+	mmm = mmr  // error expected
+	mmr = mmm
+	
 	m = mm.head.head
 	m = mr.head.head  // error expected
 	m = rm.head.head  // error expected: @readonly(rm) is not compatible with @mutable(this)
+	
+	m = mmm.head.head.head
+	mm = mmr.head     // error expected
 }
 

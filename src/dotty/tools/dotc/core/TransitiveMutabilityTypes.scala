@@ -307,31 +307,44 @@ object TransitiveMutabilityTypes {
 	/**
 	 * Returns false if tp1 is not a subtype of tp2, with respect to Transitive Mutability.
 	 *
+	 * alreadySeen contains types that have already been considered by refinementSubtypeOf.
+	 *
 	 * tmtSubtypeOf does not attempt to determine if tp1's Scala type is a subtype of
 	 * tp2's Scala type. tmtSubtypeOf only returns false if a TMT violation is detected.
 	 * 
 	 */
-	def tmtSubtypeOf(tp1: Type, tp2: Type)(implicit ctx: Context): Boolean =
+	def tmtSubtypeOf(tp1: Type, tp2: Type, alreadySeen: List[Type])(implicit ctx: Context): Boolean =
 		tmtSubtypeOf(tmt(tp1), tmt(tp2)) &&   // check simple TMT
-		refinementSubtypeOf(tp1, tp2).result  // check type refinements & methods
+		refinementSubtypeOf(tp1, tp2, alreadySeen).result  // check type refinements & methods
+
+	def tmtSubtypeOf(tp1: Type, tp2: Type)(implicit ctx: Context): Boolean =
+		tmtSubtypeOf(tp1, tp2, List())
 	
 	/**
 	 * A SubtypeResult holds the result of a subtype comparison.
 	 * It may also hold other information that more precisely specifies what happened during the comparision.
 	 * The result member is true if the comparision succeeded, false otherwise.
 	 */	
-	trait SubtypeResult { def result: Boolean }
-	case class AcceptedSubtype() extends SubtypeResult { def result = true }
-	trait FailedSubtype extends SubtypeResult { def result = false }
+	trait SubtypeResult {
+		def result: Boolean
+	}
+	case class AcceptedSubtype() extends SubtypeResult {
+		def result = true
+	}
+	trait FailedSubtype extends SubtypeResult {
+		def result = false
+	}
 	case class FailedParameterSubtype(val mt1: MethodType, val pIndex1: Int,
-		val mt2: MethodType, val pIndex2: Int) extends FailedSubtype {}
+			val mt2: MethodType, val pIndex2: Int) extends FailedSubtype {
+	}
 	case class FailedRefinementSubtype(val refinedName: Name, val info1: Type, val parent1: Type,
-		val info2: Type, val variance2: Int) extends FailedSubtype {}
+		val info2: Type, val variance2: Int) extends FailedSubtype {
+	}
 	
 	/**
 	 * A TMT subtype check that returns an error string with specific failure information.
 	 */
-	def tmtExplainingSubtypeOf(tp1: Type, tp2: Type, location1: String, location2: String)(implicit ctx: Context): String = {
+	def tmtExplainingSubtypeOf(tp1: Type, tp2: Type, location1: String, location2: String, alreadySeen: List[Type])(implicit ctx: Context): String = {
 		val (tm1, tm2) = (tmt(tp1), tmt(tp2))
 				
 		val givenLocations = (location1 ne "") && (location2 ne "")
@@ -343,7 +356,7 @@ object TransitiveMutabilityTypes {
 				tmtMismatchStr(tm1, tm2, (if (givenLocations) s" result of $location1 does not match $location2:" else ""))
 		}
 
-		else refinementSubtypeOf(tp1, tp2) match {  // check type refinements & methods
+		else refinementSubtypeOf(tp1, tp2, alreadySeen) match {  // check type refinements & methods
 
 			case FailedParameterSubtype(
 				MethodType(paramNames1, paramTypes1), pIndex1,
@@ -371,6 +384,9 @@ object TransitiveMutabilityTypes {
 		}
 	}
 	
+	def tmtExplainingSubtypeOf(tp1: Type, tp2: Type, location1: String, location2: String)(implicit ctx: Context): String =
+		tmtExplainingSubtypeOf(tp1, tp2, location1, location2, List())
+
 	def tmtExplainingSubtypeOf(tp1: Type, tp2: Type)(implicit ctx: Context): String =
 		tmtExplainingSubtypeOf(tp1, tp2, "", "")
 
@@ -378,7 +394,10 @@ object TransitiveMutabilityTypes {
 	 * Checks named type members for compatibility.
 	 * Also checks for compatibility of method parameters and result types.
 	 */
-	private[this] def refinementSubtypeOf(tp1: Type, tp2: Type)(implicit ctx: Context): SubtypeResult = {
+	private[this] def refinementSubtypeOf(tp1: Type, tp2: Type, _alreadySeen: List[Type])(implicit ctx: Context): SubtypeResult = {
+		if (_alreadySeen.exists { t => t eq tp1}) return AcceptedSubtype()   // stop recursing if we've already seen tp1
+		val alreadySeen = tp1 :: _alreadySeen
+	
 		tp1 match {
 		
 			case tp1 @ MethodType(paramNames1, paramTypes1) =>
@@ -399,45 +418,34 @@ object TransitiveMutabilityTypes {
 						}
 						r
 					case tp2: ExprType =>  // Can't check parameters (since there are none)
-						refinementSubtypeOf(tp1, tp2.resultType)  // but try to check tp1 against result type
+						refinementSubtypeOf(tp1, tp2.resultType, alreadySeen)  // but try to check tp1 against result type
 					case _ =>
-						refinementSubtypeOf(tp1.resultType, tp2)  // otherwise, try to check tp1's result type against tp2
+						refinementSubtypeOf(tp1.resultType, tp2, alreadySeen)  // otherwise, try to check tp1's result type against tp2
 				}
 			
-			case tp1: PolyType => refinementSubtypeOf(tp1.resultType, tp2)
+			case tp1: PolyType => refinementSubtypeOf(tp1.resultType, tp2, alreadySeen)
 			
-			case tp1: ExprType => refinementSubtypeOf(tp1.resultType, tp2)
+			case tp1: ExprType => refinementSubtypeOf(tp1.resultType, tp2, alreadySeen)
 			
 			case tp1: RefinedType =>
-				/**
-				 * Refined subtyping: Right now, we're only going 1 level deep - that is,
-				 * the code knows that List[A @mutable] <:< List[A @readonly], but can't
-				 * distinguish between List[List[A @mutable]] and List[List[A @readonly]].
-				 *
-				 * There were certain problems with the implementation that I have not been
-				 * able to resolve - namely, that deeper recursions on refined types cause the
-				 * findMember method to throw an exception that seems to have something to do
-				 * with an assertion failure in a type substitution. This problem does not seem
-				 * to occur as long as the implementation does not recurse on the refinedInfo type.
-				 */
 				val refinedInfo = ctx.typeComparer.normalizedInfo(tp1)
-				val sr = namedTypeMemberSubtype(tp1.parent, refinedInfo, tp2, tp1.refinedName)
+				val sr = namedTypeMemberSubtype(tp1.parent, refinedInfo, tp2, tp1.refinedName, alreadySeen)
 				
 				if (!sr.result) sr
-				else refinementSubtypeOf(tp1.parent, tp2)   // type refinement checks out OK. Now check parent type
+				else refinementSubtypeOf(tp1.parent, tp2, alreadySeen)   // type refinement checks out OK. Now check parent type
 			
 			// TODO: special case for TypeBounds?
 				
 			case AndType(tp11, tp12) =>
-				val r1 = refinementSubtypeOf(tp11, tp2)
-				if (!r1.result) r1 else refinementSubtypeOf(tp12, tp2)
+				val r1 = refinementSubtypeOf(tp11, tp2, alreadySeen)
+				if (!r1.result) r1 else refinementSubtypeOf(tp12, tp2, alreadySeen)
 	
 			case OrType(tp11, tp12) =>
-				val r1 = refinementSubtypeOf(tp11, tp2)
-				if (r1.result) r1 else refinementSubtypeOf(tp12, tp2)
+				val r1 = refinementSubtypeOf(tp11, tp2, alreadySeen)
+				if (r1.result) r1 else refinementSubtypeOf(tp12, tp2, alreadySeen)
 	
 			case tp1: TypeProxy =>
-				refinementSubtypeOf(tp1.underlying, tp2)  // recursively examine other proxy types
+				refinementSubtypeOf(tp1.underlying, tp2, alreadySeen)  // recursively examine other proxy types
 			
 			case _ => AcceptedSubtype()  // ignore underlying structure of other ground types
 		}
@@ -445,24 +453,24 @@ object TransitiveMutabilityTypes {
 	
 	/**
 	 * Checks whether info1 is a subtype of the named member of tp2.
-	 * Returns false if definitely not a subtype, true otherwise.
+	 * Returns FailedSubtype if definitely not a subtype, AcceptedSubtype otherwise.
 	 */
-	private[this] def namedTypeMemberSubtype(parent1: Type, info1: Type, tp2: Type, name2: Name)(implicit ctx: Context): SubtypeResult = {
+	private[this] def namedTypeMemberSubtype(parent1: Type, info1: Type, tp2: Type, name2: Name, alreadySeen: List[Type])(implicit ctx: Context): SubtypeResult = {
 		tp2 match {
 			case tp2: RefinedType =>
 				if (tp2.refinedName == name2 && tp2.refinedName.isTypeName) {
 					val info2 = ctx.typeComparer.normalizedInfo(tp2)
-					if (tmtSubtypeWithVariance(info1, info2, varianceOf(info2)))
+					if (tmtSubtypeWithVariance(info1, info2, varianceOf(info2), alreadySeen))
 						AcceptedSubtype()
 					else
 						FailedRefinementSubtype(name2, info1, parent1, info2, varianceOf(info2))
 				}
-				else namedTypeMemberSubtype(parent1, info1, tp2.parent, name2)
+				else namedTypeMemberSubtype(parent1, info1, tp2.parent, name2, alreadySeen)
 
 			case tp2: ClassInfo =>
 				tp2.cls.findMember(name2, tp2.cls.thisType, EmptyFlags).alternatives foreach { denot2 =>
 					if (denot2.isType) {
-						if (!tmtSubtypeWithVariance(info1, denot2.info, varianceOf(denot2.info)))
+						if (!tmtSubtypeWithVariance(info1, denot2.info, varianceOf(denot2.info), alreadySeen))
 							return FailedRefinementSubtype(name2, info1, parent1, denot2.info, varianceOf(denot2.info))
 					}
 				}
@@ -471,19 +479,25 @@ object TransitiveMutabilityTypes {
 			// TODO: special case for TypeBounds?
 			
 			case AndType(tp21, tp22) =>
-				val r1 = namedTypeMemberSubtype(parent1, info1, tp21, name2)
-				if (!r1.result) r1 else namedTypeMemberSubtype(parent1, info1, tp22, name2)
+				val r1 = namedTypeMemberSubtype(parent1, info1, tp21, name2, alreadySeen)
+				if (!r1.result) r1 else namedTypeMemberSubtype(parent1, info1, tp22, name2, alreadySeen)
 			
 			case OrType(tp21, tp22) =>
-				val r1 = namedTypeMemberSubtype(parent1, info1, tp21, name2)
-				if (r1.result) r1 else namedTypeMemberSubtype(parent1, info1, tp22, name2)
+				val r1 = namedTypeMemberSubtype(parent1, info1, tp21, name2, alreadySeen)
+				if (r1.result) r1 else namedTypeMemberSubtype(parent1, info1, tp22, name2, alreadySeen)
 			
 			case tp2: TypeProxy =>
-				namedTypeMemberSubtype(parent1, info1, tp2.underlying, name2)
+				namedTypeMemberSubtype(parent1, info1, tp2.underlying, name2, alreadySeen)
 			
 			case _ => AcceptedSubtype()   // can't find a reason to reject the subtype
 		}
 	}
+	
+	
+	/// On incremental development of the TMT type system:
+	/// It is always safe for tmtSubtypeOf to return true.
+	/// I return false whenever I find a case that is provably in violation of TMT constraints.
+	/// This approach allows for incremental development.
 	
 	/// Possible topic to write about in a chapter:
 	/// That I couldn't treat the existing type system as "black magic".
@@ -496,11 +510,12 @@ object TransitiveMutabilityTypes {
 		case _ => 0
 	}
 	
-	private[this] def tmtSubtypeWithVariance(tp1: Type, tp2: Type, variance2: Int)(implicit ctx: Context): Boolean = {
-		//val covOk = variance2 < 0 || tmtSubtypeOf(tp1, tp2)
-		//val contravOk = variance2 > 0 || tmtSubtypeOf(tp2, tp1)
-		val covOk = variance2 < 0 || tmt(tp1) <:< tmt(tp2)      // tp1 is a covariant subtype of tp2, if a covariance constraint applies
-		val contravOk = variance2 > 0 || tmt(tp2) <:< tmt(tp1)  // tp1 is a contravariant subtype of tp2, if a contravariance constraint applies
+	private[this] def tmtSubtypeWithVariance(tp1: Type, tp2: Type, variance2: Int, alreadySeen: List[Type])(implicit ctx: Context): Boolean = {
+		// If covariant or invariant, check that tp1 is a subtype of tp2.
+		val covOk = variance2 < 0 || tmtSubtypeOf(tp1, tp2, alreadySeen)
+		// If contravariant or invariant, check that tp2 is a subtype of tp1.
+		val contravOk = variance2 > 0 || tmtSubtypeOf(tp2, tp1, alreadySeen)
+		// All variance constraints satisfied?
 		covOk && contravOk
 	}
 	
