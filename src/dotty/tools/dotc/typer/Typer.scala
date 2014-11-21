@@ -386,6 +386,7 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
 			// Rule 1. The prefix type must be mutable.
 			// Rule 2. The RHS must be compatible with the LHS with respect to mutability.
 			import TransitiveMutabilityTypes._
+			
 			//println(s"${showSpecial(rhs1.tpe)}")
 			//println(s"Computed RHS TMT: ${tmt(rhs1.tpe)}. (Type = ${showSpecial(rhs1.tpe,1)})\n")
 			//println(s"Computed LHS TMT: ${tmt(ref)}. (Type = ${showSpecial(ref,1)})")
@@ -930,12 +931,40 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
     val tpt1 = typedType(tpt)
     val rhs1 = typedExpr(rhs, tpt1.tpe)
 	
+	
+	
+	/**
+	 * Dealing with parameters from a method's outer environment:
+	 * Each item has a type, which has a denotation, which is associated with 1 or more symbols.
+	 * Symbols can be method-local or method-external.
+	 * If the TMT of an expression is the LUB of all symbols it accesses, then:
+	 *    - local symbols are unaffected.
+	 *    - external symbols are stored (prior to typing method body) and looked up upon access...
+	 */
+	 
+	
 	import TransitiveMutabilityTypes._
+	
+	def findArgs(tree: Tree): List[Type] = tree match {
+		case Typed(expr, tpt) => findArgs(expr)
+		case SeqLiteral(elems) => elems map { tre => tre.tpe }
+	}
 	
 	// Let mutability annotations on the symbol be mutability annotation on the symbol's type.
 	// Allows expressions like `@readonly def m = y`.
-	sym.denot.annotations.foreach { annot => if (tmt(annot).exists)
-		sym.denot.info = withTmt(sym.denot.info, tmt(annot))
+	sym.denot.annotations.foreach { annot =>
+		if (tmt(annot).exists) {
+
+			// Get arguments from the first argument list. If no argument list, then return empty list.
+			val args =
+				if (annot.arguments.length == 0) List[Type]()
+				else findArgs(annot.argument(0).get)
+		
+			if (args.length == 0)
+				sym.denot.info = withTmt(sym.denot.info, tmt(annot))  // copy annotation to symbol's type
+			//else
+			//	args foreach { x => println(showSpecial(x)) }
+		}
 	}
 	
 	// println(s"${sym.name} tmt = ${tmt(sym.info)}")

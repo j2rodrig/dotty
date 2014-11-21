@@ -372,7 +372,8 @@ object Contexts {
 
     override def toString =
       "Context(\n" +
-      (outersIterator map ( ctx => s"  owner = ${ctx.owner}, scope = ${ctx.scope}") mkString "\n")
+      (outersIterator map ( ctx => s"  owner = ${ctx.owner}, scope = ${ctx.scope}") mkString "\n") +
+	  "\n)"
   }
 
   /** A condensed context provides only a small memory footprint over

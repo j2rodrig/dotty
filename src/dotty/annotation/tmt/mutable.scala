@@ -15,4 +15,4 @@ package tmt
  *
  *  @since 2.11
  */
-class mutable extends StaticAnnotation with TypeConstraint
+class mutable(references: Any *) extends StaticAnnotation with TypeConstraint

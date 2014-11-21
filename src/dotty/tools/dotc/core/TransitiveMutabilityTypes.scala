@@ -111,9 +111,8 @@ object TransitiveMutabilityTypes {
 					case tm: Mutable  => ctx.definitions.MutableClass.typeRef
 					case tm: Polyread => ctx.definitions.PolyreadClass.typeRef
 					case tm: Readonly => ctx.definitions.ReadonlyClass.typeRef
-					//case tm: ErrorTmt => ctx.definitions.ReadonlyClass.typeRef  // we don't have an @error annotation, so just use @readonly
 				},
-				Nil
+				List(EmptyTree)
 			),
 			tm)
 
@@ -238,8 +237,61 @@ object TransitiveMutabilityTypes {
 	def typeRef(info: Type, tRef: TypeRef)(implicit ctx: Context): Type = info
 	
 	
+	/**
+	 * Finds the innermost TMT annotation that applies to the given reference.
+	 * e.g., @readonly(this) def m() = ...   // inside m, this is @readonly
+	 * The reference is passed as a Denotation.
+	 */
+	def findTmtOverrides(denot: Denotation)(implicit ctx: Context): Tmt = {
+		val owner = ctx.owner   // the owning symbol
+		val outer = ctx.outer   // the next outer context
+		
+		// First, if the owner is a method symbol, see if it has a TMT annotation
+		// that specifies a denotation that matches the given denot.
+		if (owner.denot.info.isInstanceOf[MethodicType]) {
+			UnannotatedTmt() // TODO: temp
+		}
+		
+		// If there are enclosing contexts, search those.
+		if (outer != NoContext) findTmtOverrides(denot)(outer)
+		
+		// If we've searched all the contexts, then give up.
+		else UnannotatedTmt()
+	}
 
+	def findTmtOverrides(tp: Type)(implicit ctx: Context): Tmt = tp match {
+		case tp: NamedType => findTmtOverrides(tp.denot)
+		case _ =>
+			println(s"??? Expected NamedType in findTmtOverrides")
+			UnannotatedTmt()
+	}
+	
+	/**
+	 * Finds the innermost context that encloses the current method definition,
+	 * e.g.,
+	 *        def foo { def bar = ??? }
+	 *    returns a context with owner foo when called on the context of ???.
+	 * Returns NoContext if there is no current method definition.
+	 *
+	 * The reason for writing this method is to help with annotation checking for extra parameters.
+	 */
+	def findContextEnclosingCurrentMethod(implicit ctx: Context): Context = {
+		if (ctx == NoContext) ctx
+		
+		else if (!ctx.owner.denot.info.isInstanceOf[MethodicType])
+			findContextEnclosingCurrentMethod(ctx.outer)
+		
+		else {
+			def notMatchingSymbol(sym: Symbol)(ctx: Context): Context =
+				if (ctx == NoContext) ctx
+				else if (ctx.owner == sym) notMatchingSymbol(sym)(ctx.outer)
+				else ctx
 
+			notMatchingSymbol(ctx.owner)(ctx.outer)
+		}
+	}
+	
+	
 	//--- Simple Subtyping Relationships ---//
 
 	/**
@@ -434,12 +486,15 @@ object TransitiveMutabilityTypes {
 				if (!sr.result) sr
 				else refinementSubtypeOf(tp1.parent, tp2, alreadySeen)   // type refinement checks out OK. Now check parent type
 			
-			// TODO: special case for TypeBounds?
-				
-			case AndType(tp11, tp12) =>
+			case TypeBounds(tp11, tp12) =>
+				/// TypeBounds is handled like AndType -- both ends of the bound must be correct.
 				val r1 = refinementSubtypeOf(tp11, tp2, alreadySeen)
 				if (!r1.result) r1 else refinementSubtypeOf(tp12, tp2, alreadySeen)
 	
+			case AndType(tp11, tp12) =>
+				val r1 = refinementSubtypeOf(tp11, tp2, alreadySeen)
+				if (!r1.result) r1 else refinementSubtypeOf(tp12, tp2, alreadySeen)
+
 			case OrType(tp11, tp12) =>
 				val r1 = refinementSubtypeOf(tp11, tp2, alreadySeen)
 				if (r1.result) r1 else refinementSubtypeOf(tp12, tp2, alreadySeen)
@@ -478,10 +533,15 @@ object TransitiveMutabilityTypes {
 			
 			// TODO: special case for TypeBounds?
 			
-			case AndType(tp21, tp22) =>
+			case TypeBounds(tp21, tp22) =>
+				/// TypeBounds is handled like AndType -- both ends of the bound must be correct.
 				val r1 = namedTypeMemberSubtype(parent1, info1, tp21, name2, alreadySeen)
 				if (!r1.result) r1 else namedTypeMemberSubtype(parent1, info1, tp22, name2, alreadySeen)
 			
+			case AndType(tp21, tp22) =>
+				val r1 = namedTypeMemberSubtype(parent1, info1, tp21, name2, alreadySeen)
+				if (!r1.result) r1 else namedTypeMemberSubtype(parent1, info1, tp22, name2, alreadySeen)
+		
 			case OrType(tp21, tp22) =>
 				val r1 = namedTypeMemberSubtype(parent1, info1, tp21, name2, alreadySeen)
 				if (r1.result) r1 else namedTypeMemberSubtype(parent1, info1, tp22, name2, alreadySeen)
