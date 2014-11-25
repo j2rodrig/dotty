@@ -5,6 +5,7 @@ package core
 import util.common._
 import ast._
 import tpd._
+import Trees.{Apply, Typed, SeqLiteral}
 import Symbols._
 import Flags._
 import Names._
@@ -22,6 +23,10 @@ import util.Positions._
 import Types._
 import typer.ProtoTypes._
 import printing.Texts.Text
+
+// Another use for purity:
+// Issuing a warning when calling a pure method but not using the result.
+
 
 object TransitiveMutabilityTypes {
 
@@ -227,7 +232,14 @@ object TransitiveMutabilityTypes {
 	 */
 	def termRef(info: Type, tRef: TermRef)(implicit ctx: Context): Type =
 		if (info.isInstanceOf[MethodicType]) info             // methods: no adapation needed here
-		else withTmt(info, lub(tmt(tRef.prefix), tmt(info)))  // fields: use Least Upper Bound of info and the prefix type
+		else {
+			// fields: use Least Upper Bound of member type and the prefix type
+			val prefixTmt = tmt(tRef.prefix)
+			val memberTmt = lub(outerMutabilityOf(tRef.denot), tmt(info))  // take outer parameters into account
+			
+			withTmt(info, lub(prefixTmt, memberTmt))
+		}
+		//else withTmt(info, lub(tmt(tRef.prefix), tmt(info)))  // fields: use Least Upper Bound of info and the prefix type
 	
 	/**
 	 * Changes the type returned from a TypeRef's info method.
@@ -242,29 +254,188 @@ object TransitiveMutabilityTypes {
 	 * e.g., @readonly(this) def m() = ...   // inside m, this is @readonly
 	 * The reference is passed as a Denotation.
 	 */
-	def findTmtOverrides(denot: Denotation)(implicit ctx: Context): Tmt = {
-		val owner = ctx.owner   // the owning symbol
-		val outer = ctx.outer   // the next outer context
+	def findTmtOverrides(denot: SingleDenotation)(implicit _ctx: Context): Tmt = {
+	
+		/*def findDenotationInSymbolAnnotations(mods: Modifiers, singleDenot: SingleDenotation) = {
 		
-		// First, if the owner is a method symbol, see if it has a TMT annotation
+		}
+		
+		def findArgumentDenotations(tree: Tree) = tree match {  //: List[SingleDenotation] = tree match {
+			case Apply(_, args) =>
+				var argDenots = args map { a => findArgumentDenotations(a) }
+				//argDenots.flatten
+			case Ident(name)
+		}*/
+	
+		def findEnclosingContext(c: Context): Context = {
+			if (c == NoContext) c
+			else c.tree match {
+				case tree: DefDef =>
+					//tree.mods.annotations.foreach { annotTree =>
+					//}
+					tree.mods.annotations.foreach { annotTree =>
+						//findArgumentDenotations(annotTree)
+					}
+					//println(s"  ${tree.mods.annotations}")
+				
+					//println(s"${c.owner}: ${c.owner.denot.alternatives}")
+					//c.owner.denot.alternatives.foreach { singleDenot => singleDenot match {
+					//		case symDenot: SymDenotation => println(s"   ${symDenot.uncompletedAnnotations}")
+					//	}
+					//}
+					
+					//untpd.modsDeco(tree).mods.annotations foreach { annot =>
+					//	val annot1 = _ctx.typer.typed(annot)
+					//	println(s" ${annot1.tpe}")
+					//	//println(s" ${tmt()} ${annot.arguments(0).get}")
+					//}
+					
+					//println()
+					//findDenotationInSymbolAnnotations(c.owner, denot)
+					//findEnclosingContext(c.outer)
+					c
+				case _ =>
+					findEnclosingContext(c.outer)
+			}
+		}
+		
+		val ctx = findEnclosingContext(_ctx)
+		
+		//if (ctx == NoContext) UnannotatedTmt()
+		
+		//if (ctx != NoContext) println(s"Found context ${ctx.owner} for symbol ${denot.symbol}")
+		
+		UnannotatedTmt()
+	
+		/*// If there are no more contexts to search, then give up.
+		if (ctx == NoContext) return UnannotatedTmt()
+		
+		// If the owner is a method symbol, see if it has a TMT annotation
 		// that specifies a denotation that matches the given denot.
-		if (owner.denot.info.isInstanceOf[MethodicType]) {
-			UnannotatedTmt() // TODO: temp
+		if (ctx.tree.isInstanceOf[DefDef]) {
+		
+			// Search through all annotations on the DefDef, and return the LUB of all matching arguments.
+			var argTmt: Tmt = UnannotatedTmt()
+			ctx.owner.denot.annotations.foreach { annot =>
+				if (annot.arguments.length > 0)
+					findArgDenots(annot.argument(0).get).foreach { argDenot =>
+						println(s" ${argDenot.symbol} with ${tmt(annot)}")
+						if (argDenot.symbol == denot.symbol)   // do the denotations point to the same symbol?
+							argTmt = lub(argTmt, tmt(annot))
+					}
+			}
+			// Found anything?
+			if (argTmt.exists) return argTmt
 		}
 		
 		// If there are enclosing contexts, search those.
-		if (outer != NoContext) findTmtOverrides(denot)(outer)
+		findTmtOverrides(denot)(ctx.outer)*/
+	}
+	
+	/** Symbols with important mutability annotations.
+	 * If should be safe to keep references to symbols here, assuming:
+	 * - that each symbol in a compiler run can be uniquely identified by its Symbol object, and
+	 * - that each symbol object has the same meaning in any context.
+	 * (Although it may be a good idea to clear these references at the end of each compilation unit.)
+	 *
+	 * We really only need to store information about @readonly denotations,
+	 * since @mutable annotations don't affect typing of method bodies (although they may
+	 * cause mutability errors if their arguments are readonly denotations), and
+	 * @polyread annotations with arguments don't make sense (because the types of such
+	 * arguments come from the outer environment, so are statically known).
+	 */
+	private[this] var symsWithMutableAnnots  = Map[Symbol,List[SingleDenotation]]()
+	private[this] var symsWithPolyreadAnnots = Map[Symbol,List[SingleDenotation]]()
+	private[this] var symsWithReadonlyAnnots = Map[Symbol,List[SingleDenotation]]()
+	
+	/** Maps an annotation argument tree to a list of argument types. */
+	private[this] def findAnnotationArgTypes(argTree: Tree): List[Type] = argTree match {
+		case Typed(expr, tpt) => findAnnotationArgTypes(expr)
+		case SeqLiteral(elems) => elems map { tree => tree.tpe }
+	}
+	
+	/**
+	 * Searches enclosing contexts for any @readonly annotations that apply to
+	 * the given denotation.
+	 */
+	def outerMutabilityOf(denot: Denotation)(implicit ctx: Context): Tmt = {
+		if (ctx == NoContext) return UnannotatedTmt()
+	
+		denot.alternatives foreach { singleDenot =>
+			if (symsWithReadonlyAnnots contains ctx.owner)
+				if (symsWithReadonlyAnnots(ctx.owner) exists { readonlyDenot => singleDenot.symbol == readonlyDenot.symbol })
+					return Readonly()
+		}
 		
-		// If we've searched all the contexts, then give up.
-		else UnannotatedTmt()
+		outerMutabilityOf(denot)(ctx.outer)
+	}
+	
+	def registerSymbolAsAnnotationCarrier(sym: Symbol)(implicit ctx: Context) = {
+		var mutableDenotationsSpecified = List[SingleDenotation]()
+		var polyreadDenotationsSpecified = List[SingleDenotation]()
+		var readonlyDenotationsSpecified = List[SingleDenotation]()
+		sym.annotations.foreach { annot =>
+		
+			// Look for @readonly annotations with arguments...
+			//if (annot.arguments.length > 0) {
+			findAnnotationArgTypes(annot.argument(0).get).foreach { tp =>
+				if (tp.isInstanceOf[NamedType]) {
+					val alternatives = tp.asInstanceOf[NamedType].denot.alternatives
+					tmt(annot) match {
+						case _: Mutable  => mutableDenotationsSpecified :::= alternatives
+						case _: Polyread => polyreadDenotationsSpecified :::= alternatives
+						case _: Readonly => readonlyDenotationsSpecified :::= alternatives
+						case _ =>
+					}
+					//println(s"@readonly ${tp.asInstanceOf[NamedType].denot} on $sym")
+				}
+			}
+			//}
+		}
+		if (!mutableDenotationsSpecified.isEmpty) {
+			symsWithMutableAnnots += ((sym, mutableDenotationsSpecified))
+			//println(s"Registered $sym with mutable denotations $mutableDenotationsSpecified")
+		}
+		
+		if (!polyreadDenotationsSpecified.isEmpty)
+			symsWithPolyreadAnnots += ((sym, polyreadDenotationsSpecified))
+		
+		if (!readonlyDenotationsSpecified.isEmpty) {
+			symsWithReadonlyAnnots += ((sym, readonlyDenotationsSpecified))
+			//println(s"Registered $sym with readonly denotations $readonlyDenotationsSpecified")
+		}
 	}
 
-	def findTmtOverrides(tp: Type)(implicit ctx: Context): Tmt = tp match {
+	/**
+	 * Given an argument tree, returns all denotations of all its arguments.
+	 */
+	private[this] def findArgDenots(tree: Tree)(implicit ctx: Context): List[SingleDenotation] = {
+		val singleDenots = findArgs(tree) map { argType =>
+			argType match {
+				case t: NamedType => t.denot.alternatives
+				case _ => List[SingleDenotation]()
+			}
+		}
+		singleDenots.flatten
+	}
+
+	/**
+	 * Given an argument tree, returns the types of its arguments.
+	 */
+	private[this] def findArgs(tree: Tree)(implicit ctx: Context): List[Type] = tree match {
+		case Typed(expr, tpt) => findArgs(expr)
+		case SeqLiteral(elems) => elems map { tre => tre.tpe }
+	}
+	
+
+
+	/*def findTmtOverrides(tp: Type)(implicit ctx: Context): Tmt = tp match {
 		case tp: NamedType => findTmtOverrides(tp.denot)
 		case _ =>
 			println(s"??? Expected NamedType in findTmtOverrides")
 			UnannotatedTmt()
-	}
+	}*/
+	
 	
 	/**
 	 * Finds the innermost context that encloses the current method definition,
@@ -278,7 +449,7 @@ object TransitiveMutabilityTypes {
 	def findContextEnclosingCurrentMethod(implicit ctx: Context): Context = {
 		if (ctx == NoContext) ctx
 		
-		else if (!ctx.owner.denot.info.isInstanceOf[MethodicType])
+		else if (!ctx.tree.isInstanceOf[DefDef])
 			findContextEnclosingCurrentMethod(ctx.outer)
 		
 		else {
@@ -601,6 +772,23 @@ object TransitiveMutabilityTypes {
 					tp, overriddenTp,
 					s"${sym} in ${sym.owner}", s"${overriddenSym.name} in ${overriddenSym.owner}"),
 				sym.pos)
+		
+		else tmtCheckOverriddenOuterParams(sym, overriddenSym)
+	}
+	
+	def tmtCheckOverriddenOuterParams(sym: Symbol, overriddenSym: Symbol)(implicit ctx: Context): Unit = {
+		val location1 = s"${sym} in ${sym.owner}"
+		val location2 = s"${overriddenSym} in ${overriddenSym.owner}"
+	
+		if (symsWithMutableAnnots contains sym) symsWithMutableAnnots(sym) foreach { denot =>
+			if (symsWithReadonlyAnnots contains overriddenSym) symsWithReadonlyAnnots(overriddenSym) foreach { overriddenDenot =>
+				if (denot.symbol == overriddenDenot.symbol)
+					ctx.error("override error:\n" +
+							s" found     : @mutable(${denot.symbol.name}) of $location1\n" +
+							s" overriding: @readonly(${overriddenDenot.symbol.name}) of $location2",
+						sym.pos)  // TODO: pos of annotation arg instead
+			}
+		}
 	}
 
 	

@@ -383,29 +383,32 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
 		    val rhs1 = typed(tree.rhs, ref.info)
 			
 			// Assignments:
-			// Rule 1. The prefix type must be mutable.
-			// Rule 2. The RHS must be compatible with the LHS with respect to mutability.
+			// Rule 1. The reference cannot be an outer parameter of type @readonly or @polyread.
+			// Rule 2. The prefix type cannot be @readonly or @polyread.
+			// Rule 3. The RHS must be compatible with the LHS with respect to mutability.
 			import TransitiveMutabilityTypes._
 			
-			//println(s"${showSpecial(rhs1.tpe)}")
-			//println(s"Computed RHS TMT: ${tmt(rhs1.tpe)}. (Type = ${showSpecial(rhs1.tpe,1)})\n")
-			//println(s"Computed LHS TMT: ${tmt(ref)}. (Type = ${showSpecial(ref,1)})")
-			// TODO: re-enable when ready
-			// Make sure the prefix is not readonly.
-			tmt(ref.prefix) match {
-				case tm: Readonly =>
-					typer.ErrorReporting.errorTree(lhs1, s"Field ${ref.name} cannot be written through a @readonly reference")
-				//case Mutability.minpolyread() => ctx.error(s"Unexpected minpolyread mutability in assignment")
-				case tm: Polyread =>
-					typer.ErrorReporting.errorTree(lhs1, s"Field ${ref.name} cannot be written through a @polyread reference")
+			// Check rule 1: Outer-parameter mutability cannot be @readonly or @polyread.
+			outerMutabilityOf(ref.denot) match {
+				case _: Readonly =>
+					ctx.error(s"Reference is not assignable because it has been declared as a @readonly outer parameter", lhs1.pos)
+				
+				case _: Polyread =>
+					ctx.error(s"Reference is not assignable because it has been declared as a @polyread outer parameter", lhs1.pos)
+				
 				case _ =>
-					// Check rule 2: RHS must be compatible with LHS
-					//println(s"Checking assignment subtype:\n\t${showSpecial(rhs1.tpe,2)}\n\t${showSpecial(lhs1.tpe,2)}")
-					if (!tmtSubtypeOf(rhs1.tpe, lhs1.tpe)) {
-						ctx.error(
-							tmtExplainingSubtypeOf(rhs1.tpe, lhs1.tpe),
-							rhs1.pos)
-						//tmtMismatch (rhs1, lhs1.tpe)
+					// Check rule 2: Prefix cannot be @readonly or @polyread.
+					tmt(ref.prefix) match {
+						case _: Readonly =>
+							ctx.error(s"Field ${ref.name} cannot be written through a @readonly reference", lhs1.pos)
+						
+						case _: Polyread =>
+							ctx.error(s"Field ${ref.name} cannot be written through a @polyread reference", lhs1.pos)
+						
+						case _ =>
+							// Check rule 3: RHS must be compatible with LHS
+							if (!tmtSubtypeOf(rhs1.tpe, lhs1.tpe))
+								ctx.error(tmtExplainingSubtypeOf(rhs1.tpe, lhs1.tpe), rhs1.pos)
 					}
 			}
 			
@@ -927,6 +930,26 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
     addTypedModifiersAnnotations(ddef, sym)
     val tparams1 = tparams mapconserve (typed(_).asInstanceOf[TypeDef])
     val vparamss1 = vparamss nestedMapconserve (typed(_).asInstanceOf[ValDef])
+	
+	import TransitiveMutabilityTypes._
+	
+	/** registerSymbolAsAnnotationCarrier tells the plugin that the method symbol may carry
+	 * annotations that may need to be accessed during typing of the method body.
+	 * 
+	 * It is important to call registerSymbolAsAnnotationCarrier before typing the method body
+	 * (so that expressions in the body have access to the typed annotations),
+	 * but after the annotations themselves are typed
+	 * (to stop annotation arguments from referring to themselves during typing).
+	 */
+	registerSymbolAsAnnotationCarrier(sym)
+	
+	def findArgs(tree: Tree): List[Type] = tree match {
+		case Typed(expr, tpt) => findArgs(expr)
+		case SeqLiteral(elems) => elems map { tre => tre.tpe }
+	}
+	
+	//sym.annotations.foreach { annot => findArgs(annot.argument(0).get).foreach { tp => println(tp.asInstanceOf[NamedType].denot) } }
+	
     if (sym is Implicit) checkImplicitParamsNotSingletons(vparamss1)
     val tpt1 = typedType(tpt)
     val rhs1 = typedExpr(rhs, tpt1.tpe)
@@ -942,13 +965,8 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
 	 *    - external symbols are stored (prior to typing method body) and looked up upon access...
 	 */
 	 
-	
-	import TransitiveMutabilityTypes._
-	
-	def findArgs(tree: Tree): List[Type] = tree match {
-		case Typed(expr, tpt) => findArgs(expr)
-		case SeqLiteral(elems) => elems map { tre => tre.tpe }
-	}
+	//println(findContextEnclosingCurrentMethod)
+	//findTmtOverrides(NoDenotation)  // temp
 	
 	// Let mutability annotations on the symbol be mutability annotation on the symbol's type.
 	// Allows expressions like `@readonly def m = y`.

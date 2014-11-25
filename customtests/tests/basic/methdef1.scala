@@ -7,11 +7,11 @@ trait methdef1 {
 	var m1: AnyRef @mutable
 	var r1: AnyRef @readonly
 
-	@readonly(m1) def ym: Unit = {
+	/*@readonly(m1) def ym: Unit = {
 		def xm: Unit = {
 			this.m1 = this.m1
 		}
-	}
+	}*/
 	
 	def ud2(): AnyRef = u1
 	def ud3(): AnyRef = m1
