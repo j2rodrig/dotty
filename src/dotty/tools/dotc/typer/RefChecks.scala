@@ -784,6 +784,9 @@ class RefChecks extends MiniPhase with SymTransformer { thisTransformer =>
       checkUndesiredProperties(tree.symbol, tree.pos)
       ensurePrivateAccessible(tree.symbol)
       currentLevel.enterReference(tree.symbol, tree.pos)
+
+      //TransitiveMutabilityTypes.checkIdent(tree)
+
       tree
     }
 
@@ -803,6 +806,9 @@ class RefChecks extends MiniPhase with SymTransformer { thisTransformer =>
           ctx.error("forward reference not allowed from self constructor invocation", level.refPos)
         }
       }
+	  
+      //TransitiveMutabilityTypes.checkApply(tree)
+	  
       tree
     }
 

@@ -14,9 +14,7 @@ package tmt
  *  No writes may be performed to objects typed `readonly`.
  *  All members of a readonly object are also typed `readonly`.
  *
- *  Parameters are typed @polyread to allow arguments of any mutability.
- *
  *  @since 2.11
  */
 //TODO: allow readonly to be applied via: `class C extends Readonly`?
-class readonly(references: Any @polyread *) extends StaticAnnotation with TypeConstraint
+class readonly(references: Any *) extends StaticAnnotation with TypeConstraint

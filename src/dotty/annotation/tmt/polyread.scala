@@ -11,8 +11,12 @@ package tmt
 
 /** A type annotation that restricts mutations.
  *
- *  See `readonly.scala`.
+ *  @polyread specifies polymorphic parameters and results.
+ *  When applied, @polyread parameters/results may be given different TMT types,
+ *  depending on argument TMTs.
+ *
+ *  See `readonly.scala` for more information.
  *
  *  @since 2.11
  */
-class polyread extends StaticAnnotation with TypeConstraint
+class polyread(references: Any *) extends StaticAnnotation with TypeConstraint

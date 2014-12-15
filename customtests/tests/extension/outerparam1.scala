@@ -1,6 +1,6 @@
 import annotation.tmt._
 
-// 7 errors expected
+// 5 errors expected
 
 trait outerparam1 {
 	var u1: AnyRef
@@ -9,22 +9,22 @@ trait outerparam1 {
 
 	def o1() = {
 		@readonly(u1) def o11(): Unit = {
-			u1 = r1
+			u1 = r1   // error expected: u1 is not assignable
 		}
 		@mutable(r1) def o12(): Unit = {   // error expected
 			u1 = r1
 		}
 		@readonly(m1) def o13(): Unit = {
-			m1 = r1
+			m1 = r1   // error expected: m1 is not assignable
 		}
 	}
 	
 	@readonly(m1) def o2(): Unit = {
-		@mutable(m1) def o21(): Unit = {
+		@mutable(m1) def o21(): Unit = {    // error expected: m1 is readonly
 			m1 = m1
 		}
 		def o22(): Unit = {
-			m1 = m1
+			m1 = m1    // error expected: m1 is not assignable
 		}
 	}
 

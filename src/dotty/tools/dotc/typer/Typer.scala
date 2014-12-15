@@ -275,6 +275,29 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
         tree.withType(ownType)
     }
 
+	/*import TransitiveMutabilityTypes._
+	ownType match {
+		case methRef: TermRef if methRef.underlying.isInstanceOf[MethodicType] => 
+			val rcvMut = tmt(methRef.prefix)
+			val (formalRcvMut, formalRcvTree) =
+				receiverTmtInSymbolContext(methRef.denot.symbol.enclosingClass, methRef.denot.symbol)
+			//println(s"IDENT APPLY: this=$rcvMut  formal on ${methRef.denot.symbol}=$formalRcvMut")
+	
+			// if formal receiver type is polyread, then set the result adaptation to the receiver argument
+			//if (formalRcvMut.isPolyread) resultModifier = rcvMut  // TODO: warning if resultType is not @polyread
+	
+			// otherwise check that the receiver argument is compatible with formal receiver
+			//else
+				if (!tmtSubtypeOf(rcvMut, formalRcvMut))
+					ctx.error(s"""incompatible "this" mutability:\n""" +
+						s" found   : ${mutableIfUnannotated(rcvMut)}\n"+
+						s" required: ${mutableIfUnannotated(formalRcvMut)}",
+						tree.pos)
+		case _ =>
+	
+	}
+	//println(s"SELECT TYPE/TREE: ${TransitiveMutabilityTypes.showSpecial(tp)} / $tree")*/
+	
     checkValue(tree1, pt)
   }
 
@@ -383,32 +406,33 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
 		    val rhs1 = typed(tree.rhs, ref.info)
 			
 			// Assignments:
-			// Rule 1. The reference cannot be an outer parameter of type @readonly or @polyread.
+			// Rule 1. The RHS must be compatible with the LHS with respect to mutability.
 			// Rule 2. The prefix type cannot be @readonly or @polyread.
-			// Rule 3. The RHS must be compatible with the LHS with respect to mutability.
+			// Rule 3. The reference cannot be an outer parameter of type @readonly or @polyread.
 			import TransitiveMutabilityTypes._
 			
-			// Check rule 1: Outer-parameter mutability cannot be @readonly or @polyread.
-			outerMutabilityOf(ref.denot) match {
+			// Check rule 1: RHS must be compatible with LHS
+			if (!tmtSubtypeOf(rhs1.tpe, lhs1.tpe))
+				ctx.error(tmtExplainingSubtypeOf(rhs1.tpe, lhs1.tpe), rhs1.pos)
+			
+			// Check rule 2: Prefix cannot be @readonly or @polyread.
+			else tmt(ref.prefix) match {
 				case _: Readonly =>
-					ctx.error(s"Reference is not assignable because it has been declared as a @readonly outer parameter", lhs1.pos)
-				
+					ctx.error(s"Field ${ref.name} cannot be written through a @readonly reference", lhs1.pos)
+		
 				case _: Polyread =>
-					ctx.error(s"Reference is not assignable because it has been declared as a @polyread outer parameter", lhs1.pos)
-				
+					ctx.error(s"Field ${ref.name} cannot be written through a @polyread reference", lhs1.pos)
+		
 				case _ =>
-					// Check rule 2: Prefix cannot be @readonly or @polyread.
-					tmt(ref.prefix) match {
+					// Check rule 3: Outer-parameter mutability cannot be @readonly or @polyread.
+					tmtInCurrentContext(ref.denot) match {
 						case _: Readonly =>
-							ctx.error(s"Field ${ref.name} cannot be written through a @readonly reference", lhs1.pos)
-						
+							ctx.error(s"Reference is not assignable because it has been declared as a @readonly outer parameter", lhs1.pos)
+			
 						case _: Polyread =>
-							ctx.error(s"Field ${ref.name} cannot be written through a @polyread reference", lhs1.pos)
-						
+							ctx.error(s"Reference is not assignable because it has been declared as a @polyread outer parameter", lhs1.pos)
+			
 						case _ =>
-							// Check rule 3: RHS must be compatible with LHS
-							if (!tmtSubtypeOf(rhs1.tpe, lhs1.tpe))
-								ctx.error(tmtExplainingSubtypeOf(rhs1.tpe, lhs1.tpe), rhs1.pos)
 					}
 			}
 			
@@ -827,7 +851,9 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
   }
 
   def addTypedModifiersAnnotations(mdef: untpd.MemberDef, sym: Symbol)(implicit ctx: Context): Unit = {
+    TransitiveMutabilityTypes.onTypedModifiersBegin(mdef)
     val mods1 = typedModifiers(untpd.modsDeco(mdef).mods, sym)
+    TransitiveMutabilityTypes.onTypedModifiersEnd(mdef)
     for (tree <- mods1.annotations) sym.addAnnotation(Annotation(tree))
   }
 
@@ -844,14 +870,19 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
   def typedValDef(vdef: untpd.ValDef, sym: Symbol)(implicit ctx: Context) = track("typedValDef") {
     val ValDef(name, tpt, rhs) = vdef
     addTypedModifiersAnnotations(vdef, sym)
+
+
+	import TransitiveMutabilityTypes._
+	//registerSymbol(sym)
+
+	
     val tpt1 = typedType(tpt)
     val rhs1 = rhs match {
       case Ident(nme.WILDCARD) => rhs withType tpt1.tpe
       case _ => typedExpr(rhs, tpt1.tpe)
     }
 	
-	import TransitiveMutabilityTypes._
-	
+
 	// Let mutability annotations on the symbol be mutability annotation on the symbol's type.
 	// Allows expressions like `@readonly val x = y`.
 	sym.denot.annotations.foreach { annot => if (tmt(annot).exists)
@@ -933,22 +964,16 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
 	
 	import TransitiveMutabilityTypes._
 	
-	/** registerSymbolAsAnnotationCarrier tells the plugin that the method symbol may carry
+	//println(s"Register symbol $sym")
+	/** registerSymbol tells the plugin that the method symbol may carry
 	 * annotations that may need to be accessed during typing of the method body.
 	 * 
-	 * It is important to call registerSymbolAsAnnotationCarrier before typing the method body
+	 * It is important to call registerSymbol before typing the method body
 	 * (so that expressions in the body have access to the typed annotations),
 	 * but after the annotations themselves are typed
 	 * (to stop annotation arguments from referring to themselves during typing).
 	 */
-	registerSymbolAsAnnotationCarrier(sym)
-	
-	def findArgs(tree: Tree): List[Type] = tree match {
-		case Typed(expr, tpt) => findArgs(expr)
-		case SeqLiteral(elems) => elems map { tre => tre.tpe }
-	}
-	
-	//sym.annotations.foreach { annot => findArgs(annot.argument(0).get).foreach { tp => println(tp.asInstanceOf[NamedType].denot) } }
+	//registerSymbol(sym)
 	
     if (sym is Implicit) checkImplicitParamsNotSingletons(vparamss1)
     val tpt1 = typedType(tpt)
@@ -965,6 +990,13 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
 	 *    - external symbols are stored (prior to typing method body) and looked up upon access...
 	 */
 	 
+ 	def findArgs(tree: Tree): List[Type] = tree match {
+ 		case Typed(expr, tpt) => findArgs(expr)
+ 		case SeqLiteral(elems) => elems map { tre => tre.tpe }
+ 	}
+	
+ 	//sym.annotations.foreach { annot => findArgs(annot.argument(0).get).foreach { tp => println(tp.asInstanceOf[NamedType].denot) } }
+	
 	//println(findContextEnclosingCurrentMethod)
 	//findTmtOverrides(NoDenotation)  // temp
 	
@@ -1050,6 +1082,10 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
       }
 
     addTypedModifiersAnnotations(cdef, cls)
+
+	import TransitiveMutabilityTypes._
+	//registerSymbol(cls)
+
     val constr1 = typed(constr).asInstanceOf[DefDef]
     val parentsWithClass = ensureFirstIsClass(parents mapconserve typedParent, cdef.pos.toSynthetic)
     val parents1 = ensureConstrCall(cls, parentsWithClass)(superCtx)
@@ -1220,11 +1256,15 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
 
   def typed(tree: untpd.Tree, pt: Type = WildcardType)(implicit ctx: Context): Tree = /*>|>*/ ctx.traceIndented (i"typing $tree", typr, show = true) /*<|<*/ {
     assertPositioned(tree)
-    try adapt(typedUnadapted(tree, pt), pt, tree)
-    catch {
-      case ex: CyclicReference => errorTree(tree, cyclicErrorMsg(ex))
-      case ex: FatalTypeError => errorTree(tree, ex.getMessage)
-    }
+	TransitiveMutabilityTypes.typedPush(tree, pt)
+    val tree1 =
+	  try adapt(typedUnadapted(tree, pt), pt, tree)
+      catch {
+        case ex: CyclicReference => errorTree(tree, cyclicErrorMsg(ex))
+        case ex: FatalTypeError => errorTree(tree, ex.getMessage)
+      }
+	TransitiveMutabilityTypes.typedPop(tree, tree1)
+	tree1
   }
 
   def typedTrees(trees: List[untpd.Tree])(implicit ctx: Context): List[Tree] =
@@ -1314,6 +1354,13 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
   def adapt(tree: Tree, pt: Type, original: untpd.Tree = untpd.EmptyTree)(implicit ctx: Context) = /*>|>*/ track("adapt") /*<|<*/ {
     /*>|>*/ ctx.traceIndented(i"adapting $tree of type ${tree.tpe} to $pt", typr, show = true) /*<|<*/ {
       interpolateUndetVars(tree)
+	  
+	  tree.tpe match {
+		  case tp: TermRef =>
+			  //println(s"ADAPT (TYPER): ${tp.denot}")
+		  case _ =>
+	  }
+	  
       tree overwriteType tree.tpe.simplified
       adaptInterpolated(tree, pt, original)
     }
@@ -1417,6 +1464,7 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
 
     def adaptNoArgs(wtp: Type): Tree = wtp match {
       case wtp: ExprType =>
+        //adaptInterpolated(tree.withType(TransitiveMutabilityTypes.adaptResultWithReceiver(wtp.resultType, tree)), pt, original)
         adaptInterpolated(tree.withType(wtp.resultType), pt, original)
       case wtp: ImplicitMethodType if constrainResult(wtp, pt) =>
         def addImplicitArgs = {

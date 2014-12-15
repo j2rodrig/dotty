@@ -1,6 +1,6 @@
 import annotation.tmt._
 
-// 9 errors expected. 10 expected when receiver mutability is checked.
+// 10 errors expected
 
 trait listtype1 {
 	var m: AnyRef @mutable

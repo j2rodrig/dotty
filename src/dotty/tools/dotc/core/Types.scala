@@ -1122,7 +1122,7 @@ object Types {
     private[this] var lastDenotation: Denotation = _
     private[this] var lastSymbol: Symbol = _
     private[this] var checkedPeriod = Nowhere
-
+    
     // Invariants:
     // (1) checkedPeriod != Nowhere  =>  lastDenotation != null
     // (2) lastDenotation != null    =>  lastSymbol != null
@@ -1344,7 +1344,8 @@ object Types {
     /** Create a NamedType of the same kind as this type, but with a new prefix.
      */
     protected def newLikeThis(prefix: Type)(implicit ctx: Context): NamedType =
-      NamedType(prefix, name)
+      TransitiveMutabilityTypes.registerDerivation(this, NamedType(prefix, name))
+      //NamedType(prefix, name)
 
     /** Create a NamedType of the same kind as this type, but with a "inherited name".
      *  This is necessary to in situations like the following:
@@ -1370,7 +1371,8 @@ object Types {
      *  the public name.
      */
     final def shadowed(implicit ctx: Context): NamedType =
-      NamedType(prefix, name.inheritedName)
+      TransitiveMutabilityTypes.registerDerivation(this, NamedType(prefix, name.inheritedName))
+      //NamedType(prefix, name.inheritedName)
 
     override def equals(that: Any) = that match {
       case that: NamedType =>
@@ -1387,7 +1389,7 @@ object Types {
 
     type ThisType = TermRef
 
-	override def info(implicit ctx: Context): Type = TransitiveMutabilityTypes.termRef(denot.info, this)
+	override def info(implicit ctx: Context): Type = TransitiveMutabilityTypes.termRefInfo(denot.info, this)  // denot.info
 
     //assert(name.toString != "<local Coder>")
     override def underlying(implicit ctx: Context): Type = if (denot.isOverloaded) NoType else info
@@ -1397,7 +1399,10 @@ object Types {
     override def isOverloaded(implicit ctx: Context) = denot.isOverloaded
 
     private def rewrap(sd: SingleDenotation)(implicit ctx: Context) =
-      TermRef.withSigAndDenot(prefix, name, sd.signature, sd)
+      TransitiveMutabilityTypes.registerDerivation(this,
+        TermRef.withSigAndDenot(prefix, name, sd.signature, sd)
+      )
+	  //TermRef.withSigAndDenot(prefix, name, sd.signature, sd)
 
     def alternatives(implicit ctx: Context): List[TermRef] =
       denot.alternatives map rewrap
@@ -1410,7 +1415,7 @@ object Types {
 
     type ThisType = TypeRef
 
-	override def info(implicit ctx: Context): Type = TransitiveMutabilityTypes.typeRef(denot.info, this)
+	override def info(implicit ctx: Context): Type = denot.info //TransitiveMutabilityTypes.typeRef(denot.info, this)
 
     override def underlying(implicit ctx: Context): Type = info
   }
@@ -1426,12 +1431,14 @@ object Types {
 
     override def newLikeThis(prefix: Type)(implicit ctx: Context): TermRef = {
       val candidate = TermRef.withSig(prefix, name, sig)
-      if (symbol.exists && !candidate.symbol.exists) { // recompute from previous symbol
-        val ownSym = symbol
-        val newd = asMemberOf(prefix)
-        candidate.withDenot(asMemberOf(prefix).suchThat(_ eq ownSym))
-      }
-      else candidate
+	  TransitiveMutabilityTypes.registerDerivation(this,
+        if (symbol.exists && !candidate.symbol.exists) { // recompute from previous symbol
+          val ownSym = symbol
+          val newd = asMemberOf(prefix)
+          candidate.withDenot(asMemberOf(prefix).suchThat(_ eq ownSym))
+        }
+        else candidate
+	  )
     }
 
     override def equals(that: Any) = that match {
@@ -1460,7 +1467,8 @@ object Types {
       unsupported("withSym")
 
     override def newLikeThis(prefix: Type)(implicit ctx: Context): NamedType =
-      NamedType.withFixedSym(prefix, fixedSym)
+      //NamedType.withFixedSym(prefix, fixedSym)
+	  TransitiveMutabilityTypes.registerDerivation(this, NamedType.withFixedSym(prefix, fixedSym))
 
     override def equals(that: Any) = that match {
       case that: WithFixedSym => this.prefix == that.prefix && (this.fixedSym eq that.fixedSym)
@@ -1510,7 +1518,10 @@ object Types {
      *  of prefix with given name.
      */
     def all(prefix: Type, name: TermName)(implicit ctx: Context): TermRef = {
-      ctx.uniqueNamedTypes.enterIfNew(prefix, name).asInstanceOf[TermRef]
+      TransitiveMutabilityTypes.registerContext(
+        ctx.uniqueNamedTypes.enterIfNew(prefix, name).asInstanceOf[TermRef]
+      )
+      //ctx.uniqueNamedTypes.enterIfNew(prefix, name).asInstanceOf[TermRef]
     }
 
     /** Create term ref referring to given symbol, taking the signature
@@ -1537,7 +1548,10 @@ object Types {
      *  with given prefix, name, and signature
      */
     def withFixedSym(prefix: Type, name: TermName, sym: TermSymbol)(implicit ctx: Context): TermRef =
-      unique(new TermRefWithFixedSym(prefix, name, sym))
+      TransitiveMutabilityTypes.registerContext(
+        unique(new TermRefWithFixedSym(prefix, name, sym))
+      )
+      //unique(new TermRefWithFixedSym(prefix, name, sym))
 
     /** Create a term ref referring to given symbol with given name, taking the signature
      *  from the symbol if it is completed, or creating a term ref without
@@ -1563,7 +1577,10 @@ object Types {
 
     /** Create a term ref with given prefix, name and signature */
     def withSig(prefix: Type, name: TermName, sig: Signature)(implicit ctx: Context): TermRef =
-      unique(new TermRefWithSignature(prefix, name, sig))
+      TransitiveMutabilityTypes.registerContext(
+        unique(new TermRefWithSignature(prefix, name, sig))
+      )
+      //unique(new TermRefWithSignature(prefix, name, sig))
 
     /** Create a term ref with given prefix, name, signature, and initial denotation */
     def withSigAndDenot(prefix: Type, name: TermName, sig: Signature, denot: Denotation)(implicit ctx: Context): TermRef = {
@@ -1616,7 +1633,9 @@ object Types {
   abstract case class ThisType(tref: TypeRef) extends CachedProxyType with SingletonType {
     def cls(implicit ctx: Context): ClassSymbol = tref.stableInRunSymbol.asClass
     override def underlying(implicit ctx: Context): Type =
+	  //TransitiveMutabilityTypes.thisTypeUnderlying(this,
       if (ctx.erasedTypes) tref else cls.classInfo.selfType
+	  //)
     override def computeHash = doHash(tref)
   }
 
@@ -1633,7 +1652,7 @@ object Types {
    *  by `super`.
    */
   abstract case class SuperType(thistpe: Type, supertpe: Type) extends CachedProxyType with SingletonType {
-    override def underlying(implicit ctx: Context) = supertpe
+    override def underlying(implicit ctx: Context) = supertpe  //TransitiveMutabilityTypes.superTypeUnderlying(this, supertpe)
     def derivedSuperType(thistpe: Type, supertpe: Type)(implicit ctx: Context) =
       if ((thistpe eq this.thistpe) && (supertpe eq this.supertpe)) this
       else SuperType(thistpe, supertpe)
@@ -1643,7 +1662,7 @@ object Types {
   final class CachedSuperType(thistpe: Type, supertpe: Type) extends SuperType(thistpe, supertpe)
 
   object SuperType {
-    def apply(thistpe: Type, supertpe: Type)(implicit ctx: Context): Type = {
+    def apply(thistpe: Type, supertpe: Type)(implicit ctx: Context): SuperType = {
       assert(thistpe != NoPrefix)
       unique(new CachedSuperType(thistpe, supertpe))
     }

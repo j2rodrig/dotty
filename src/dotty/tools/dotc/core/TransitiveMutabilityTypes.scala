@@ -5,7 +5,8 @@ package core
 import util.common._
 import ast._
 import tpd._
-import Trees.{Apply, Typed, SeqLiteral}
+import ast.untpd
+import Trees.{Apply, Typed, ValDef, DefDef, TypeDef, Literal, SeqLiteral}
 import Symbols._
 import Flags._
 import Names._
@@ -92,6 +93,16 @@ object TransitiveMutabilityTypes {
 	class TmtAnnotation(tree: Tree, val tmt: Tmt) extends ConcreteAnnotation(tree) {
 		override def toText(implicit ctx: Context): Text = tmt.toString  // change how the annotation is displayed
 	}
+	
+	/**
+	 * If the given class symbol derives from a TMT annotation class, the symbol's Tmt type.
+	 * Otherwise, UnannoatedTmt().
+	 */
+	def tmt(sym: Symbol)(implicit ctx: Context): Tmt =
+		if (sym.derivesFrom(ctx.definitions.ReadonlyClass)) Readonly()
+		else if (sym.derivesFrom(ctx.definitions.PolyreadClass)) Polyread(NoSymbol,UnannotatedTmt())
+		else if (sym.derivesFrom(ctx.definitions.MutableClass)) Mutable()
+		else UnannotatedTmt()
 
 	/**
 	 * Finds the TMT of the given annotation.
@@ -99,11 +110,11 @@ object TransitiveMutabilityTypes {
 	def tmt(annot: Annotation)(implicit ctx: Context): Tmt =
 		annot match {
 			case annot: TmtAnnotation => annot.tmt   // This annotation carries TMT information.
-			case _ =>  // get TMT based on annotation class.
-				if (annot matches ctx.definitions.ReadonlyClass) Readonly()
-				else if (annot matches ctx.definitions.PolyreadClass) Polyread(NoSymbol,UnannotatedTmt())
-				else if (annot matches ctx.definitions.MutableClass) Mutable()
-				else UnannotatedTmt()
+			case _ => tmt(annot.symbol)  // get TMT based on annotation class.
+				//if (annot matches ctx.definitions.ReadonlyClass) Readonly()
+				//else if (annot matches ctx.definitions.PolyreadClass) Polyread(NoSymbol,UnannotatedTmt())
+				//else if (annot matches ctx.definitions.MutableClass) Mutable()
+				//else UnannotatedTmt()
 		}
 
 	/**
@@ -146,6 +157,10 @@ object TransitiveMutabilityTypes {
 			case AnnotatedType(annot, underlying) =>
 				val tm = tmt(annot)
 				if (tm.exists) tm else tmt(underlying)  // skip non-TMT annotations
+			//case tp: TermRef => lub(tmt(tp.prefix), tmt(tp.info), tp.tmt())
+			//case tp: TypeRef => lub(tmt(tp.info), tp.tmt())
+			//case tp: ThisType => lub(tmt(tp.underlying), tp.tmt)
+			//case tp: SuperType => lub(tmt(tp.thistpe), tmt(tp.underlying))
 			case tp @ AndType(tp1, tp2) => glb(tmt(tp1), tmt(tp2))
 			case tp @ OrType(tp1, tp2) => lub(tmt(tp1), tmt(tp2))
 			case tp: TypeProxy => tmt(tp.underlying)
@@ -215,8 +230,365 @@ object TransitiveMutabilityTypes {
 	}
 	
 
+	//----- Outer parameters -----//
+	
+	// There are 2 flavours of outer parameters:
+	// - term-type parameters. (These are variables in the symbol's environment.)
+	// - receiver-type parameters. (These include "this" and "super".)
+	
+	// TO TRY:
+	// - register symbols with annotation info (map)
+	// - register untyped trees with annotations (stack)
+	// -> to look up: if any tree in current context matches head of stack, then use stack to look up annotation info.
+	//    else: look up annotations on given symbol.
+	
+	// Stack of contextual annotations. _1 is the untyped tree, _2 is the typed annotations on that tree.
+	private[this] var contextAnnots = List[(untpd.Tree, List[(Tmt,Type,Tree)])]()
+	//private[this] var contextAnnots = List[(untpd.Tree, List[Tree])]()
+	
+	// The annotations in this list get ignored.
+	private[this] var currentlyTypingModifiersOf = List[untpd.Tree]()
+	
+	/** Adds any annotations on the given tree to the contextual annotations stack. */
+	def typedPush(tree: untpd.Tree, pt: Type)(implicit ctx: Context): Unit = {
+	/*	tree match {
+			case mdef: untpd.MemberDef =>
+				val annotations1 = untpd.modsDeco(mdef).mods.annotations mapconserve ctx.typer.typedAnnotation
+				val listOfList = annotations1 map (typedAnnotations _)
+				contextAnnots = (mdef, listOfList.flatten) :: contextAnnots
+				//annotations1 foreach (checkAnnotation _)
+				//contextAnnots = (mdef, annotations1) :: contextAnnots
+				//contextAnnots = (mdef, annotations1) :: contextAnnots
+			case _ =>
+		}*/
+	}
+
+	/** Removes the most recent item from the contextual annotations stack. */	
+	def typedPop(tree: untpd.Tree, tree1: Tree)(implicit ctx: Context): Unit = {
+	/*	tree match {
+			case mdef: untpd.MemberDef =>
+				assert(mdef eq contextAnnots.head._1)
+				contextAnnots = contextAnnots.tail
+			case _ =>
+		}*/
+	}
+	
+	/** Causes the annotations on the given tree to be ignored temporarily. */
+	def onTypedModifiersBegin(tree: untpd.Tree)(implicit ctx: Context): Unit = {
+	//	currentlyTypingModifiersOf = tree :: currentlyTypingModifiersOf
+	}
+	
+	/** Stops ignoring the annotations on the most recently-ignored tree. */
+	def onTypedModifiersEnd(tree: untpd.Tree)(implicit ctx: Context): Unit = {
+	//	assert(tree eq currentlyTypingModifiersOf.head)
+	//	currentlyTypingModifiersOf = currentlyTypingModifiersOf.tail
+	}
+	
+	/**
+	 * Returns a list of outer-parameter annotations that are valid in the current context.
+	 * The returned list includes arguments' TMTs, types, and trees.
+	 *
+	 * This method is separate from tmtAnnotationsOnSymbol --
+	 *
+	 *   tmtAnnotationsInCurrentContext is necessary where RHS definitions are typed before
+	 *   their assigned symbols. E.g.:
+	 *
+	 *     @readonly(this) def m() = { this }
+	 *
+	 *   Because m does not have a specified result type, the body { this } is typed first,
+	 *   followed by m and @readonly(this). Unfortunately, the TMT of this is required to
+	 *   type the body correctly. To get around this problem, a preliminary annotation typing
+	 *   is performed before the body is typed (and possibly before the symbol m is completed).
+	 *   See typedPush and typedPop.
+	 */
+
+
+	/*private[this] def testing(implict ctx: Context): List[(Tmt,Type,Tree)] =
+		if (ctx eq NoContext)
+			return List()
+		else
+			return ctx.tree match {
+				case mdef: MemberDef[Untyped] =>
+					if (currentlyTypingModifiersOf contains mdef) testing(ctx.outer)  // skip modifiers that are currently being typed
+					else {
+						val annotations1 = untpd.modsDeco(mdef).mods.annotations mapconserve ctx.typer.typedAnnotation
+						val listOfList = annotations1 map (typedAnnotations _)
+						listOfList.flatten ::: testing(ctx.outer)
+					}
+				case mdef: MemberDef[Type] =>
+					val annotations1 = mdef.mods.annotations
+					val listOfList = annotations1 map (typedAnnotations _)
+					listOfList.flatten ::: testing(ctx.outer)
+				case _ => testing(ctx.outer)
+			}*/
+	 
+
+
+
+	private[this] def tmtAnnotationsInCurrentContext(implicit ctx: Context): List[(Tmt,Type,Tree)] = {
+		tmtAnnotationsInGivenContext(contextAnnots)  // start with last-pushed element
+	}
+	def checkIdent(tree: Ident)(implicit ctx: Context) = {
+		/*println(s"CHECK IDENT: $tree")
+		tree.tpe match {
+			case methRef: TermRef if methRef.underlying.isInstanceOf[MethodicType] => 
+				val rcvMut = tmt(methRef.prefix)
+				val (formalRcvMut, formalRcvTree) =
+					receiverTmtInSymbolContext(methRef.denot.symbol.enclosingClass, methRef.denot.symbol)
+				println(s"IDENT APPLY: this=$rcvMut  formal on ${methRef.denot.symbol}=$formalRcvMut")
+	
+				// if formal receiver type is polyread, then set the result adaptation to the receiver argument
+				//if (formalRcvMut.isPolyread) resultModifier = rcvMut  // TODO: warning if resultType is not @polyread
+	
+				// otherwise check that the receiver argument is compatible with formal receiver
+				//else
+					if (!tmtSubtypeOf(rcvMut, formalRcvMut))
+						ctx.error(s"""incompatible "this" mutability:\n""" +
+							s" found   : ${mutableIfUnannotated(rcvMut)}\n"+
+							s" required: ${mutableIfUnannotated(formalRcvMut)}",
+							tree.pos)
+			case _ =>
+	
+		}*/
+	}
+	def checkApply(tree: Apply[Type])(implicit ctx: Context) = {
+		//println(s"CHECK APPLY: $tree")
+	}
+	private[this] def tmtAnnotationsInGivenContext(treeList: List[(untpd.Tree, List[(Tmt, Type, Tree)])])(implicit ctx: Context): List[(Tmt,Type,Tree)] = {
+		var r = List[(Tmt, Type, Tree)]()
+		treeList foreach { case (hostTree, knownAnnots) =>
+			if (!(currentlyTypingModifiersOf contains hostTree)) {   // make sure this annotation is not currently being typed
+				r = knownAnnots ::: r
+				//knownAnnots foreach { case (tm, argTp, arg) =>
+				//}
+				/*annotTrees foreach { annTree =>
+					//val Apply(meth,args) = annTree
+					//val tm = if (annTree.tpe.isInstanceOf[NamedType]) tmt(annTree.tpe.asInstanceOf[NamedType].symbol) else UnannotatedTmt()
+					//println(s"ANNOT TPE: ${showSpecial(annTree.tpe)}")
+					val tm = tmt(annTree.symbol.owner)
+					if (tm.exists) getArguments(annTree) foreach { arg =>
+						r = (tm, arg.tpe, arg) :: r
+					}
+				}*/
+			}
+		}
+		r.reverse
+	}
+	def typedAnnotations(annTree: Tree)(implicit ctx: Context): List[(Tmt,Type,Tree)] = {
+		var r = List[(Tmt, Type, Tree)]()
+		val tm = tmt(annTree.symbol.owner)
+		if (tm.exists) getArguments(annTree) foreach { arg =>
+			r = (tm, arg.tpe, arg) :: r
+		}
+		r
+	}
+	/// Finds the location in the context stack where the given symbol is defined. If not found, returns an empty stack.
+	private[this] def findSymbolInCurrentContext(sym: Symbol)(implicit ctx: Context): List[(untpd.Tree, List[(Tmt, Type, Tree)])] =
+		contextAnnots dropWhile { case (hostTree, _) =>
+			hostTree match {
+				case ValDef(name, _, _) => !(sym.name.isTermName && (name eq sym.name.asTermName))
+				case DefDef(name, _, _, _, _) => !(sym.name.isTermName && (name eq sym.name.asTermName))
+				case TypeDef(name, _) => !(sym.name.isTypeName && (name eq sym.name.asTypeName))
+				case _ => true
+			}
+		}
+	
+	/**
+	 * Returns a list of outer-parameter annotations that are valid in the context of the given symbol.
+	 * The returned list includes arguments' TMTs, types, and trees.
+	 */
+	private[this] def tmtAnnotationsOnSymbol(sym: Symbol)(implicit ctx: Context): List[(Tmt,Type,Tree)] = {
+		/*if (sym eq NoSymbol) List()
+		else {
+			//
+			val currList = findSymbolInCurrentContext(sym)
+			if (!currList.isEmpty) tmtAnnotationsInGivenContext(currList)
+			else {
+				var r = List[(Tmt, Type, Tree)]()
+				sym.annotations foreach { annot =>
+					//val tm = if (annot.tree.tpe.isInstanceOf[NamedType]) tmt(annot.tree.tpe.asInstanceOf[NamedType].symbol) else UnannotatedTmt()
+					val tm = tmt(annot.tree.symbol.owner)
+					if (tm.exists) getArguments(annot.tree) foreach { arg =>
+						r = (tm, arg.tpe, arg) :: r
+					}
+				}
+				r.reverse ::: tmtAnnotationsOnSymbol(sym.owner)
+			}
+		}*/
+		List()
+	}
+	
+	/** Gets a list of argument trees from the given annotation tree.
+	 * The group number specifies which argument list is returned. */
+	private[this] def getArguments(annTree: Tree, group: Int = 0): List[Tree] = {
+		val arglist = ast.tpd.arguments(annTree)
+		if (arglist.size > group) findArgTrees(arglist(group)) else List()
+	}
+	
+	/** Maps an annotation argument tree to a list of specific arguments. */
+	private[this] def findArgTrees(argTree: Tree): List[Tree] = argTree match {
+		case SeqLiteral(elems) => elems
+		case argTree: ProxyTree => findArgTrees(argTree.forwardTo)
+		case argTree: DenotingTree => List(argTree)
+		case x => List(x)
+	}
+	
+	/** Performs some basic checks on the given annotation tree. */
+	private[this] def checkAnnotation(annTree: Tree)(implicit ctx: Context): Unit = {
+		val tm = tmt(annTree.symbol.owner)
+		if (tm.exists) getArguments(annTree) foreach { arg =>
+			arg.tpe match {
+				case _: NamedType =>
+					if (tm.isPolyread)
+						ctx.error(s"@polyread can only have this or super references as arguments.", arg.pos)
+				case _: ThisType =>
+				case _: SuperType =>
+				case _: RefinedThis =>
+				case _ =>
+					ctx.warning(s"Annotation argument has no effect: It does not specify a named value, object, or variable.", arg.pos)
+			}
+		}
+	}
+	
+	/** Returns the outer-parameter TMT of the given symbol. Searches the current context. */
+	def tmtInCurrentContext(sym: Symbol)(implicit ctx: Context): (Tmt, Tree) = {
+		tmtAnnotationsInCurrentContext foreach { case (tm, argTp, arg) =>
+			argTp match {
+				case argTp: NamedType => argTp.denot.alternatives foreach { denot =>
+					if (denot.symbol eq sym) return (tm, arg)
+				}
+				case _ =>
+			}
+		}
+		(UnannotatedTmt(), EmptyTree)
+	}
+	/// A version of tmtInCurrentContext that finds the TMT of an arbitrary denotation.
+	def tmtInCurrentContext(lookFor: Denotation)(implicit ctx: Context): Tmt = {
+		var allTmt: Tmt = UnannotatedTmt()
+		lookFor.alternatives foreach { sd =>
+			allTmt = lub(allTmt, tmtInCurrentContext(sd.symbol)._1)
+		}
+		allTmt
+	}
+	/** Returns the outer-parameter TMT of the given symbol. Searches the given list of trees. */
+	def tmtInGivenContext(sym: Symbol, treeList: List[(untpd.Tree, List[(Tmt, Type, Tree)])])(implicit ctx: Context): (Tmt, Tree) = {
+		tmtAnnotationsInGivenContext(treeList) foreach { case (tm, argTp, arg) =>
+			argTp match {
+				case argTp: NamedType => argTp.denot.alternatives foreach { denot =>
+					if (denot.symbol eq sym) return (tm, arg)
+				}
+				case _ =>
+			}
+		}
+		(UnannotatedTmt(), EmptyTree)
+	}
+	
+	/**
+	 * Returns the outer-parameter TMT of the given symbol lookFor.
+	 * Searches the context of the symbol ctxSym.
+	 */
+	def tmtInSymbolContext(lookFor: Symbol, ctxSym: Symbol)(implicit ctx: Context): (Tmt, Tree) = {
+		tmtAnnotationsOnSymbol(ctxSym) foreach { case (tm, argTp, arg) =>
+			argTp match {
+				case argTp: NamedType => argTp.denot.alternatives foreach { denot =>
+					if (denot.symbol eq lookFor) return (tm, arg)
+				}
+				case _ =>
+			}
+		}
+		(UnannotatedTmt(), EmptyTree)
+	}
+	/// A version of tmtInSymbolContext that finds the TMT of an arbitrary denotation.
+	def tmtInSymbolContext(lookFor: Denotation, ctxSym: Symbol)(implicit ctx: Context): Tmt = {
+		var allTmt: Tmt = UnannotatedTmt()
+		lookFor.alternatives foreach { sd =>
+			allTmt = lub(allTmt, tmtInSymbolContext(sd.symbol, ctxSym)._1)
+		}
+		allTmt
+	}
+	
+	/**
+	 * Returns the outer-parameter TMT of "this" for the given class.
+	 * An annotation parameter is considered to match when it is a supertype or
+	 * subtype of the given class. (I.e., if the "this" classes have any inheritance relationship.)
+	 * 
+	 * Searches the current context.
+	 */
+	def receiverTmtInCurrentContext(cls: Symbol)(implicit ctx: Context): (Tmt,Tree) = {
+		tmtAnnotationsInCurrentContext foreach { case (tm, argTp, arg) =>
+			argTp match {
+				case argTp: ThisType => if ((cls derivesFrom argTp.cls) || (argTp.cls derivesFrom cls)) return (tm,arg)
+				case _ =>
+			}
+		}
+		return (UnannotatedTmt(), EmptyTree)
+	}
+	
+	/**
+	 * Returns the outer-parameter TMT of "this" for the given class.
+	 * Searches the context of the symbol ctxSym.
+	 */
+	def receiverTmtInSymbolContext(cls: Symbol, ctxSym: Symbol)(implicit ctx: Context): (Tmt, Tree) = {
+		tmtAnnotationsOnSymbol(ctxSym) foreach { case (tm, argTp, arg) =>
+			argTp match {
+				case argTp: ThisType => if ((cls derivesFrom argTp.cls) || (argTp.cls derivesFrom cls)) return (tm,arg)
+				case _ =>
+			}
+		}
+		(UnannotatedTmt(), EmptyTree)
+	}
+	
+	
+	
 	//--- Type Assignment/Adaptation ---//
 
+	/**
+	 * registerContext records the fact that the given type tp is created
+	 * in the context ctx.
+	 * At the moment, the only thing that must be remembered is the TMT
+	 * of tp in the given context.
+	 */
+	def registerContext[T <: NamedType](tp: T)(implicit ctx: Context): T = tp
+	def registerContext(tp: ThisType)(implicit ctx: Context): ThisType = tp
+	/*	// The tmt field is a first-class function.
+		// Basically, the eligible annotations are requested immediately, but
+		// the actual computation of the TMT is deferred until requested.
+		// The reason for this laziness is that requesting the denotation of
+		// the given type will cause cyclic reference errors if called eagerly.
+		var annots = contextAnnots filterNot {
+			case (hostTree, _) => currentlyTypingModifiersOf contains hostTree
+		}
+		var tm: Tmt = UnannotatedTmt()
+		tp.tmt = { () => //tmtInCurrentContext(tp.denot)
+			if (annots != null) {   // has the final TMT for the type been computed?
+				tp.denot.alternatives foreach { sd =>
+					tm = lub(tm, tmtInGivenContext(sd.symbol, annots)._1)
+				}
+				annots = null   // set annots to null to free the memory used by the list (minimizes probability of holding onto a non-current context for a long time)
+			}
+			tm
+		}
+		tp
+	}
+		tp.tmt = receiverTmtInCurrentContext(tp.cls)._1
+		tp
+	}*/
+	
+	/**
+	 * The TMT of some types depends on what context they were originally created in.
+	 * The contextual information needs to be remembered when the type is copied.
+	 */
+	def registerDerivation[T <: Type](from: T, to: T): T = to
+	def registerDerivation(from: ThisType, to: ThisType): ThisType = to
+	/*def registerDerivation[T <: NamedType](from: T, to: T): T = {
+		to.tmt = from.tmt
+		to
+	}
+	def registerDerivation(from: ThisType, to: ThisType): ThisType = {
+		to.tmt = from.tmt
+		to
+	}*/
+	
 	/**
 	 * Changes the type returned from a TermRef's info method.
 	 * A TermRef is created wherever a field or method is selected, but may also be created
@@ -230,238 +602,85 @@ object TransitiveMutabilityTypes {
 	 * Methodic types are adapated elsewhere: they are only adapted on application,
 	 * and only if they have @polyread return types.
 	 */
-	def termRef(info: Type, tRef: TermRef)(implicit ctx: Context): Type =
-		if (info.isInstanceOf[MethodicType]) info             // methods: no adapation needed here
+	/*def termRefInfo(info: Type, tp: TermRef)(implicit ctx: Context): Type = {
+		// Methodic types don't need to be adapted.
+		// TODO: if denot.symbol has polyread receiver annotation, and info has polyread result, then adapt with prefix tmt.
+		if (info.isInstanceOf[MethodicType]) info
 		else {
-			// fields: use Least Upper Bound of member type and the prefix type
-			val prefixTmt = tmt(tRef.prefix)
-			val memberTmt = lub(outerMutabilityOf(tRef.denot), tmt(info))  // take outer parameters into account
-			
-			withTmt(info, lub(prefixTmt, memberTmt))
+			def currentContextTm = {
+				testing foreach { case (tm, argTp, arg) =>
+					argTp match {
+						case argTp: NamedType => argTp.denot.alternatives foreach { sd =>
+							if (sd.symbol == tp.denot.symbol)
+								return tm
+						}
+						case _ =>
+					}
+				}
+				return UnannotatedTmt()
+			}
+			withTmt(info, lub(currentContextTm, tmt(tp.prefix), tmt(info)))
 		}
-		//else withTmt(info, lub(tmt(tRef.prefix), tmt(info)))  // fields: use Least Upper Bound of info and the prefix type
+	}*/
+	def termRefInfo(info: Type, tp: TermRef)(implicit ctx: Context): Type = {
+		// Methodic types don't need to be adapted.
+		// TODO: if denot.symbol has polyread receiver annotation, and info has polyread result, then adapt with prefix tmt.
+		if (info.isInstanceOf[MethodicType]) info
+		else {
+			//val ctxTmt = tmtInCurrentContext(tp.denot)
+			//if (ctxTmt.exists)
+			//	withTmt(info, lub(ctxTmt, tmt(tp.prefix)))
+			//else
+				// Still problems with the following line (causes a "stale symbol" error when taking the denotation of the underlying info):
+				withTmt(info, lub(tmt(info), tmt(tp.prefix)))
+				// Possible solution: Just bake the TMT into the type when it is created.
+				// Whenever the term is accessed from some other context, there should be a TermRef pointing to it,
+				// so viewpoints should still work correctly.
+				
+				// - TMTs should be assigned to types when types are assigned to trees.
+				
+				// - Type derivations should copy the TMT of their prototypes.
+				
+				// - ?
+				// Perhaps the problem here is that I'm asking for the denotation of a symbol, e.g.:
+				// tp.denot.symbol.denot
+				// Probably the first denot could be in a different phase than the second denot.
+		}
+	}
 	
 	/**
 	 * Changes the type returned from a TypeRef's info method.
 	 * 
 	 * No adapation is needed here.
 	 */
-	def typeRef(info: Type, tRef: TypeRef)(implicit ctx: Context): Type = info
-	
+	//def typeRef(info: Type, tRef: TypeRef)(implicit ctx: Context): Type = info
 	
 	/**
-	 * Finds the innermost TMT annotation that applies to the given reference.
-	 * e.g., @readonly(this) def m() = ...   // inside m, this is @readonly
-	 * The reference is passed as a Denotation.
-	 */
-	def findTmtOverrides(denot: SingleDenotation)(implicit _ctx: Context): Tmt = {
-	
-		/*def findDenotationInSymbolAnnotations(mods: Modifiers, singleDenot: SingleDenotation) = {
-		
-		}
-		
-		def findArgumentDenotations(tree: Tree) = tree match {  //: List[SingleDenotation] = tree match {
-			case Apply(_, args) =>
-				var argDenots = args map { a => findArgumentDenotations(a) }
-				//argDenots.flatten
-			case Ident(name)
-		}*/
-	
-		def findEnclosingContext(c: Context): Context = {
-			if (c == NoContext) c
-			else c.tree match {
-				case tree: DefDef =>
-					//tree.mods.annotations.foreach { annotTree =>
-					//}
-					tree.mods.annotations.foreach { annotTree =>
-						//findArgumentDenotations(annotTree)
-					}
-					//println(s"  ${tree.mods.annotations}")
-				
-					//println(s"${c.owner}: ${c.owner.denot.alternatives}")
-					//c.owner.denot.alternatives.foreach { singleDenot => singleDenot match {
-					//		case symDenot: SymDenotation => println(s"   ${symDenot.uncompletedAnnotations}")
-					//	}
-					//}
-					
-					//untpd.modsDeco(tree).mods.annotations foreach { annot =>
-					//	val annot1 = _ctx.typer.typed(annot)
-					//	println(s" ${annot1.tpe}")
-					//	//println(s" ${tmt()} ${annot.arguments(0).get}")
-					//}
-					
-					//println()
-					//findDenotationInSymbolAnnotations(c.owner, denot)
-					//findEnclosingContext(c.outer)
-					c
-				case _ =>
-					findEnclosingContext(c.outer)
-			}
-		}
-		
-		val ctx = findEnclosingContext(_ctx)
-		
-		//if (ctx == NoContext) UnannotatedTmt()
-		
-		//if (ctx != NoContext) println(s"Found context ${ctx.owner} for symbol ${denot.symbol}")
-		
-		UnannotatedTmt()
-	
-		/*// If there are no more contexts to search, then give up.
-		if (ctx == NoContext) return UnannotatedTmt()
-		
-		// If the owner is a method symbol, see if it has a TMT annotation
-		// that specifies a denotation that matches the given denot.
-		if (ctx.tree.isInstanceOf[DefDef]) {
-		
-			// Search through all annotations on the DefDef, and return the LUB of all matching arguments.
-			var argTmt: Tmt = UnannotatedTmt()
-			ctx.owner.denot.annotations.foreach { annot =>
-				if (annot.arguments.length > 0)
-					findArgDenots(annot.argument(0).get).foreach { argDenot =>
-						println(s" ${argDenot.symbol} with ${tmt(annot)}")
-						if (argDenot.symbol == denot.symbol)   // do the denotations point to the same symbol?
-							argTmt = lub(argTmt, tmt(annot))
-					}
-			}
-			// Found anything?
-			if (argTmt.exists) return argTmt
-		}
-		
-		// If there are enclosing contexts, search those.
-		findTmtOverrides(denot)(ctx.outer)*/
-	}
-	
-	/** Symbols with important mutability annotations.
-	 * If should be safe to keep references to symbols here, assuming:
-	 * - that each symbol in a compiler run can be uniquely identified by its Symbol object, and
-	 * - that each symbol object has the same meaning in any context.
-	 * (Although it may be a good idea to clear these references at the end of each compilation unit.)
+	 * Changes the TMT of a ThisType.
+	 * 
+	 * The adaptation is: Find the receiver mutability in the current context,
+	 * and wrap the type with an annotation.
 	 *
-	 * We really only need to store information about @readonly denotations,
-	 * since @mutable annotations don't affect typing of method bodies (although they may
-	 * cause mutability errors if their arguments are readonly denotations), and
-	 * @polyread annotations with arguments don't make sense (because the types of such
-	 * arguments come from the outer environment, so are statically known).
+	 * ThisType mutabilities are distinguished by class.
+	 * The annotation @readonly(C.this) means that any D.this where D is derived from C
+	 * is considered readonly.
 	 */
-	private[this] var symsWithMutableAnnots  = Map[Symbol,List[SingleDenotation]]()
-	private[this] var symsWithPolyreadAnnots = Map[Symbol,List[SingleDenotation]]()
-	private[this] var symsWithReadonlyAnnots = Map[Symbol,List[SingleDenotation]]()
-	
-	/** Maps an annotation argument tree to a list of argument types. */
-	private[this] def findAnnotationArgTypes(argTree: Tree): List[Type] = argTree match {
-		case Typed(expr, tpt) => findAnnotationArgTypes(expr)
-		case SeqLiteral(elems) => elems map { tree => tree.tpe }
-	}
-	
-	/**
-	 * Searches enclosing contexts for any @readonly annotations that apply to
-	 * the given denotation.
-	 */
-	def outerMutabilityOf(denot: Denotation)(implicit ctx: Context): Tmt = {
-		if (ctx == NoContext) return UnannotatedTmt()
-	
-		denot.alternatives foreach { singleDenot =>
-			if (symsWithReadonlyAnnots contains ctx.owner)
-				if (symsWithReadonlyAnnots(ctx.owner) exists { readonlyDenot => singleDenot.symbol == readonlyDenot.symbol })
-					return Readonly()
-		}
-		
-		outerMutabilityOf(denot)(ctx.outer)
-	}
-	
-	def registerSymbolAsAnnotationCarrier(sym: Symbol)(implicit ctx: Context) = {
-		var mutableDenotationsSpecified = List[SingleDenotation]()
-		var polyreadDenotationsSpecified = List[SingleDenotation]()
-		var readonlyDenotationsSpecified = List[SingleDenotation]()
-		sym.annotations.foreach { annot =>
-		
-			// Look for @readonly annotations with arguments...
-			//if (annot.arguments.length > 0) {
-			findAnnotationArgTypes(annot.argument(0).get).foreach { tp =>
-				if (tp.isInstanceOf[NamedType]) {
-					val alternatives = tp.asInstanceOf[NamedType].denot.alternatives
-					tmt(annot) match {
-						case _: Mutable  => mutableDenotationsSpecified :::= alternatives
-						case _: Polyread => polyreadDenotationsSpecified :::= alternatives
-						case _: Readonly => readonlyDenotationsSpecified :::= alternatives
-						case _ =>
-					}
-					//println(s"@readonly ${tp.asInstanceOf[NamedType].denot} on $sym")
-				}
-			}
-			//}
-		}
-		if (!mutableDenotationsSpecified.isEmpty) {
-			symsWithMutableAnnots += ((sym, mutableDenotationsSpecified))
-			//println(s"Registered $sym with mutable denotations $mutableDenotationsSpecified")
-		}
-		
-		if (!polyreadDenotationsSpecified.isEmpty)
-			symsWithPolyreadAnnots += ((sym, polyreadDenotationsSpecified))
-		
-		if (!readonlyDenotationsSpecified.isEmpty) {
-			symsWithReadonlyAnnots += ((sym, readonlyDenotationsSpecified))
-			//println(s"Registered $sym with readonly denotations $readonlyDenotationsSpecified")
-		}
-	}
-
-	/**
-	 * Given an argument tree, returns all denotations of all its arguments.
-	 */
-	private[this] def findArgDenots(tree: Tree)(implicit ctx: Context): List[SingleDenotation] = {
-		val singleDenots = findArgs(tree) map { argType =>
-			argType match {
-				case t: NamedType => t.denot.alternatives
-				case _ => List[SingleDenotation]()
-			}
-		}
-		singleDenots.flatten
-	}
-
-	/**
-	 * Given an argument tree, returns the types of its arguments.
-	 */
-	private[this] def findArgs(tree: Tree)(implicit ctx: Context): List[Type] = tree match {
-		case Typed(expr, tpt) => findArgs(expr)
-		case SeqLiteral(elems) => elems map { tre => tre.tpe }
-	}
-	
-
-
-	/*def findTmtOverrides(tp: Type)(implicit ctx: Context): Tmt = tp match {
-		case tp: NamedType => findTmtOverrides(tp.denot)
-		case _ =>
-			println(s"??? Expected NamedType in findTmtOverrides")
-			UnannotatedTmt()
+	/*def thisTypeUnderlying(tp: Type, underlying: Type)(implicit ctx: Context): Type = {
+		val ThisType(tRef) = tp
+		withTmt(underlying, receiverTmtInCurrentContext(tRef.symbol)._1)
 	}*/
 	
-	
 	/**
-	 * Finds the innermost context that encloses the current method definition,
-	 * e.g.,
-	 *        def foo { def bar = ??? }
-	 *    returns a context with owner foo when called on the context of ???.
-	 * Returns NoContext if there is no current method definition.
-	 *
-	 * The reason for writing this method is to help with annotation checking for extra parameters.
+	 * Changes the TMT of a SuperType.
+	 * 
+	 * Takes the LUB of the supertype's "this" and the member it refers to.
 	 */
-	def findContextEnclosingCurrentMethod(implicit ctx: Context): Context = {
-		if (ctx == NoContext) ctx
-		
-		else if (!ctx.tree.isInstanceOf[DefDef])
-			findContextEnclosingCurrentMethod(ctx.outer)
-		
-		else {
-			def notMatchingSymbol(sym: Symbol)(ctx: Context): Context =
-				if (ctx == NoContext) ctx
-				else if (ctx.owner == sym) notMatchingSymbol(sym)(ctx.outer)
-				else ctx
-
-			notMatchingSymbol(ctx.owner)(ctx.outer)
-		}
-	}
+ 	/*def superTypeUnderlying(tp: Type, underlying: Type)(implicit ctx: Context): Type = {
+		val SuperType(thistpe, _) = tp
+		withTmt(underlying, lub(tmt(thistpe), tmt(underlying)))
+	}*/
 	
+		
 	
 	//--- Simple Subtyping Relationships ---//
 
@@ -479,6 +698,8 @@ object TransitiveMutabilityTypes {
 		else if (tmt2.isPolyread) tmt2
 		else if (tmt1.isMutable || tmt2.isMutable) Mutable()
 		else UnannotatedTmt()
+	
+	def lub(tmt1: Tmt, tmt2: Tmt, tmt3: Tmt): Tmt = lub(lub(tmt1, tmt2), tmt3)
 	
 	/**
 	 * Greatest lower bound.
@@ -760,12 +981,64 @@ object TransitiveMutabilityTypes {
 		case tp: PolyType => reduceToMethodOrExpr(tp.resultType)
 		case _ => tp
 	}
+	
+	//----- Override Checking -----//
+	
+	/**
+	 * Finds the outer-parameter TMTs of all Term annotations on the given symbol.
+	 * Each item returned represents a single denotation.
+	 * Each outer-parameter symbol is reported exactly once.
+	 */
+	private[this] def filteredTermAnnotationsOnSymbol(sym: Symbol)(implicit ctx: Context): List[(Tmt,Symbol,Tree)] = {
+		var r = List[(Tmt,Symbol,Tree)]()
+		var alreadyFound = List[Symbol]()
+		
+		tmtAnnotationsOnSymbol(sym) foreach { case (tm, argTpe, arg) =>
+			argTpe match {
+				case argTpe: NamedType =>
+					argTpe.denot.alternatives.foreach { singleDenot =>
+						if (!(alreadyFound contains singleDenot.symbol)) {
+							r = (tm, singleDenot.symbol, arg) :: r
+							alreadyFound = singleDenot.symbol :: alreadyFound
+						}
+					}
+				case _ =>
+			}
+		}
+		r.reverse
+	}
+
+	/**
+	 * Finds the outer-parameter TMTs of all This annotations on the given symbol.
+	 * Each item returned represents the "this" of a single class.
+	 * Each class is reported exactly once.
+	 */
+	private[this] def filteredThisAnnotationsOnSymbol(sym: Symbol)(implicit ctx: Context): List[(Tmt,ClassSymbol,Tree)] = {
+		var r = List[(Tmt,ClassSymbol,Tree)]()
+		var alreadyFound = List[ClassSymbol]()
+		
+		tmtAnnotationsOnSymbol(sym) foreach { case (tm, argTpe, arg) =>
+			argTpe match {
+				case argTpe: ThisType =>
+					if (!(alreadyFound contains argTpe.cls)) {
+						r = (tm, argTpe.cls, arg) :: r
+						alreadyFound = argTpe.cls :: alreadyFound
+					}
+				case _ =>
+			}
+		}
+		r.reverse
+	}
+
 
 	/**
 	 * Check that an overriding symbol's type matches the overridden symbol's type.
 	 * Issues an error if the overriding type is incompatible.
 	 */
 	def tmtCheckOverride(sym: Symbol, tp: Type, overriddenSym: Symbol, overriddenTp: Type)(implicit ctx: Context): Unit = {
+		assert(contextAnnots.isEmpty)  // sanity check: contextAnnots should be empty after typer phase is complete
+	
+		// TODO: polyread parameters/returns should be allowed to match (although their origins will be different)
 		if (!tmtSubtypeOf(tp, overriddenTp))
 			ctx.error(
 				tmtExplainingSubtypeOf(
@@ -776,18 +1049,54 @@ object TransitiveMutabilityTypes {
 		else tmtCheckOverriddenOuterParams(sym, overriddenSym)
 	}
 	
-	def tmtCheckOverriddenOuterParams(sym: Symbol, overriddenSym: Symbol)(implicit ctx: Context): Unit = {
-		val location1 = s"${sym} in ${sym.owner}"
-		val location2 = s"${overriddenSym} in ${overriddenSym.owner}"
+	/**
+	 * Check that an overriding symbol's outer parameter annotations match the overridden
+	 * symbol's outer parameter annotations.
+	 * Issues an error if an incompatible override is found.
+	 */
+	private[this] def tmtCheckOverriddenOuterParams(sym: Symbol, overriddenSym: Symbol)(implicit ctx: Context): Unit = {
 	
-		if (symsWithMutableAnnots contains sym) symsWithMutableAnnots(sym) foreach { denot =>
-			if (symsWithReadonlyAnnots contains overriddenSym) symsWithReadonlyAnnots(overriddenSym) foreach { overriddenDenot =>
-				if (denot.symbol == overriddenDenot.symbol)
-					ctx.error("override error:\n" +
-							s" found     : @mutable(${denot.symbol.name}) of $location1\n" +
-							s" overriding: @readonly(${overriddenDenot.symbol.name}) of $location2",
-						sym.pos)  // TODO: pos of annotation arg instead
-			}
+		// Check outer parameters for consistency.
+		// This check requires that the entire environment of the overriding symbol be compatiable
+		// with the environment of the overridden symbol -- it is not enough to know what annotations
+		// are on each symbol -- annotations on enclosing symbols must also be examined.
+		// Step 1. For each outer parameter on sym (or owner of sym), either overriddenSym
+		//  does not have a matching parameter, or sym's parameter is not a subtype of
+		//  overriddenSym's parameter (parameters are contravariant).
+		filteredTermAnnotationsOnSymbol(sym).foreach { case (argTm, argSym, argTree) =>
+			val (overTm, overArgTree) = tmtInSymbolContext(argSym, overriddenSym)
+			if (!(overTm <:< argTm))
+				ctx.error("override error:\n" +
+					s" cannot override $overTm outer parameter" +
+					s" on ${overriddenSym} in ${overriddenSym.owner} with $argTm in ${sym.owner}",
+					argTree.pos)
+		}
+		filteredThisAnnotationsOnSymbol(sym).foreach { case (argTm, clazz, argTree) =>
+			val (overTm, overArgTree) = receiverTmtInSymbolContext(clazz, overriddenSym)
+			if (!(overTm <:< argTm))
+				ctx.error("override error:\n" +
+					s" cannot override $overTm outer parameter" +
+					s" on ${overriddenSym} in ${overriddenSym.owner} with $argTm in ${sym.owner}",
+					argTree.pos)
+		}
+		// Step 2. Any parameters on overriddenSym (or owners) must be subtypes of the
+		//  parameters on sym. This step is necessary because overriddenSym may have
+		//  @readonly parameters that are unannotated with respect to sym.
+		filteredTermAnnotationsOnSymbol(overriddenSym).foreach { case (overTm, overArgSym, overArgTree) =>
+			val (argTm, argTree) = tmtInSymbolContext(overArgSym, sym)
+			if (!(overTm <:< argTm) && !argTm.exists)
+				ctx.error("override error:\n" +
+					s" ${sym} in ${sym.owner} needs an annotation for $overTm(${overArgSym.name})" +
+					s" when overridding ${overriddenSym} in ${overriddenSym.owner}",
+					sym.pos)
+		}
+		filteredThisAnnotationsOnSymbol(overriddenSym).foreach { case (overTm, overClazz, overArgTree) =>
+			val (argTm, argTree) = receiverTmtInSymbolContext(overClazz, sym)
+			if (!(overTm <:< argTm) && !argTm.exists)
+				ctx.error("override error:\n" +
+					s" ${sym} in ${sym.owner} needs an annotation for $overTm(${overClazz.name}.this)" +
+					s" when overridding ${overriddenSym} in ${overriddenSym.owner}",
+					sym.pos)
 		}
 	}
 

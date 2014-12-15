@@ -1,0 +1,453 @@
+		//if (tRef.symbol.isStaticOwner)
+		//	underlying  // don't do this-type mutability for static objects
+		//else {
+			//val ctxTmt = receiverTmtInCurrentContext(tRef.symbol)
+			//withTmt(underlying, lub(ctxTmt, tmt(underlying)))
+		//}
+
+	/**
+	 * Finds outer-parameter TMT for the given type in the given context.
+	 * paramTp is either a NamedType (has a denotation), or a receiver-type (This/SuperType).
+	 * Searches annotations on owner-symbol denotations. If a matching annotation is found,
+	 * its TMT is returned, otherwise UnannotatedTmt() is returned.
+	 */
+	/*def getOuterParameterTmt_dep(paramTp: Type)(implicit ctx: Context): (Tmt, Tree) = {
+		var paramTmt: Tmt = UnannotatedTmt()
+		var atArgTree: Option[Tree] = None
+		
+		// Find annotations on ctx.owner which have arguments that match paramTp.
+		if (syms2namedTypes contains ctx.owner) {
+			syms2namedTypes(ctx.owner).denot.annotations foreach { annot =>
+				outerParamMatches(paramTp, annot) match {
+					case Some(argTree) =>
+						var tm = tmt(annot)
+						if (tm.isPolyread) tm = Polyread(ctx.owner, UnannotatedTmt())  // set origin
+						paramTmt = lub(paramTm, tm)
+						atArgTree = Some(argTree)
+					case None() =>
+				}
+			}
+		}
+		
+		// Found an argument.
+		if (paramTmt.exists)
+			return (paramTmt, atArgTree.get)
+		
+		// Didn't find any matching arguments, so try annotations on owner symbol.
+		if (ctx.outer == NoContext)   // no outer context
+			return (UnannotatedTmt(), EmptyTree)
+				
+		paramTp match {
+			case _: NamedType => getOuterParameterTmt_dep(paramTp)(ctx.outer)
+				
+			// For receiver types:
+			//   If the next outer context belongs to a different class,
+			//     then "this" has a different meaning, so the search is done.
+			case _: ThisType =>
+				if (ctx.outer.owner.isClass && ctx.owner != ctx.outer.owner)
+					UnannotatedTmt()
+				else
+					getOuterParameterTmt_dep(paramTp)(ctx.outer)
+			
+			case _: SuperType =>
+				if (ctx.outer.owner.isClass && ctx.owner != ctx.outer.owner)
+					UnannotatedTmt()
+				else
+					getOuterParameterTmt_dep(paramTp)(ctx.outer)
+		}
+	}*/
+	
+	/**
+	 * Searches an annotation's arguments to find one with a denotation that matches
+	 * the given type.
+	 * If successful, returns the argument tree. Otherwise, returns None.
+	 */
+	/*private[this] def outerParamMatches_dep(paramTp: Type, annot: Annotation)(implicit ctx: Context): Option[Tree] = {
+		if (annot.arguments.length > 0) {
+			findArgTrees(annot.argument(0).get).foreach { arg =>
+				arg.tpe match {
+					// If the argument and parameter are NamedTypes, check for matching denotations.
+					case argTp: NamedType =>
+						paramTp match {
+							case paramTp: NamedType =>
+								argTp.denot.alternatives foreach { argDenot =>
+									paramTp.denot.alternatives foreach { paramDenot =>
+										if (argDenot.symbol == paramDenot.symbol)
+											return Some(arg)
+									}
+								}
+							case _ =>  // do nothing
+						}
+					
+					// If the argument and parameter are receiver types, then done.
+					case argTp: ThisType =>
+						if (paramType.isInstanceOf[ThisType] || paramType.isInstanceOf[SuperType])
+							return Some(arg)
+						
+					case argTp: SuperType =>
+						if (paramType.isInstanceOf[ThisType] || paramType.isInstanceOf[SuperType])
+							return Some(arg)
+					
+					case _ =>
+						ctx.warning(s"Annotation argument has no effect: It does not specify a value, object, or variable.", arg.pos)
+				}
+			}
+		}
+		return None
+	}*/
+	
+	//def registerAnnotations_dep(sym: Symbol)(implicit ctx: Context) = {
+	//	syms2namedTypes_dep += ((sym, sym.denot.namedType))
+	//}
+	
+	//private[this] val syms2namedTypes_dep = collection.mutable.Map[Symbol,NamedType]()
+
+	/**
+	 * Searches annotations on the owners of the current context to find a receiver-type argument.
+	 * Assumes that all symbols to be considered have been registered in the syms2namedTypes table.
+	 * If found, returns the annotation's TMT.
+	 */
+	def receiverTmtInCurrentContext(implicit ctx: Context): Tmt = {
+	if (receiverTmt(nextRegisteredOwner(ctx))._1.exists)
+	println(s"RCVR CONTEXT: found ${receiverTmt(nextRegisteredOwner(ctx))._1} on ${nextRegisteredOwner(ctx)}")
+		receiverTmt(nextRegisteredOwner(ctx))._1
+	}
+	/*def receiverTmtInCurrentContext(implicit ctx: Context): Tmt = {
+		// if no context, or the owner is a class, then stop; "this" now refers to a different object
+		if (ctx == NoContext || ctx.owner.isClass) return UnannotatedTmt()
+	
+		if (syms2namedTypes contains ctx.owner) {
+			val (tm, arg) = receiverTmtAnnotation(ctx.owner)
+			if (tm.exists) return tm  // if found, then done.
+		}
+		
+		receiverTmtInCurrentContext(ctx.outer)
+	}*/
+	
+	
+	
+	
+	//----- Context tracking -----//
+	
+	// The TMT of some types depends on what context they were originally created in.
+	// The contextual information needs to be remembered when a type is created or copied.
+	
+	// TODO: Needed for anything other than this/super?
+	
+	/**
+	 * registerContext records the fact that the given type tp is created
+	 * in the context ctx.
+	 * At the moment, the only thing that must be remembered is the TMT
+	 * of tp in the given context.
+	 */
+	def registerContext[T <: Type](tp: T)(implicit ctx: Context): T = {
+		if (!(contextMap contains tp)) {
+			contextMap += ((tp, nextRegisteredOwner(ctx)))
+			
+			//!!DEBUG
+			/*tp match {
+				case tp: NamedType =>
+					tp.denot.alternatives.foreach { sd =>
+						println(s"REGISTER CONTEXT: ${contextMap(tp)} for ${sd.symbol.name}")
+					}
+				case _ =>
+			}*/
+		}
+		/*val outerTmt =
+			tp match {
+				case tp: NamedType =>
+					var tm: Tmt = UnannotatedTmt()
+					tp.denot.alternatives.foreach { sd =>
+						tm = lub(tm, termTmtInCurrentContext(sd))  // LUB of all meanings of tp
+						println(s"REGISTER CONTEXT: $tm for ${sd.symbol.name}")
+					}
+					tm
+				case tp: ThisType  => receiverTmtInCurrentContext
+				case tp: SuperType => receiverTmtInCurrentContext
+				case _ => UnannotatedTmt()
+			}
+		if (outerTmt.exists && !(contextMap contains tp))
+			contextMap += ((tp, outerTmt))*/
+		tp
+	}
+	
+	/** A map from types to their (registered) owner symbols. */
+	private[this] val contextMap = collection.mutable.Map[Type,Symbol]()
+	//private[this] val contextMap = collection.mutable.Map[Type,Tmt]()
+
+	/**
+	 * The TMT of some types depends on what context they were originally created in.
+	 * The contextual information needs to be remembered when the type is copied.
+	 */
+	def registerDerivation[T <: Type](from: CachedType, to: T): T = {
+		if (contextMap contains from)
+			contextMap += ((to, contextMap(from)))
+		to
+	}
+	
+	/**
+	 * Retrieves the context-dependent information for the given type.
+	 * Specialize to this/super types only?
+	 */
+	def contextualTmt(tp: Type)(implicit ctx: Context): Tmt = {
+		var tm: Tmt = UnannotatedTmt()
+		if (contextMap contains tp) {
+			val enclosingSym = contextMap(tp)
+			tp match {
+				case tp: NamedType =>
+					tp.denot.alternatives.foreach { sd =>
+						tm = lub(tm, termTmt(sd, enclosingSym)._1)  // LUB of all meanings of tp
+					}
+				case tp: ThisType  => tm = receiverTmt(enclosingSym)._1
+				case tp: SuperType => tm = receiverTmt(enclosingSym)._1
+				case _ =>
+			}
+		}
+		tm
+	}
+	
+	/** Finds the innermost-enclosing registered owner-symbol. */
+	private[this] def nextRegisteredOwner(implicit ctx: Context): Symbol =
+		if (ctx == NoContext) NoSymbol
+		else if (syms2namedTypes contains ctx.owner) ctx.owner
+		else nextRegisteredOwner(ctx.outer)
+	
+	
+	/**
+	 * Searches annotations on sym to find an argument containing the given denotation.
+	 * If found, returns the annotation's TMT and the matching argument tree.
+	 */
+	private[this] def termTmtAnnotation(sd: SingleDenotation, sym: Symbol)(implicit ctx: Context): (Tmt, Tree) =
+		if (syms2namedTypes contains sym) {
+			var tm: Tmt = UnannotatedTmt()
+			var argTree: Tree = EmptyTree
+			syms2namedTypes(sym).denot.asInstanceOf[SymDenotation].annotations foreach { annot =>
+				var annotTmt = tmt(annot)
+				if (annotTmt.exists) {  // if annot has a TMT...
+					findArgTrees(annot.argument(0).get) foreach { arg =>
+						arg.tpe match {
+							case argTpe: NamedType =>
+								argTpe.denot.alternatives.foreach { argDenot =>  // search NamedType denotations
+									if (sd.symbol == argDenot.symbol) {  // do the symbols match?
+										if (annotTmt.isPolyread) annotTmt = Polyread(sym, UnannotatedTmt())  // make sure origin is set
+										tm = lub(tm, annotTmt)
+										argTree = arg
+									}
+								}
+							case _ =>
+						}
+					}
+				}
+			}
+			(tm, argTree)
+		} else (UnannotatedTmt(), EmptyTree)
+	
+	/**
+	 * Searches annotations on sym and sym's owners to find a term-type argument.
+	 * Assumes that all symbols to be traversed have been registered in the syms2namedTypes table.
+	 * If found, returns the annotation's TMT and the matching argument tree.
+	 */
+	def termTmt(sd: SingleDenotation, sym: Symbol)(implicit ctx: Context): (Tmt, Tree) =
+		if (syms2namedTypes contains sym) {
+			val (tm, arg) = termTmtAnnotation(sd, sym)
+			if (tm.exists) (tm, arg)  // if found, then done.
+			else termTmt(sd, syms2namedTypes(sym).denot.asInstanceOf[SymDenotation].owner)  // search owners
+		} else (UnannotatedTmt(), EmptyTree)
+	
+	/**
+	 * Finds the meaning of a term in the current context. Returns its TMT.
+	 * Does not perform viewpoint computations.
+	 */
+	def termTmtInCurrentContext_dep(tp: TermRef)(implicit ctx: Context): Tmt = {
+		var tm: Tmt = UnannotatedTmt()
+		val fromSym = nextRegisteredOwner(ctx)
+		if (fromSym != NoSymbol)
+			tp.denot.alternatives.foreach { sd =>
+				tm = lub(tm, termTmt(sd, fromSym)._1)
+			}
+		tm
+	}
+
+	/**
+	 * Returns a list of the outer-context term parameters specified on the
+	 * given symbol. Assumes that the annotations on the symbol have been typed.
+	 * Parameters are returned as tuples of (Tmt,SingleDenotation,Tree).
+	 */
+ 	def getTermParameters(sym: Symbol)(implicit ctx: Context): List[(Tmt,SingleDenotation,Tree)] =
+		getTermParameters(sym, List())
+	
+	private[this] def getTermParameters(sym: Symbol, alreadySpecd: List[(Tmt,SingleDenotation,Tree)])(implicit ctx: Context): List[(Tmt,SingleDenotation,Tree)] = {
+		var params = List[(Tmt,SingleDenotation,Tree)]()
+		if (syms2namedTypes contains sym) {
+			// Look through all annotations on this symbol.
+			syms2namedTypes(sym).denot.asInstanceOf[SymDenotation].annotations.foreach { annot =>
+				var tm = tmt(annot)
+				// If a TMT annotation, and at least 1 argument list, then scan argument types.
+				if (tm.exists && annot.arguments.length > 0) {
+			
+					// If @polyread, make sure its origin is set to the given symbol.
+					if (tm.isPolyread)
+						tm = Polyread(sym, UnannotatedTmt())
+			
+					findArgTrees(annot.argument(0).get).foreach { arg =>
+						// If this argument is a NamedType, and not already spec'd, add its denotations to the list
+						arg.tpe match {
+							case tp: NamedType => tp.denot.alternatives.foreach { singleDenot =>
+								// search all items in alreadySpecd for any denotations that match singleDenot
+								if (alreadySpecd forall {
+									case (_, specDenot, _) => singleDenot.symbol != specDenot.symbol
+								}) {  // OK: add singleDenot to params list
+									params ::= ((tm,singleDenot,arg))
+								}
+							}
+							case _ =>
+						}
+					}
+				}
+			}
+		}
+		alreadySpecd ::: params
+	}
+	
+	/**
+	 * Returns true if the given type is ThisType, SuperType, or RefinedThis.
+	 */
+	private[this] def isReceiverType(tp: Type): Boolean = tp match {
+		case tp: ThisType => true
+		case tp: SuperType => true
+		case tp: RefinedThis => true
+		case _ => false
+	}
+	
+	/**
+	 * Searches annotations on sym to find a receiver-type argument.
+	 * If found, returns the annotation's TMT and the matching argument tree.
+	 */
+	private[this] def receiverTmtAnnotation(sym: Symbol)(implicit ctx: Context): (Tmt, Tree) = {
+		//if (syms2namedTypes contains sym) {
+			var tm: Tmt = UnannotatedTmt()
+			var argTree: Tree = EmptyTree
+			//syms2namedTypes(sym).denot.asInstanceOf[SymDenotation].annotations foreach { annot =>
+			sym.annotations foreach { annot =>
+				var annotTmt = tmt(annot)
+				if (annotTmt.exists) {  // if annot has a TMT...
+					findArgTrees(annot.argument(0).get) foreach { arg =>
+						if (isReceiverType(arg.tpe)) {  // arg is a receiver reference?
+							if (annotTmt.isPolyread) annotTmt = Polyread(sym, UnannotatedTmt())  // make sure origin is set
+							tm = lub(tm, annotTmt)
+							argTree = arg
+						}
+					}
+				}
+			}
+			(tm, argTree)
+		//} else (UnannotatedTmt(), EmptyTree)
+	}
+
+	/**
+	 * Searches annotations on sym and sym's owners to find a receiver-type argument.
+	 * Assumes that all symbols to be traversed have been registered in the syms2namedTypes table.
+	 * If found, returns the annotation's TMT and the matching argument tree.
+	 */
+	def receiverTmt(sym: Symbol)(implicit ctx: Context): (Tmt, Tree) = {
+		val (tm, arg) = receiverTmtAnnotation(sym)
+		if (tm.exists) (tm, arg)  // if found, then done.
+		else {
+			val owner = sym.owner
+			if (!owner.isClass) receiverTmt(owner)  // if the owner is a class, then stop; "this" now refers to a different object
+			else (UnannotatedTmt(), EmptyTree)
+		}
+	}
+		/*if (syms2namedTypes contains sym) {
+			val (tm, arg) = receiverTmtAnnotation(sym)
+			if (tm.exists) (tm, arg)  // if found, then done.
+			else {
+				val owner = syms2namedTypes(sym).denot.asInstanceOf[SymDenotation].owner
+				if (!owner.isClass) receiverTmt(owner)  // if the owner is a class, then stop; "this" now refers to a different object
+				else (UnannotatedTmt(), EmptyTree)
+			}
+		} else (UnannotatedTmt(), EmptyTree)*/
+	
+	
+	//def addTmtAnnotation(tp: Type)(implicit ctx: Context): Type = withTmt(tp, tmt(tp))
+
+
+		/*getTermParameters(sym).foreach { case (tm, denot, tree) =>
+			val (ovrTmt, ovrTree) = termTmt(denot, overriddenSym)
+			if (ovrTmt.exists && !(ovrTmt <:< tm))
+				ctx.error(errorText(tm, ovrTmt), tree.pos)
+		}*/
+		
+		/*getTermParameters(overriddenSym).foreach { case (ovrTmt, ovrDenot, ovrTree) =>
+			val (tm, tree) = termTmt(ovrDenot, sym)
+			if (!tm.exists)
+				ctx.error("override error:\n" +
+					s" ${sym} in ${sym.owner} needs an annotation for $ovrTmt(${ovrDenot.symbol.name})" +
+					s" when overridding ${overriddenSym} in ${overriddenSym.owner}",
+					sym.pos)
+		}*/
+		
+		// Check receiver TMTs for consistency.
+		
+		/*val (receiverTm, argTree) = receiverTmt(sym)
+		val (overriddenTm, overriddenTree) = receiverTmt(overriddenSym)
+		// TODO: polyread receivers should be allowed to match (although their origins will be different)
+		if (!(overriddenTm <:< receiverTm)) {
+			if (receiverTm.exists)
+				ctx.error(errorText(receiverTm, overriddenTm), argTree.pos)
+			else
+				ctx.error("override error:\n" +
+					s" ${sym} in ${sym.owner} needs an annotation for $overriddenTm(this)" +
+					s" when overridding ${overriddenSym} in ${overriddenSym.owner}",
+					sym.pos)
+		}*/
+
+
+	/**
+	 * Registers a symbol.
+	 * Call this after the symbol's annotations are typed, but before its RHS definitions are typed.
+	 */
+	/*def registerSymbol(sym: Symbol)(implicit ctx: Context): Unit = {
+		if (sym != NoSymbol && !(syms2namedTypes contains sym)) {
+			syms2namedTypes += ((sym, sym.denot.namedType))
+			checkSymbolAnnotations(sym)
+			//registerSymbol(sym.denot.asInstanceOf[SymDenotation].owner)
+		}
+	}
+	private[this] val syms2namedTypes = collection.mutable.Map[Symbol,NamedType]()
+	private[this] def checkSymbolAnnotations(sym: Symbol)(implicit ctx: Context) = {
+		sym.denot.annotations foreach { annot =>
+			val annotTmt = tmt(annot)
+			if (annotTmt.exists)
+				findArgTrees(annot.argument(0).get) foreach { arg =>
+					arg.tpe match {
+						case _: NamedType =>
+							if (annotTmt.isPolyread)
+								ctx.error(s"@polyread can only have this or super references as arguments.", arg.pos)
+						case _: ThisType =>
+						case _: SuperType =>
+						case _: RefinedThis =>
+						case _ =>
+							ctx.warning(s"Annotation argument has no effect: It does not specify a named value, object, or variable.", arg.pos)
+					}
+				}
+		}
+	}*/
+	
+		
+			// The following assumes that the class in question is the current innermost class, which may not be the case.
+			/*hostTree match {
+				// If hostTree is a class definition, then return UnannotatedTmt().
+				// "this" outside of a class defintion refers to a different object
+				//   than "this" inside of a class definition, so any TMT-this annotations
+				//   outside of the current class should not be considered.
+				case hostTree: untpd.TypeDef if hostTree.isClassDef =>
+					return UnannotatedTmt()
+				case _ => argTp match {
+					case _: ThisType => return tm
+					case _: SuperType => return tm
+					case _: RefinedThis => return tm
+					case _ =>
+				}
+			}
+			*/

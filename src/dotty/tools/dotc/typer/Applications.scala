@@ -407,10 +407,34 @@ trait Applications extends Compatibility { self: Typer =>
     private var typedArgBuf = new mutable.ListBuffer[Tree]
     private var liftedDefs: mutable.ListBuffer[Tree] = null
     private var myNormalizedFun: Tree = fun
-	private[dotc] var resultModifier: TransitiveMutabilityTypes.Tmt = TransitiveMutabilityTypes.UnannotatedTmt() /*methType match {
+
+    import TransitiveMutabilityTypes._
+	private[dotc] var resultModifier: Tmt = UnannotatedTmt()
+	val rcvMut = tmt(methRef.prefix)      // find the TMT of the passed receiver
+	val (formalRcvMut, formalRcvTree) =   // find the receiver TMT as specified by the target method
+		receiverTmtInSymbolContext(methRef.denot.symbol.enclosingClass, methRef.denot.symbol)
+	//println(s"REAL APPLY: this=$rcvMut  formal on ${methRef.denot.symbol}=$formalRcvMut")
+
+	//TODO: outer parameter checking
+	
+	// if formal receiver type is polyread, then set the result adaptation to the receiver argument
+	if (formalRcvMut.isPolyread) resultModifier = rcvMut  // TODO: warning if resultType is not @polyread
+	
+	// otherwise check that the receiver argument is compatible with formal receiver
+	else
+		if (!tmtSubtypeOf(rcvMut, formalRcvMut))
+			ctx.error(s"""incompatible "this" mutability:\n""" +
+				s" found   : ${mutableIfUnannotated(rcvMut)}\n"+
+				s" required: ${mutableIfUnannotated(formalRcvMut)}",
+				app.pos)
+	
+	//resultOfApply(UnannotatedTmt(), tmt(methRef.prefix), outerMutabilityOf()) // outerMutabilityOf() tmt(methRef.prefix)
+	//: TransitiveMutabilityTypes.Tmt = TransitiveMutabilityTypes.UnannotatedTmt()
+	/*methType match {
 		case mt: MethodType => Mutability.UnannotatedTmt()  //mt.resultModifier
 		case _: ErrorType => Mutability.errortype()
 	}*/
+	
     init()
 	
 	//println(s"METHOD TYPE in Application: ${methType.show}")
@@ -424,8 +448,15 @@ trait Applications extends Compatibility { self: Typer =>
 	  
 	  import TransitiveMutabilityTypes._
 	  
+  	  // if the owner class is an annotation class, then apply special rules.
+  	  if (methRef.denot.symbol.exists && (methRef.denot.symbol.owner derivesFrom ctx.definitions.AnnotationClass))
+  	    tmt(methRef.denot.symbol.owner) match {
+		  // Check arguments of @mutable() for compatibility (@readonly or @polyread arguments should cause errors)
+  		  case Mutable() => if (!tmtSubtypeOf(adaptedArg.tpe, formal)) tmtMismatch(adaptedArg, formal)
+  		  case _ =>  // don't check arguments of any other annotation class, TMT or otherwise
+  	    }
 	  // if formal parameter is polyread, then add the argument to the result adaptation
-	  if (tmt(formal).isPolyread) resultModifier = lub(resultModifier, tmt(adaptedArg.tpe))
+	  else if (tmt(formal).isPolyread) resultModifier = lub(resultModifier, tmt(adaptedArg.tpe))  // TODO: warning if resultType is not @polyread
 	  
 	  else
 	    // otherwise check that argument is compatible with formal parameter

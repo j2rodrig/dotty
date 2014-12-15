@@ -210,8 +210,33 @@ trait TypeAssigner {
       case p.arrayLength => MethodType(Nil, defn.IntType)
       case p.arrayConstructor => MethodType(defn.IntType :: Nil, qualType)
       case nme.clone_ if qualType.isInstanceOf[JavaArrayType] => MethodType(Nil, qualType)
+      //case _ => TransitiveMutabilityTypes.registerContext(accessibleSelectionType(tree, qual))
       case _ => accessibleSelectionType(tree, qual)
     }
+	
+	import TransitiveMutabilityTypes._
+	tp match {
+		case methRef: TermRef if methRef.underlying.isInstanceOf[MethodicType] => 
+			val rcvMut = tmt(methRef.prefix)
+			val (formalRcvMut, formalRcvTree) =
+				receiverTmtInSymbolContext(methRef.denot.symbol.enclosingClass, methRef.denot.symbol)
+			//println(s"SELECT APPLY: this=$rcvMut  formal on ${methRef.denot.symbol}=$formalRcvMut")
+	
+			// if formal receiver type is polyread, then set the result adaptation to the receiver argument
+			//if (formalRcvMut.isPolyread) resultModifier = rcvMut  // TODO: warning if resultType is not @polyread
+	
+			// otherwise check that the receiver argument is compatible with formal receiver
+			//else
+				if (!tmtSubtypeOf(rcvMut, formalRcvMut))
+					ctx.error(s"""incompatible "this" mutability:\n""" +
+						s" found   : ${mutableIfUnannotated(rcvMut)}\n"+
+						s" required: ${mutableIfUnannotated(formalRcvMut)}",
+						tree.pos)
+		case _ =>
+	
+	}
+	//println(s"SELECT TYPE/TREE: ${TransitiveMutabilityTypes.showSpecial(tp)} / $tree")
+	
     tree.withType(tp)
   }
 
@@ -233,7 +258,9 @@ trait TypeAssigner {
 
   def assignType(tree: untpd.This)(implicit ctx: Context) = {
     val cls = qualifyingClass(tree, tree.qual, packageOK = false)
-    tree.withType(cls.thisType)
+    tree.withType(TransitiveMutabilityTypes.registerContext(cls.thisType.asInstanceOf[ThisType]))
+	//tree.withType(TransitiveMutabilityTypes.addTmtAnnotation(cls.thisType))
+    //tree.withType(cls.thisType)
   }
 
   def assignType(tree: untpd.Super, qual: Tree, inConstrCall: Boolean, mixinClass: Symbol = NoSymbol)(implicit ctx: Context) = {
@@ -257,6 +284,9 @@ trait TypeAssigner {
         val ps = cls.info.parents
         if (ps.isEmpty) defn.AnyType else ps.reduceLeft((x: Type, y: Type) => x & y)
       }
+    //tree.withType(SuperType(
+	//	TransitiveMutabilityTypes.addTmtAnnotation(cls.thisType),
+	//	TransitiveMutabilityTypes.addTmtAnnotation(owntype)))
     tree.withType(SuperType(cls.thisType, owntype))
   }
 
