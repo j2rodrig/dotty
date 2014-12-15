@@ -432,7 +432,7 @@ object SymDenotations {
     final def isSetter(implicit ctx: Context) =
       (this is Accessor) &&
       originalName.isSetterName &&
-      info.firstParamTypes.nonEmpty // to avoid being fooled by   var x_= : Unit = ...
+      (!isCompleted || info.firstParamTypes.nonEmpty) // to avoid being fooled by   var x_= : Unit = ...
 
     /** is this the constructor of a class? */
     final def isClassConstructor = name == nme.CONSTRUCTOR
@@ -466,7 +466,7 @@ object SymDenotations {
 
     /** Is this symbol a class references to which that are supertypes of null? */
     final def isNullableClass(implicit ctx: Context): Boolean =
-      isNonValueClass && !(this is ModuleClass) // todo: check that class does not derive from NotNull?
+      isNonValueClass && !(this is ModuleClass)
 
     /** Is this definition accessible as a member of tree with type `pre`?
      *  @param pre          The type of the tree from which the selection is made
@@ -805,7 +805,13 @@ object SymDenotations {
      *  either as overrider or overridee.
      */
     final def canMatchInheritedSymbols(implicit ctx: Context): Boolean =
-      maybeOwner.isClass && !isConstructor && !is(Private)
+      maybeOwner.isClass && memberCanMatchInheritedSymbols
+
+    /** If false, this class member cannot possibly participate in an override,
+     *  either as overrider or overridee.
+     */
+    final def memberCanMatchInheritedSymbols(implicit ctx: Context): Boolean =
+      !isConstructor && !is(Private)
 
     /** The symbol, in class `inClass`, that is overridden by this denotation. */
     final def overriddenSymbol(inClass: ClassSymbol)(implicit ctx: Context): Symbol =

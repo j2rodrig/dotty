@@ -172,7 +172,10 @@ class Definitions {
     def ObjectMethods = List(Object_eq, Object_ne, Object_synchronized, Object_clone,
         Object_finalize, Object_notify, Object_notifyAll, Object_wait, Object_waitL, Object_waitLI)
 
-  lazy val NotNullClass = ctx.requiredClass("scala.NotNull")
+  /** Dummy method needed by elimByName */
+  lazy val dummyApply = newPolyMethod(
+      RootClass, nme.dummyApply, 1,
+      pt => MethodType(List(FunctionType(Nil, PolyParam(pt, 0))), PolyParam(pt, 0)))
 
   lazy val NothingClass: ClassSymbol = newCompleteClassSymbol(
     ScalaPackageClass, tpnme.Nothing, AbstractFinal, List(AnyClass.typeRef))
@@ -193,6 +196,10 @@ class Definitions {
     def staticsMethod(name: PreName) = ctx.requiredMethod(ScalaStaticsClass, name)
 
   lazy val DottyPredefModule = ctx.requiredModule("dotty.DottyPredef")
+  lazy val DottyArraysModule = ctx.requiredModule("dotty.runtime.Arrays")
+
+    def newRefArrayMethod = ctx.requiredMethod(DottyArraysModule.moduleClass.asClass, "newRefArray")
+
   lazy val NilModule = ctx.requiredModule("scala.collection.immutable.Nil")
   lazy val PredefConformsClass = ctx.requiredClass("scala.Predef." + tpnme.Conforms)
 
@@ -211,6 +218,7 @@ class Definitions {
     lazy val Array_update                = ctx.requiredMethod(ArrayClass, nme.update)
     lazy val Array_length                = ctx.requiredMethod(ArrayClass, nme.length)
     lazy val Array_clone                 = ctx.requiredMethod(ArrayClass, nme.clone_)
+    lazy val ArrayConstructor            = ctx.requiredMethod(ArrayClass, nme.CONSTRUCTOR)
   lazy val traversableDropMethod  = ctx.requiredMethod(ScalaRuntimeClass, nme.drop)
   lazy val uncheckedStableClass: ClassSymbol = ctx.requiredClass("scala.annotation.unchecked.uncheckedStable")
 
@@ -257,7 +265,7 @@ class Definitions {
   lazy val ByNameParamClass2x     = specialPolyClass(tpnme.BYNAME_PARAM_CLASS, Covariant, AnyType)
   lazy val EqualsPatternClass     = specialPolyClass(tpnme.EQUALS_PATTERN, EmptyFlags, AnyType)
 
-  lazy val RepeatedParamClass     = specialPolyClass(tpnme.REPEATED_PARAM_CLASS, Covariant, SeqType)
+  lazy val RepeatedParamClass     = specialPolyClass(tpnme.REPEATED_PARAM_CLASS, Covariant, ObjectType, SeqType)
 
   // fundamental classes
   lazy val StringClass                  = ctx.requiredClass("java.lang.String")
@@ -344,7 +352,6 @@ class Definitions {
   def AnyValType: Type = AnyValClass.typeRef
   def ObjectType: Type = ObjectClass.typeRef
   def AnyRefType: Type = AnyRefAlias.typeRef
-  def NotNullType: Type = NotNullClass.typeRef
   def NothingType: Type = NothingClass.typeRef
   def NullType: Type = NullClass.typeRef
   def SeqType: Type = SeqClass.typeRef
@@ -395,7 +402,8 @@ class Definitions {
 
   object ArrayType {
     def apply(elem: Type)(implicit ctx: Context) =
-      ArrayClass.typeRef.appliedTo(elem :: Nil)
+      if (ctx.erasedTypes) JavaArrayType(elem)
+      else ArrayClass.typeRef.appliedTo(elem :: Nil)
     def unapply(tp: Type)(implicit ctx: Context) = tp.dealias match {
       case at: RefinedType if (at isRef ArrayClass) && at.argInfos.length == 1 => Some(at.argInfos.head)
       case _ => None
@@ -433,6 +441,8 @@ class Definitions {
   lazy val UnqualifiedOwners = RootImports.toSet ++ RootImports.map(_.moduleClass)
 
   lazy val PhantomClasses = Set[Symbol](AnyClass, AnyValClass, NullClass, NothingClass)
+
+  lazy val isPolymorphicAfterErasure = Set[Symbol](Any_isInstanceOf, Any_asInstanceOf, newRefArrayMethod)
 
   lazy val RootImports = List[Symbol](JavaLangPackageVal, ScalaPackageVal, ScalaPredefModule, DottyPredefModule)
 

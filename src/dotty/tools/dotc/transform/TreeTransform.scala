@@ -2,8 +2,12 @@ package dotty.tools.dotc
 package transform
 
 import dotty.tools.dotc.ast.tpd
+import dotty.tools.dotc.core.Annotations.ConcreteAnnotation
 import dotty.tools.dotc.core.Contexts.Context
+import dotty.tools.dotc.core.DenotTransformers.{InfoTransformer, DenotTransformer}
+import dotty.tools.dotc.core.Denotations.SingleDenotation
 import dotty.tools.dotc.core.Phases.Phase
+import dotty.tools.dotc.core.SymDenotations.SymDenotation
 import dotty.tools.dotc.core.Symbols.Symbol
 import dotty.tools.dotc.core.Flags.PackageVal
 import dotty.tools.dotc.typer.Mode
@@ -55,7 +59,7 @@ object TreeTransforms {
 
     def phase: MiniPhase
 
-    def treeTransformPhase: Phase = phase
+    def treeTransformPhase: Phase = phase.next
 
     /** id of this treeTransform in group */
     var idx: Int = _
@@ -92,6 +96,8 @@ object TreeTransforms {
     def prepareForPackageDef(tree: PackageDef)(implicit ctx: Context) = this
     def prepareForStats(trees: List[Tree])(implicit ctx: Context) = this
 
+    def prepareForUnit(tree: Tree)(implicit ctx: Context) = this
+
     def transformIdent(tree: Ident)(implicit ctx: Context, info: TransformerInfo): Tree = tree
     def transformSelect(tree: Select)(implicit ctx: Context, info: TransformerInfo): Tree = tree
     def transformThis(tree: This)(implicit ctx: Context, info: TransformerInfo): Tree = tree
@@ -125,6 +131,8 @@ object TreeTransforms {
     def transformStats(trees: List[Tree])(implicit ctx: Context, info: TransformerInfo): List[Tree] = trees
     def transformOther(tree: Tree)(implicit ctx: Context, info: TransformerInfo): Tree = tree
 
+    def transformUnit(tree: Tree)(implicit ctx: Context, info: TransformerInfo): Tree = tree
+
     /** Transform tree using all transforms of current group (including this one) */
     def transform(tree: Tree)(implicit ctx: Context, info: TransformerInfo): Tree = info.group.transform(tree, info, 0)
 
@@ -138,9 +146,6 @@ object TreeTransforms {
       val last = info.transformers(info.transformers.length - 1)
       action(ctx.withPhase(last.phase.next))
     }
-
-    /** perform context-dependant initialization */
-    def init(implicit ctx: Context, info: TransformerInfo): Unit = {}
   }
 
   /** A phase that defines a TreeTransform to be used in a group */
@@ -168,17 +173,33 @@ object TreeTransforms {
     def phase = this
  }
 
+  /** A helper trait to transform annotations on MemberDefs */
+  trait AnnotationTransformer extends MiniPhaseTransform with InfoTransformer {
+
+    val annotationTransformer = mkTreeTransformer
+    override final def treeTransformPhase = this
+      // need to run at own phase because otherwise we get ahead of ourselves in transforming denotations
+
+    override def transform(ref: SingleDenotation)(implicit ctx: Context): SingleDenotation = {
+      val info1 = transformInfo(ref.info, ref.symbol)
+
+      ref match {
+        case ref: SymDenotation =>
+          val annotTrees = ref.annotations.map(_.tree)
+          val annotTrees1 = annotTrees.mapConserve(annotationTransformer.macroTransform)
+          val annots1 = if(annotTrees eq annotTrees1) ref.annotations else annotTrees1.map(new ConcreteAnnotation(_))
+          if ((info1 eq ref.info) && (annots1 eq ref.annotations)) ref
+          else ref.copySymDenotation(info = info1, annotations = annots1)
+        case _ => if (info1 eq ref.info) ref else ref.derivedSingleDenotation(ref.symbol, info1)
+      }
+    }
+  }
+
   val NoTransform = new TreeTransform {
     def phase = unsupported("phase")
     idx = -1
   }
 
-/* disabled; not needed anywhere
-  class Separator extends TreeTransform(phaseId) {
-    //override def name: String = "Separator"
-    idx = -1
-  }
-*/
   type Mutator[T] = (TreeTransform, T, Context) => TreeTransform
 
   class TransformerInfo(val transformers: Array[TreeTransform], val nx: NXTransformations, val group: TreeTransformer)
@@ -199,7 +220,7 @@ object TreeTransforms {
      *  i <= j
      *  j == transforms.length || transform(j) defines a non-default method with given `name`
      */
-    private def index(transformations: Array[TreeTransform], name: String): Array[Int] = {
+    private def index(transformations: Array[Class[_]], name: String): Array[Int] = {
       val len = transformations.length
       val next = new Array[Int](len + 1)
       var nextTransform: Int = len
@@ -212,7 +233,7 @@ object TreeTransforms {
       var i = len - 1
       while (i >= 0) {
         // update nextTransform if this phase redefines the method
-        if (hasRedefinedMethod(transformations(i).getClass, name)) {
+        if (hasRedefinedMethod(transformations(i), name)) {
           nextTransform = i
         }
         next(i) = nextTransform
@@ -221,8 +242,8 @@ object TreeTransforms {
       next
     }
 
-    private def indexUpdate(prev: Array[Int], changedTansformation: TreeTransform, index: Int, name: String, copy: Boolean = true) = {
-      val isDefinedNow = hasRedefinedMethod(changedTansformation.getClass, name)
+    private def indexUpdate(prev: Array[Int], changedTansformation: Class[_], index: Int, name: String, copy: Boolean = true) = {
+      val isDefinedNow = hasRedefinedMethod(changedTansformation, name)
       val wasDefinedBefore = prev(index) == index
       if (isDefinedNow == wasDefinedBefore) prev
       else {
@@ -240,7 +261,7 @@ object TreeTransforms {
       }
     }
 
-    def this(transformations: Array[TreeTransform]) = {
+    def this(transformations: Array[Class[_]]) = {
       this()
       nxPrepIdent = index(transformations, "prepareForIdent")
       nxPrepSelect = index(transformations, "prepareForSelect")
@@ -273,6 +294,7 @@ object TreeTransforms {
       nxPrepTemplate = index(transformations, "prepareForTemplate")
       nxPrepPackageDef = index(transformations, "prepareForPackageDef")
       nxPrepStats = index(transformations, "prepareForStats")
+      nxPrepUnit = index(transformations, "prepareForUnit")
 
       nxTransIdent = index(transformations, "transformIdent")
       nxTransSelect = index(transformations, "transformSelect")
@@ -305,76 +327,82 @@ object TreeTransforms {
       nxTransTemplate = index(transformations, "transformTemplate")
       nxTransPackageDef = index(transformations, "transformPackageDef")
       nxTransStats = index(transformations, "transformStats")
+      nxTransUnit = index(transformations, "transformUnit")
       nxTransOther = index(transformations, "transformOther")
+    }
+
+    def this(transformations: Array[TreeTransform]) = {
+      this(transformations.map(_.getClass).asInstanceOf[Array[Class[_]]])
     }
 
     def this(prev: NXTransformations, changedTansformation: TreeTransform, transformationIndex: Int, reuse: Boolean = false) = {
       this()
       val copy = !reuse
-      nxPrepIdent = indexUpdate(prev.nxPrepIdent, changedTansformation, transformationIndex, "prepareForIdent", copy)
-      nxPrepSelect = indexUpdate(prev.nxPrepSelect, changedTansformation, transformationIndex, "prepareForSelect", copy)
-      nxPrepThis = indexUpdate(prev.nxPrepThis, changedTansformation, transformationIndex, "prepareForThis", copy)
-      nxPrepSuper = indexUpdate(prev.nxPrepSuper, changedTansformation, transformationIndex, "prepareForSuper", copy)
-      nxPrepApply = indexUpdate(prev.nxPrepApply, changedTansformation, transformationIndex, "prepareForApply", copy)
-      nxPrepTypeApply = indexUpdate(prev.nxPrepTypeApply, changedTansformation, transformationIndex, "prepareForTypeApply", copy)
-      nxPrepLiteral = indexUpdate(prev.nxPrepLiteral, changedTansformation, transformationIndex, "prepareForLiteral", copy)
-      nxPrepNew = indexUpdate(prev.nxPrepNew, changedTansformation, transformationIndex, "prepareForNew", copy)
-      nxPrepPair = indexUpdate(prev.nxPrepPair, changedTansformation, transformationIndex, "prepareForPair", copy)
-      nxPrepTyped = indexUpdate(prev.nxPrepTyped, changedTansformation, transformationIndex, "prepareForTyped", copy)
-      nxPrepAssign = indexUpdate(prev.nxPrepAssign, changedTansformation, transformationIndex, "prepareForAssign", copy)
-      nxPrepBlock = indexUpdate(prev.nxPrepBlock, changedTansformation, transformationIndex, "prepareForBlock", copy)
-      nxPrepIf = indexUpdate(prev.nxPrepIf, changedTansformation, transformationIndex, "prepareForIf", copy)
-      nxPrepClosure = indexUpdate(prev.nxPrepClosure, changedTansformation, transformationIndex, "prepareForClosure", copy)
-      nxPrepMatch = indexUpdate(prev.nxPrepMatch, changedTansformation, transformationIndex, "prepareForMatch", copy)
-      nxPrepCaseDef = indexUpdate(prev.nxPrepCaseDef, changedTansformation, transformationIndex, "prepareForCaseDef", copy)
-      nxPrepReturn = indexUpdate(prev.nxPrepReturn, changedTansformation, transformationIndex, "prepareForReturn", copy)
-      nxPrepTry = indexUpdate(prev.nxPrepTry, changedTansformation, transformationIndex, "prepareForTry", copy)
-      nxPrepThrow = indexUpdate(prev.nxPrepThrow, changedTansformation, transformationIndex, "prepareForThrow", copy)
-      nxPrepSeqLiteral = indexUpdate(prev.nxPrepSeqLiteral, changedTansformation, transformationIndex, "prepareForSeqLiteral", copy)
-      nxPrepTypeTree = indexUpdate(prev.nxPrepTypeTree, changedTansformation, transformationIndex, "prepareForTypeTree", copy)
-      nxPrepSelectFromTypeTree = indexUpdate(prev.nxPrepSelectFromTypeTree, changedTansformation, transformationIndex, "prepareForSelectFromTypeTree", copy)
-      nxPrepBind = indexUpdate(prev.nxPrepBind, changedTansformation, transformationIndex, "prepareForBind", copy)
-      nxPrepAlternative = indexUpdate(prev.nxPrepAlternative, changedTansformation, transformationIndex, "prepareForAlternative", copy)
-      nxPrepUnApply = indexUpdate(prev.nxPrepUnApply, changedTansformation, transformationIndex, "prepareForUnApply", copy)
-      nxPrepValDef = indexUpdate(prev.nxPrepValDef, changedTansformation, transformationIndex, "prepareForValDef", copy)
-      nxPrepDefDef = indexUpdate(prev.nxPrepDefDef, changedTansformation, transformationIndex, "prepareForDefDef", copy)
-      nxPrepTypeDef = indexUpdate(prev.nxPrepTypeDef, changedTansformation, transformationIndex, "prepareForTypeDef", copy)
-      nxPrepTemplate = indexUpdate(prev.nxPrepTemplate, changedTansformation, transformationIndex, "prepareForTemplate", copy)
-      nxPrepPackageDef = indexUpdate(prev.nxPrepPackageDef, changedTansformation, transformationIndex, "prepareForPackageDef", copy)
-      nxPrepStats = indexUpdate(prev.nxPrepStats, changedTansformation, transformationIndex, "prepareForStats", copy)
+      val changedTransformationClass = changedTansformation.getClass
+      nxPrepIdent = indexUpdate(prev.nxPrepIdent, changedTransformationClass, transformationIndex, "prepareForIdent", copy)
+      nxPrepSelect = indexUpdate(prev.nxPrepSelect, changedTransformationClass, transformationIndex, "prepareForSelect", copy)
+      nxPrepThis = indexUpdate(prev.nxPrepThis, changedTransformationClass, transformationIndex, "prepareForThis", copy)
+      nxPrepSuper = indexUpdate(prev.nxPrepSuper, changedTransformationClass, transformationIndex, "prepareForSuper", copy)
+      nxPrepApply = indexUpdate(prev.nxPrepApply, changedTransformationClass, transformationIndex, "prepareForApply", copy)
+      nxPrepTypeApply = indexUpdate(prev.nxPrepTypeApply, changedTransformationClass, transformationIndex, "prepareForTypeApply", copy)
+      nxPrepLiteral = indexUpdate(prev.nxPrepLiteral, changedTransformationClass, transformationIndex, "prepareForLiteral", copy)
+      nxPrepNew = indexUpdate(prev.nxPrepNew, changedTransformationClass, transformationIndex, "prepareForNew", copy)
+      nxPrepPair = indexUpdate(prev.nxPrepPair, changedTransformationClass, transformationIndex, "prepareForPair", copy)
+      nxPrepTyped = indexUpdate(prev.nxPrepTyped, changedTransformationClass, transformationIndex, "prepareForTyped", copy)
+      nxPrepAssign = indexUpdate(prev.nxPrepAssign, changedTransformationClass, transformationIndex, "prepareForAssign", copy)
+      nxPrepBlock = indexUpdate(prev.nxPrepBlock, changedTransformationClass, transformationIndex, "prepareForBlock", copy)
+      nxPrepIf = indexUpdate(prev.nxPrepIf, changedTransformationClass, transformationIndex, "prepareForIf", copy)
+      nxPrepClosure = indexUpdate(prev.nxPrepClosure, changedTransformationClass, transformationIndex, "prepareForClosure", copy)
+      nxPrepMatch = indexUpdate(prev.nxPrepMatch, changedTransformationClass, transformationIndex, "prepareForMatch", copy)
+      nxPrepCaseDef = indexUpdate(prev.nxPrepCaseDef, changedTransformationClass, transformationIndex, "prepareForCaseDef", copy)
+      nxPrepReturn = indexUpdate(prev.nxPrepReturn, changedTransformationClass, transformationIndex, "prepareForReturn", copy)
+      nxPrepTry = indexUpdate(prev.nxPrepTry, changedTransformationClass, transformationIndex, "prepareForTry", copy)
+      nxPrepThrow = indexUpdate(prev.nxPrepThrow, changedTransformationClass, transformationIndex, "prepareForThrow", copy)
+      nxPrepSeqLiteral = indexUpdate(prev.nxPrepSeqLiteral, changedTransformationClass, transformationIndex, "prepareForSeqLiteral", copy)
+      nxPrepTypeTree = indexUpdate(prev.nxPrepTypeTree, changedTransformationClass, transformationIndex, "prepareForTypeTree", copy)
+      nxPrepSelectFromTypeTree = indexUpdate(prev.nxPrepSelectFromTypeTree, changedTransformationClass, transformationIndex, "prepareForSelectFromTypeTree", copy)
+      nxPrepBind = indexUpdate(prev.nxPrepBind, changedTransformationClass, transformationIndex, "prepareForBind", copy)
+      nxPrepAlternative = indexUpdate(prev.nxPrepAlternative, changedTransformationClass, transformationIndex, "prepareForAlternative", copy)
+      nxPrepUnApply = indexUpdate(prev.nxPrepUnApply, changedTransformationClass, transformationIndex, "prepareForUnApply", copy)
+      nxPrepValDef = indexUpdate(prev.nxPrepValDef, changedTransformationClass, transformationIndex, "prepareForValDef", copy)
+      nxPrepDefDef = indexUpdate(prev.nxPrepDefDef, changedTransformationClass, transformationIndex, "prepareForDefDef", copy)
+      nxPrepTypeDef = indexUpdate(prev.nxPrepTypeDef, changedTransformationClass, transformationIndex, "prepareForTypeDef", copy)
+      nxPrepTemplate = indexUpdate(prev.nxPrepTemplate, changedTransformationClass, transformationIndex, "prepareForTemplate", copy)
+      nxPrepPackageDef = indexUpdate(prev.nxPrepPackageDef, changedTransformationClass, transformationIndex, "prepareForPackageDef", copy)
+      nxPrepStats = indexUpdate(prev.nxPrepStats, changedTransformationClass, transformationIndex, "prepareForStats", copy)
 
-      nxTransIdent = indexUpdate(prev.nxTransIdent, changedTansformation, transformationIndex, "transformIdent", copy)
-      nxTransSelect = indexUpdate(prev.nxTransSelect, changedTansformation, transformationIndex, "transformSelect", copy)
-      nxTransThis = indexUpdate(prev.nxTransThis, changedTansformation, transformationIndex, "transformThis", copy)
-      nxTransSuper = indexUpdate(prev.nxTransSuper, changedTansformation, transformationIndex, "transformSuper", copy)
-      nxTransApply = indexUpdate(prev.nxTransApply, changedTansformation, transformationIndex, "transformApply", copy)
-      nxTransTypeApply = indexUpdate(prev.nxTransTypeApply, changedTansformation, transformationIndex, "transformTypeApply", copy)
-      nxTransLiteral = indexUpdate(prev.nxTransLiteral, changedTansformation, transformationIndex, "transformLiteral", copy)
-      nxTransNew = indexUpdate(prev.nxTransNew, changedTansformation, transformationIndex, "transformNew", copy)
-      nxTransPair = indexUpdate(prev.nxTransPair, changedTansformation, transformationIndex, "transformPair", copy)
-      nxTransTyped = indexUpdate(prev.nxTransTyped, changedTansformation, transformationIndex, "transformTyped", copy)
-      nxTransAssign = indexUpdate(prev.nxTransAssign, changedTansformation, transformationIndex, "transformAssign", copy)
-      nxTransBlock = indexUpdate(prev.nxTransBlock, changedTansformation, transformationIndex, "transformBlock", copy)
-      nxTransIf = indexUpdate(prev.nxTransIf, changedTansformation, transformationIndex, "transformIf", copy)
-      nxTransClosure = indexUpdate(prev.nxTransClosure, changedTansformation, transformationIndex, "transformClosure", copy)
-      nxTransMatch = indexUpdate(prev.nxTransMatch, changedTansformation, transformationIndex, "transformMatch", copy)
-      nxTransCaseDef = indexUpdate(prev.nxTransCaseDef, changedTansformation, transformationIndex, "transformCaseDef", copy)
-      nxTransReturn = indexUpdate(prev.nxTransReturn, changedTansformation, transformationIndex, "transformReturn", copy)
-      nxTransTry = indexUpdate(prev.nxTransTry, changedTansformation, transformationIndex, "transformTry", copy)
-      nxTransThrow = indexUpdate(prev.nxTransThrow, changedTansformation, transformationIndex, "transformThrow", copy)
-      nxTransSeqLiteral = indexUpdate(prev.nxTransSeqLiteral, changedTansformation, transformationIndex, "transformSeqLiteral", copy)
-      nxTransTypeTree = indexUpdate(prev.nxTransTypeTree, changedTansformation, transformationIndex, "transformTypeTree", copy)
-      nxTransSelectFromTypeTree = indexUpdate(prev.nxTransSelectFromTypeTree, changedTansformation, transformationIndex, "transformSelectFromTypeTree", copy)
-      nxTransBind = indexUpdate(prev.nxTransBind, changedTansformation, transformationIndex, "transformBind", copy)
-      nxTransAlternative = indexUpdate(prev.nxTransAlternative, changedTansformation, transformationIndex, "transformAlternative", copy)
-      nxTransUnApply = indexUpdate(prev.nxTransUnApply, changedTansformation, transformationIndex, "transformUnApply", copy)
-      nxTransValDef = indexUpdate(prev.nxTransValDef, changedTansformation, transformationIndex, "transformValDef", copy)
-      nxTransDefDef = indexUpdate(prev.nxTransDefDef, changedTansformation, transformationIndex, "transformDefDef", copy)
-      nxTransTypeDef = indexUpdate(prev.nxTransTypeDef, changedTansformation, transformationIndex, "transformTypeDef", copy)
-      nxTransTemplate = indexUpdate(prev.nxTransTemplate, changedTansformation, transformationIndex, "transformTemplate", copy)
-      nxTransPackageDef = indexUpdate(prev.nxTransPackageDef, changedTansformation, transformationIndex, "transformPackageDef", copy)
-      nxTransStats = indexUpdate(prev.nxTransStats, changedTansformation, transformationIndex, "transformStats", copy)
-      nxTransOther = indexUpdate(prev.nxTransOther, changedTansformation, transformationIndex, "transformOther", copy)
+      nxTransIdent = indexUpdate(prev.nxTransIdent, changedTransformationClass, transformationIndex, "transformIdent", copy)
+      nxTransSelect = indexUpdate(prev.nxTransSelect, changedTransformationClass, transformationIndex, "transformSelect", copy)
+      nxTransThis = indexUpdate(prev.nxTransThis, changedTransformationClass, transformationIndex, "transformThis", copy)
+      nxTransSuper = indexUpdate(prev.nxTransSuper, changedTransformationClass, transformationIndex, "transformSuper", copy)
+      nxTransApply = indexUpdate(prev.nxTransApply, changedTransformationClass, transformationIndex, "transformApply", copy)
+      nxTransTypeApply = indexUpdate(prev.nxTransTypeApply, changedTransformationClass, transformationIndex, "transformTypeApply", copy)
+      nxTransLiteral = indexUpdate(prev.nxTransLiteral, changedTransformationClass, transformationIndex, "transformLiteral", copy)
+      nxTransNew = indexUpdate(prev.nxTransNew, changedTransformationClass, transformationIndex, "transformNew", copy)
+      nxTransPair = indexUpdate(prev.nxTransPair, changedTransformationClass, transformationIndex, "transformPair", copy)
+      nxTransTyped = indexUpdate(prev.nxTransTyped, changedTransformationClass, transformationIndex, "transformTyped", copy)
+      nxTransAssign = indexUpdate(prev.nxTransAssign, changedTransformationClass, transformationIndex, "transformAssign", copy)
+      nxTransBlock = indexUpdate(prev.nxTransBlock, changedTransformationClass, transformationIndex, "transformBlock", copy)
+      nxTransIf = indexUpdate(prev.nxTransIf, changedTransformationClass, transformationIndex, "transformIf", copy)
+      nxTransClosure = indexUpdate(prev.nxTransClosure, changedTransformationClass, transformationIndex, "transformClosure", copy)
+      nxTransMatch = indexUpdate(prev.nxTransMatch, changedTransformationClass, transformationIndex, "transformMatch", copy)
+      nxTransCaseDef = indexUpdate(prev.nxTransCaseDef, changedTransformationClass, transformationIndex, "transformCaseDef", copy)
+      nxTransReturn = indexUpdate(prev.nxTransReturn, changedTransformationClass, transformationIndex, "transformReturn", copy)
+      nxTransTry = indexUpdate(prev.nxTransTry, changedTransformationClass, transformationIndex, "transformTry", copy)
+      nxTransThrow = indexUpdate(prev.nxTransThrow, changedTransformationClass, transformationIndex, "transformThrow", copy)
+      nxTransSeqLiteral = indexUpdate(prev.nxTransSeqLiteral, changedTransformationClass, transformationIndex, "transformSeqLiteral", copy)
+      nxTransTypeTree = indexUpdate(prev.nxTransTypeTree, changedTransformationClass, transformationIndex, "transformTypeTree", copy)
+      nxTransSelectFromTypeTree = indexUpdate(prev.nxTransSelectFromTypeTree, changedTransformationClass, transformationIndex, "transformSelectFromTypeTree", copy)
+      nxTransBind = indexUpdate(prev.nxTransBind, changedTransformationClass, transformationIndex, "transformBind", copy)
+      nxTransAlternative = indexUpdate(prev.nxTransAlternative, changedTransformationClass, transformationIndex, "transformAlternative", copy)
+      nxTransUnApply = indexUpdate(prev.nxTransUnApply, changedTransformationClass, transformationIndex, "transformUnApply", copy)
+      nxTransValDef = indexUpdate(prev.nxTransValDef, changedTransformationClass, transformationIndex, "transformValDef", copy)
+      nxTransDefDef = indexUpdate(prev.nxTransDefDef, changedTransformationClass, transformationIndex, "transformDefDef", copy)
+      nxTransTypeDef = indexUpdate(prev.nxTransTypeDef, changedTransformationClass, transformationIndex, "transformTypeDef", copy)
+      nxTransTemplate = indexUpdate(prev.nxTransTemplate, changedTransformationClass, transformationIndex, "transformTemplate", copy)
+      nxTransPackageDef = indexUpdate(prev.nxTransPackageDef, changedTransformationClass, transformationIndex, "transformPackageDef", copy)
+      nxTransStats = indexUpdate(prev.nxTransStats, changedTransformationClass, transformationIndex, "transformStats", copy)
+      nxTransOther = indexUpdate(prev.nxTransOther, changedTransformationClass, transformationIndex, "transformOther", copy)
     }
 
     /** Those arrays are used as "execution plan" in order to only execute non-tivial transformations\preparations
@@ -412,6 +440,7 @@ object TreeTransforms {
     var nxPrepTemplate: Array[Int] = _
     var nxPrepPackageDef: Array[Int] = _
     var nxPrepStats: Array[Int] = _
+    var nxPrepUnit: Array[Int] = _
 
     var nxTransIdent: Array[Int] = _
     var nxTransSelect: Array[Int] = _
@@ -444,6 +473,7 @@ object TreeTransforms {
     var nxTransTemplate: Array[Int] = _
     var nxTransPackageDef: Array[Int] = _
     var nxTransStats: Array[Int] = _
+    var nxTransUnit: Array[Int] = _
     var nxTransOther: Array[Int] = _
   }
 
@@ -454,7 +484,7 @@ object TreeTransforms {
 
     override def run(implicit ctx: Context): Unit = {
       val curTree = ctx.compilationUnit.tpdTree
-      val newTree = transform(curTree)
+      val newTree = macroTransform(curTree)
       ctx.compilationUnit.tpdTree = newTree
     }
 
@@ -517,16 +547,21 @@ object TreeTransforms {
     val prepForTemplate: Mutator[Template] = (trans, tree, ctx) => trans.prepareForTemplate(tree)(ctx)
     val prepForPackageDef: Mutator[PackageDef] = (trans, tree, ctx) => trans.prepareForPackageDef(tree)(ctx)
     val prepForStats: Mutator[List[Tree]] = (trans, trees, ctx) => trans.prepareForStats(trees)(ctx)
+    val prepForUnit: Mutator[Tree] = (trans, tree, ctx) => trans.prepareForUnit(tree)(ctx)
 
-    def transform(t: Tree)(implicit ctx: Context): Tree = {
-      val initialTransformations = transformations
-      val info = new TransformerInfo(initialTransformations, new NXTransformations(initialTransformations), this)
-      initialTransformations.zipWithIndex.foreach {
-        case (transform, id) =>
-          transform.idx = id
-          transform.init(ctx, info)
-      }
-      transform(t, info, 0)
+    val initialTransformationsCache = transformations.zipWithIndex.map {
+      case (transform, id) =>
+        transform.idx = id
+        transform
+    }
+
+    val initialInfoCache = new TransformerInfo(initialTransformationsCache, new NXTransformations(initialTransformationsCache), this)
+
+    def macroTransform(t: Tree)(implicit ctx: Context): Tree = {
+      val info = initialInfoCache
+      implicit val mutatedInfo: TransformerInfo = mutateTransformers(info, prepForUnit, info.nx.nxPrepUnit, t, 0)
+      if (mutatedInfo eq null) t
+      else goUnit(transform(t, mutatedInfo, 0), mutatedInfo.nx.nxTransUnit(0))
     }
 
     @tailrec
@@ -859,6 +894,15 @@ object TreeTransforms {
       } else tree
     }
 
+    @tailrec
+    final private[TreeTransforms] def goUnit(tree: Tree, cur: Int)(implicit ctx: Context, info: TransformerInfo): Tree = {
+      if (cur < info.transformers.length) {
+        val trans = info.transformers(cur)
+        val t = trans.transformUnit(tree)(ctx.withPhase(trans.treeTransformPhase), info)
+        goUnit(t, info.nx.nxTransUnit(cur + 1))
+      } else tree
+    }
+
     final private[TreeTransforms] def goOther(tree: Tree, cur: Int)(implicit ctx: Context, info: TransformerInfo): Tree = {
       if (cur < info.transformers.length) {
         val trans = info.transformers(cur)
@@ -950,8 +994,8 @@ object TreeTransforms {
           implicit val mutatedInfo: TransformerInfo = mutateTransformers(info, prepForBind, info.nx.nxPrepBind, tree, cur)
           if (mutatedInfo eq null) tree
           else {
-            val body = transform(tree.body, mutatedInfo, mutatedInfo.nx.nxTransBind(cur))
-            goBind(cpy.Bind(tree)(tree.name, body), cur)
+            val body = transform(tree.body, mutatedInfo, cur)
+            goBind(cpy.Bind(tree)(tree.name, body), mutatedInfo.nx.nxTransBind(cur))
           }
         case tree: ValDef if !tree.isEmpty => // As a result of discussing with Martin: emptyValDefs shouldn't be copied // NAME
           implicit val mutatedInfo: TransformerInfo = mutateTransformers(info, prepForValDef, info.nx.nxPrepValDef, tree, cur)
@@ -1120,7 +1164,7 @@ object TreeTransforms {
           if (mutatedInfo eq null) tree
           else {
             val elems = transformTrees(tree.elems, mutatedInfo, cur)
-            goSeqLiteral(cpy.SeqLiteral(tree)(elems), mutatedInfo.nx.nxTransLiteral(cur))
+            goSeqLiteral(cpy.SeqLiteral(tree)(elems), mutatedInfo.nx.nxTransSeqLiteral(cur))
           }
         case tree: TypeTree =>
           implicit val mutatedInfo: TransformerInfo = mutateTransformers(info, prepForTypeTree, info.nx.nxPrepTypeTree, tree, cur)
@@ -1194,7 +1238,7 @@ object TreeTransforms {
     final private[TreeTransforms] def goStats(trees: List[Tree], cur: Int)(implicit ctx: Context, info: TransformerInfo): List[Tree] = {
       if (cur < info.transformers.length) {
         val trans = info.transformers(cur)
-        val stats = trans.transformStats(trees)
+        val stats = trans.transformStats(trees)(ctx.withPhase(trans.treeTransformPhase), info)
         goStats(stats, info.nx.nxTransStats(cur + 1))
       } else trees
     }
@@ -1219,5 +1263,4 @@ object TreeTransforms {
     def transformSubTrees[Tr <: Tree](trees: List[Tr], info: TransformerInfo, current: Int)(implicit ctx: Context): List[Tr] =
       transformTrees(trees, info, current)(ctx).asInstanceOf[List[Tr]]
   }
-
 }

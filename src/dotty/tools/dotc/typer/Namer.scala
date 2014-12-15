@@ -243,7 +243,10 @@ class Namer { typer: Typer =>
         // different: The former must have the class as owner (because the
         // constructor is owned by the class), the latter must not (because
         // constructor parameters are interpreted as if they are outside the class).
-        val cctx = if (tree.name == nme.CONSTRUCTOR) ctx.outer else ctx
+        // Don't do this for Java constructors because they need to see the import
+        // of the companion object, and it is not necessary for them because they
+        // have no implementation.
+        val cctx = if (tree.name == nme.CONSTRUCTOR && !(tree.mods is JavaDefined)) ctx.outer else ctx
 
         record(ctx.newSymbol(
           ctx.owner, name, tree.mods.flags | deferred | method | higherKinded | inSuperCall1,
@@ -670,7 +673,17 @@ class Namer { typer: Typer =>
 
   def typeDefSig(tdef: TypeDef, sym: Symbol)(implicit ctx: Context): Type = {
     completeParams(tdef.tparams)
-    sym.info = TypeBounds.empty // avoid cyclic reference errors for F-bounds
+    sym.info = TypeBounds.empty
+      // Temporarily set info of defined type T to ` >: Nothing <: Any.
+      // This is done to avoid cyclic reference errors for F-bounds.
+      // This is subtle: `sym` has now an empty TypeBounds, but is not automatically
+      // made an abstract type. If it had been made an abstract type, it would count as an
+      // abstract type of its enclosing class, which might make that class an invalid
+      // prefix. I verified this would lead to an error when compiling io.ClassPath.
+      // A distilled version is in pos/prefix.scala.
+      //
+      // The scheme critically relies on an implementation detail of isRef, which
+      // inspects a TypeRef's info, instead of simply dealiasing alias types.
     val tparamSyms = tdef.tparams map symbolOfTree
     val isDerived = tdef.rhs.isInstanceOf[untpd.DerivedTypeTree]
     val toParameterize = tparamSyms.nonEmpty && !isDerived

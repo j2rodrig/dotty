@@ -208,7 +208,6 @@ trait TypeAssigner {
       case p.arrayApply => MethodType(defn.IntType :: Nil, arrayElemType)
       case p.arrayUpdate => MethodType(defn.IntType :: arrayElemType :: Nil, defn.UnitType)
       case p.arrayLength => MethodType(Nil, defn.IntType)
-      case p.arrayConstructor => MethodType(defn.IntType :: Nil, qualType)
       case nme.clone_ if qualType.isInstanceOf[JavaArrayType] => MethodType(Nil, qualType)
       //case _ => TransitiveMutabilityTypes.registerContext(accessibleSelectionType(tree, qual))
       case _ => accessibleSelectionType(tree, qual)
@@ -353,11 +352,14 @@ trait TypeAssigner {
   def assignType(tree: untpd.Throw)(implicit ctx: Context) =
     tree.withType(defn.NothingType)
 
-  def assignType(tree: untpd.SeqLiteral, elems: List[Tree])(implicit ctx: Context) = {
-    val ownType =
-      if (ctx.erasedTypes) defn.SeqType
-      else defn.SeqType.appliedTo(ctx.typeComparer.lub(elems.tpes).widen)
-    tree.withType(ownType)
+  def assignType(tree: untpd.SeqLiteral, elems: List[Tree])(implicit ctx: Context) = tree match {
+    case tree: JavaSeqLiteral =>
+      tree.withType(defn.ArrayType(ctx.typeComparer.lub(elems.tpes).widen))
+    case _ =>
+      val ownType =
+        if (ctx.erasedTypes) defn.SeqType
+        else defn.SeqType.appliedTo(ctx.typeComparer.lub(elems.tpes).widen)
+      tree.withType(ownType)
   }
 
   def assignType(tree: untpd.SingletonTypeTree, ref: Tree)(implicit ctx: Context) =

@@ -39,9 +39,10 @@ class SyntheticMethods extends MiniPhaseTransform with IdentityDenotTransformer 
   private var valueSymbols: List[Symbol] = _
   private var caseSymbols: List[Symbol] = _
 
-  override def init(implicit ctx: Context, info: TransformerInfo) = {
+  override def prepareForUnit(tree: Tree)(implicit ctx: Context) = {
     valueSymbols = List(defn.Any_hashCode, defn.Any_equals)
     caseSymbols = valueSymbols ++ List(defn.Any_toString, defn.Product_canEqual, defn.Product_productArity)
+    this
   }
 
   /** The synthetic methods of the case or value class `clazz`.
@@ -169,7 +170,7 @@ class SyntheticMethods extends MiniPhaseTransform with IdentityDenotTransformer 
   override def transformTemplate(impl: Template)(implicit ctx: Context, info: TransformerInfo) =
     if (ctx.owner.is(Case) || isDerivedValueClass(ctx.owner))
       cpy.Template(impl)(
-        body = impl.body ++ syntheticMethods(ctx.owner.asClass)(ctx.withPhase(thisTransformer.next)))
+        body = impl.body ++ syntheticMethods(ctx.owner.asClass))
     else
       impl
 }

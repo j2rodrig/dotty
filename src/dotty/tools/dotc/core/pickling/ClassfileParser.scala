@@ -128,6 +128,7 @@ class ClassfileParser(
     for (i <- 0 until in.nextChar) parseMember(method = false)
     for (i <- 0 until in.nextChar) parseMember(method = true)
     classInfo = parseAttributes(classRoot.symbol, classInfo)
+    if (isAnnotation) addAnnotationConstructor(classInfo)
     setClassInfo(classRoot, classInfo)
     setClassInfo(moduleRoot, staticInfo)
   }
@@ -214,6 +215,10 @@ class ClassfileParser(
     }
   }
 
+  /** Map direct references to Object to references to Any */
+  final def objToAny(tp: Type)(implicit ctx: Context) =
+    if (tp.isDirectRef(defn.ObjectClass) && !ctx.phase.erasedTypes) defn.AnyType else tp
+
   private def sigToType(sig: TermName, owner: Symbol = null)(implicit ctx: Context): Type = {
     var index = 0
     val end = sig.length
@@ -258,12 +263,12 @@ class ClassfileParser(
                     case variance @ ('+' | '-' | '*') =>
                       index += 1
                       val bounds = variance match {
-                        case '+' => TypeBounds.upper(sig2type(tparams, skiptvs).objToAny)
+                        case '+' => objToAny(TypeBounds.upper(sig2type(tparams, skiptvs)))
                         case '-' =>
                           val tp = sig2type(tparams, skiptvs)
                           // sig2type seems to return AnyClass regardless of the situation:
                           // we don't want Any as a LOWER bound.
-                          if (tp isRef defn.AnyClass) TypeBounds.empty
+                          if (tp.isDirectRef(defn.AnyClass)) TypeBounds.empty
                           else TypeBounds.lower(tp)
                         case '*' => TypeBounds.empty
                       }
@@ -310,7 +315,7 @@ class ClassfileParser(
           var paramnames = new ListBuffer[TermName]()
           while (sig(index) != ')') {
             paramnames += nme.syntheticParamName(paramtypes.length)
-            paramtypes += sig2type(tparams, skiptvs).objToAny
+            paramtypes += objToAny(sig2type(tparams, skiptvs))
           }
           index += 1
           val restype = sig2type(tparams, skiptvs)
@@ -328,7 +333,7 @@ class ClassfileParser(
       while (sig(index) == ':') {
         index += 1
         if (sig(index) != ':') // guard against empty class bound
-          ts += sig2type(tparams, skiptvs).objToAny
+          ts += objToAny(sig2type(tparams, skiptvs))
       }
       TypeBounds.upper(((NoType: Type) /: ts)(_ & _) orElse defn.AnyType)
     }
@@ -417,7 +422,7 @@ class ClassfileParser(
             case None => hasError = true
           }
         if (hasError) None
-        else if (skip) None else Some(SeqLiteral(arr.toList))
+        else if (skip) None else Some(JavaSeqLiteral(arr.toList))
       case ANNOTATION_TAG =>
         parseAnnotation(index, skip) map (_.tree)
     }
@@ -439,7 +444,7 @@ class ClassfileParser(
       }
     }
     if (hasError || skip) None
-    else Some(Annotation.deferred(attrType, argbuf.toList))
+    else Some(Annotation.deferredResolve(attrType, argbuf.toList))
   } catch {
     case f: FatalError => throw f // don't eat fatal errors, they mean a class was not found
     case ex: Throwable =>
@@ -545,6 +550,45 @@ class ClassfileParser(
       parseAttribute()
     }
     newType
+  }
+
+  /** Add a synthetic constructor and potentially also default getters which
+   *  reflects the fields of the annotation with given `classInfo`.
+   *  Annotations in Scala are assumed to get all their arguments as constructor
+   *  parameters. For Java annotations we need to fake it by making up the constructor.
+   *  Note that default getters have type Nothing. That's OK because we need
+   *  them only to signal that the corresponding parameter is optional.
+   */
+  def addAnnotationConstructor(classInfo: Type, tparams: List[Symbol] = Nil)(implicit ctx: Context): Unit = {
+    def addDefaultGetter(attr: Symbol, n: Int) =
+      ctx.newSymbol(
+        owner = moduleRoot.symbol,
+        name = nme.CONSTRUCTOR.defaultGetterName(n),
+        flags = attr.flags & Flags.AccessFlags,
+        info = defn.NothingType).entered
+
+    classInfo match {
+      case classInfo @ TempPolyType(tparams, restpe) if tparams.isEmpty =>
+        addAnnotationConstructor(restpe, tparams)
+      case classInfo: TempClassInfoType =>
+        val attrs = classInfo.decls.toList.filter(_.isTerm)
+        val targs = tparams.map(_.typeRef)
+        val methType = MethodType(
+          attrs.map(_.name.asTermName),
+          attrs.map(_.info.resultType),
+          classRoot.typeRef.appliedTo(targs))
+        val constr = ctx.newSymbol(
+            owner = classRoot.symbol,
+            name = nme.CONSTRUCTOR,
+            flags = Flags.Synthetic,
+            info = if (tparams.isEmpty) methType else TempPolyType(tparams, methType)
+          ).entered
+        for ((attr, i) <- attrs.zipWithIndex)
+          if (attr.hasAnnotation(defn.AnnotationDefaultAnnot)) {
+            constr.setFlag(Flags.HasDefaultParams)
+            addDefaultGetter(attr, i)
+          }
+    }
   }
 
   /** Enter own inner classes in the right scope. It needs the scopes to be set up,

@@ -23,6 +23,7 @@ class tests extends CompilerTest {
   val allowDeepSubtypes = defaultOptions diff List("-Yno-deep-subtypes")
 
   val posDir = "./tests/pos/"
+  val posSpecialDir = "./tests/pos-special/"
   val negDir = "./tests/neg/"
   val newDir = "./tests/new/"
   val dotcDir = "./src/dotty/"
@@ -50,6 +51,7 @@ class tests extends CompilerTest {
   @Test def pos_assignments() = compileFile(posDir, "assignments", doErase)
   @Test def pos_packageobject() = compileFile(posDir, "packageobject", doErase)
   @Test def pos_overloaded() = compileFile(posDir, "overloaded", doErase)
+  @Test def pos_overrides() = compileFile(posDir, "overrides", doErase)
   @Test def pos_templateParents() = compileFile(posDir, "templateParents", doErase)
   @Test def pos_structural() = compileFile(posDir, "structural", doErase)
   @Test def pos_overloadedAccess = compileFile(posDir, "overloadedAccess", doErase)
@@ -57,6 +59,7 @@ class tests extends CompilerTest {
   @Test def pos_tailcall = compileDir(posDir + "tailcall/", doErase)
   @Test def pos_nullarify = compileFile(posDir, "nullarify", "-Ycheck:nullarify" :: doErase)
   @Test def pos_subtyping = compileFile(posDir, "subtyping", doErase)
+  @Test def pos_t2613 = compileFile(posSpecialDir, "t2613", doErase)(allowDeepSubtypes)
 
   @Test def pos_all = compileFiles(posDir, twice)
   @Test def new_all = compileFiles(newDir, twice)
@@ -65,13 +68,15 @@ class tests extends CompilerTest {
   @Test def neg_typedapply() = compileFile(negDir, "typedapply", xerrors = 4)
   @Test def neg_typedidents() = compileFile(negDir, "typedIdents", xerrors = 2)
   @Test def neg_assignments() = compileFile(negDir, "assignments", xerrors = 3)
-  @Test def neg_typers() = compileFile(negDir, "typers", xerrors = 13)
+  @Test def neg_typers() = compileFile(negDir, "typers", xerrors = 12)
   @Test def neg_privates() = compileFile(negDir, "privates", xerrors = 2)
   @Test def neg_rootImports = compileFile(negDir, "rootImplicits", xerrors = 2)
   @Test def neg_templateParents() = compileFile(negDir, "templateParents", xerrors = 3)
   @Test def neg_autoTupling = compileFile(posDir, "autoTuplingTest", "-language:noAutoTupling" :: Nil, xerrors = 4)
   @Test def neg_autoTupling2 = compileFile(negDir, "autoTuplingTest", xerrors = 4)
   @Test def neg_companions = compileFile(negDir, "companions", xerrors = 1)
+  @Test def neg_over = compileFile(negDir, "over", xerrors = 1)
+  @Test def neg_overrides = compileFile(negDir, "overrides", xerrors = 7)
   @Test def neg_projections = compileFile(negDir, "projections", xerrors = 1)
   @Test def neg_i39 = compileFile(negDir, "i39", xerrors = 1)
   @Test def neg_i50_volatile = compileFile(negDir, "i50-volatile", xerrors = 4)
@@ -90,9 +95,7 @@ class tests extends CompilerTest {
   @Test def neg_tailcall = compileFile(negDir, "tailcall/tailrec", xerrors = 7)
   @Test def neg_tailcall2 = compileFile(negDir, "tailcall/tailrec-2", xerrors = 2)
   @Test def neg_tailcall3 = compileFile(negDir, "tailcall/tailrec-3", xerrors = 2)
-  @Test def neg_t1048 = compileFile(negDir, "t1048", xerrors = 1)
   @Test def nef_t1279a = compileFile(negDir, "t1279a", xerrors = 1)
-  @Test def neg_t1843 = compileFile(negDir, "t1843", xerrors = 1)
   @Test def neg_t1843_variances = compileFile(negDir, "t1843-variances", xerrors = 1)
   @Test def neg_t2660_ambi = compileFile(negDir, "t2660", xerrors = 2)
   @Test def neg_t2994 = compileFile(negDir, "t2994", xerrors = 2)
@@ -101,14 +104,20 @@ class tests extends CompilerTest {
   @Test def neg_badAuxConstr = compileFile(negDir, "badAuxConstr", xerrors = 2)
   @Test def neg_typetest = compileFile(negDir, "typetest", xerrors = 1)
   @Test def neg_t1569_failedAvoid = compileFile(negDir, "t1569-failedAvoid", xerrors = 1)
-  @Test def neg_cycles = compileFile(negDir, "cycles", xerrors = 6)
+  @Test def neg_cycles = compileFile(negDir, "cycles", xerrors = 8)
+  @Test def neg_boundspropagation = compileFile(negDir, "boundspropagation", xerrors = 4)
+  @Test def neg_refinedSubtyping = compileFile(negDir, "refinedSubtyping", xerrors = 2)
+  @Test def neg_i0091_infpaths = compileFile(negDir, "i0091-infpaths", xerrors = 3)
+  @Test def neg_i0248_inherit_refined = compileFile(negDir, "i0248-inherit-refined", xerrors = 4)
+  @Test def neg_i0281 = compileFile(negDir, "i0281-null-primitive-conforms", xerrors = 3)
 
   @Test def dotc = compileDir(dotcDir + "tools/dotc", twice)(allowDeepSubtypes)
   @Test def dotc_ast = compileDir(dotcDir + "tools/dotc/ast", twice)
   @Test def dotc_config = compileDir(dotcDir + "tools/dotc/config", twice)
   @Test def dotc_core = compileDir(dotcDir + "tools/dotc/core", twice)(allowDeepSubtypes)
   @Test def dotc_core_pickling = compileDir(dotcDir + "tools/dotc/core/pickling", twice)(allowDeepSubtypes)
-  @Test def dotc_transform = compileDir(dotcDir + "tools/dotc/transform", twice)
+  @Test def dotc_transform = compileDir(dotcDir + "tools/dotc/transform", twice)(allowDeepSubtypes)
+
   @Test def dotc_parsing = compileDir(dotcDir + "tools/dotc/parsing", twice)
   @Test def dotc_printing = compileDir(dotcDir + "tools/dotc/printing", twice)
   @Test def dotc_reporting = compileDir(dotcDir + "tools/dotc/reporting", twice)
@@ -131,6 +140,10 @@ class tests extends CompilerTest {
       //"-Ylog:frontend",
       "-Xprompt",
       "#runs", "2"))
+
+  val javaDir = "./tests/pos/java-interop/"
+  @Test def java_all = compileFiles(javaDir)
+
 
   //@Test def dotc_compilercommand = compileFile(dotcDir + "tools/dotc/config/", "CompilerCommand")
 }

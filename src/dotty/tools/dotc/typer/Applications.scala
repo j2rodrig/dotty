@@ -388,6 +388,14 @@ trait Applications extends Compatibility { self: Typer =>
     def isVarArg(arg: Tree): Boolean = tpd.isWildcardStarArg(arg)
   }
 
+  /** Subclass of Application for applicability tests with type arguments and value
+    *  argument trees.
+    */
+  class ApplicableToTreesDirectly(methRef: TermRef, targs: List[Type], args: List[Tree], resultType: Type)(implicit ctx: Context) extends ApplicableToTrees(methRef, targs, args, resultType)(ctx) {
+    override def addArg(arg: TypedArg, formal: Type) =
+      ok = ok & (argType(arg, formal) <:< formal)
+  }
+
   /** Subclass of Application for applicability tests with value argument types. */
   class ApplicableToTypes(methRef: TermRef, args: List[Type], resultType: Type)(implicit ctx: Context)
   extends TestApplication(methRef, methRef, args, resultType) {
@@ -682,10 +690,19 @@ trait Applications extends Compatibility { self: Typer =>
           else tree
         if (typedArgs.length <= pt.paramBounds.length)
           typedArgs = typedArgs.zipWithConserve(pt.paramBounds)(adaptTypeArg)
-        checkBounds(typedArgs, pt, tree.pos)
+        checkBounds(typedArgs, pt)
       case _ =>
     }
-    assignType(cpy.TypeApply(tree)(typedFn, typedArgs), typedFn, typedArgs)
+    convertNewArray(
+      assignType(cpy.TypeApply(tree)(typedFn, typedArgs), typedFn, typedArgs))
+  }
+
+  /** Rewrite `new Array[T]` trees to calls of newXYZArray methods. */
+  def convertNewArray(tree: Tree)(implicit ctx: Context): Tree = tree match {
+    case TypeApply(tycon, targs) if tycon.symbol == defn.ArrayConstructor =>
+      newArray(targs.head, tree.pos)
+    case _ =>
+      tree
   }
 
   def typedUnApply(tree: untpd.Apply, selType: Type)(implicit ctx: Context): Tree = track("typedUnApply") {
@@ -851,6 +868,14 @@ trait Applications extends Compatibility { self: Typer =>
     new ApplicableToTrees(methRef, targs, args, resultType)(nestedContext).success
   }
 
+  /** Is given method reference applicable to type arguments `targs` and argument trees `args` without invfering views?
+    *  @param  resultType   The expected result type of the application
+    */
+  def isDirectlyApplicable(methRef: TermRef, targs: List[Type], args: List[Tree], resultType: Type)(implicit ctx: Context): Boolean = {
+    val nestedContext = ctx.fresh.setExploreTyperState
+    new ApplicableToTreesDirectly(methRef, targs, args, resultType)(nestedContext).success
+  }
+
   /** Is given method reference applicable to argument types `args`?
    *  @param  resultType   The expected result type of the application
    */
@@ -1012,6 +1037,10 @@ trait Applications extends Compatibility { self: Typer =>
     val candidates = pt match {
       case pt @ FunProto(args, resultType, _) =>
         val numArgs = args.length
+        val normArgs = args.mapConserve {
+          case Block(Nil, expr) => expr
+          case x => x
+        }
 
         def sizeFits(alt: TermRef, tp: Type): Boolean = tp match {
           case tp: PolyType => sizeFits(alt, tp.resultType)
@@ -1030,22 +1059,28 @@ trait Applications extends Compatibility { self: Typer =>
         def narrowBySize(alts: List[TermRef]): List[TermRef] =
           alts filter (alt => sizeFits(alt, alt.widen))
 
-        def narrowByShapes(alts: List[TermRef]): List[TermRef] =
-          if (args exists (_.isInstanceOf[untpd.Function]))
+        def narrowByShapes(alts: List[TermRef]): List[TermRef] = {
+          if (normArgs exists (_.isInstanceOf[untpd.Function]))
             if (args exists (_.isInstanceOf[Trees.NamedArg[_]]))
               narrowByTrees(alts, args map treeShape, resultType)
             else
-              narrowByTypes(alts, args map typeShape, resultType)
+              narrowByTypes(alts, normArgs map typeShape, resultType)
           else
             alts
+        }
 
         def narrowByTrees(alts: List[TermRef], args: List[Tree], resultType: Type): List[TermRef] =
-          alts filter (isApplicable(_, targs, args, resultType))
+          alts filter ( alt =>
+            if (!ctx.isAfterTyper) isApplicable(alt, targs, args, resultType)
+            else isDirectlyApplicable(alt, targs, args, resultType)
+          )
 
         val alts1 = narrowBySize(alts)
+        //ctx.log(i"narrowed by size: ${alts1.map(_.symbol.showDcl)}%, %")
         if (isDetermined(alts1)) alts1
         else {
           val alts2 = narrowByShapes(alts1)
+          //ctx.log(i"narrowed by shape: ${alts1.map(_.symbol.showDcl)}%, %")
           if (isDetermined(alts2)) alts2
           else narrowByTrees(alts2, pt.typedArgs, resultType)
         }

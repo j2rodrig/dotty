@@ -771,11 +771,12 @@ object desugar {
         else // l.op(r), or val x = r; l.op(x), plus handle named args specially
           makeBinop(l, op, r)
       case PostfixOp(t, op) =>
-        if ((ctx.mode is Mode.Type) && op == nme.raw.STAR)
+        if ((ctx.mode is Mode.Type) && op == nme.raw.STAR) {
+          val seqClass = if (ctx.compilationUnit.isJava) defn.ArrayClass else defn.SeqClass
           Annotated(
             New(ref(defn.RepeatedAnnot.typeRef), Nil :: Nil),
-            AppliedTypeTree(ref(defn.SeqClass.typeRef), t))
-        else {
+            AppliedTypeTree(ref(seqClass.typeRef), t))
+        } else {
           assert(ctx.mode.isExpr, ctx.mode)
           Select(t, op)
         }
@@ -833,17 +834,45 @@ object desugar {
     }
   }.withPos(tree.pos)
 
-  /** Create a class definition with the same info as this refined type.
+  /** Create a class definition with the same info as the refined type given by `parent`
+   *  and `refinements`.
+   *
    *      parent { refinements }
    *  ==>
-   *      trait <refinement> extends parent { refinements }
+   *      trait <refinement> extends core { this: self => refinements }
    *
-   *  If the parent is missing, Object is assumed.
-   *  The result is used for validity checking, is thrown away afterwards.
+   *  Here, `core` is the (possibly parameterized) class part of `parent`.
+   *  If `parent` is the same as `core`, self is empty. Otherwise `self` is `parent`.
+   *
+   *  Example: Given
+   *
+   *      class C
+   *      type T1 extends C { type T <: A }
+   *
+   *  the refined type
+   *
+   *      T1 { type T <: B }
+   *
+   *  is expanded to
+   *
+   *      trait <refinement> extends C { this: T1 => type T <: A }
+   *
+   *  The result of this method is used for validity checking, is thrown away afterwards.
+   *  @param parentType   The type of `parent`
    */
-  def refinedTypeToClass(tree: RefinedTypeTree)(implicit ctx: Context): TypeDef = {
-    val parent = if (tree.tpt.isEmpty) TypeTree(defn.ObjectType) else tree.tpt
-    val impl = Template(emptyConstructor, parent :: Nil, EmptyValDef, tree.refinements)
+  def refinedTypeToClass(parent: tpd.Tree, refinements: List[Tree])(implicit ctx: Context): TypeDef = {
+    def stripToCore(tp: Type): Type = tp match {
+      case tp: RefinedType if tp.argInfos.nonEmpty => tp // parameterized class type
+      case tp: TypeRef if tp.symbol.isClass => tp        // monomorphic class type
+      case tp: TypeProxy => stripToCore(tp.underlying)
+      case _ => defn.AnyType
+    }
+    val parentCore = stripToCore(parent.tpe)
+    val untpdParent = TypedSplice(parent)
+    val (classParent, self) =
+      if (parent.tpe eq parentCore) (untpdParent, EmptyValDef)
+      else (TypeTree(parentCore), ValDef(nme.WILDCARD, untpdParent, EmptyTree))
+    val impl = Template(emptyConstructor, classParent :: Nil, self, refinements)
     TypeDef(tpnme.REFINE_CLASS, impl).withFlags(Trait)
   }
 

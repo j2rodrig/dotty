@@ -372,6 +372,7 @@ object StdNames {
     val delayedInit: N          = "delayedInit"
     val delayedInitArg: N       = "delayedInit$body"
     val drop: N                 = "drop"
+    val dummyApply: N           = "<dummy-apply>"
     val elem: N                 = "elem"
     val emptyValDef: N          = "emptyValDef"
     val ensureAccessible : N    = "ensureAccessible"
@@ -435,7 +436,6 @@ object StdNames {
 	val mutable: N              = "mutable"
     val name: N                 = "name"
     val ne: N                   = "ne"
-    val newArray: N             = "newArray"
     val newFreeTerm: N          = "newFreeTerm"
     val newFreeType: N          = "newFreeType"
     val newNestedSymbol: N      = "newNestedSymbol"
@@ -695,8 +695,7 @@ object StdNames {
       val arrayApply: TermName  = "[]apply"
       val arrayUpdate: TermName = "[]update"
       val arrayLength: TermName = "[]length"
-      val arrayConstructor: TermName = "[]<init>"
-      val names: Set[Name] = Set(arrayApply, arrayUpdate, arrayLength, arrayConstructor)
+      val names: Set[Name] = Set(arrayApply, arrayUpdate, arrayLength)
     }
 
     def isPrimitiveName(name: Name) = primitive.names.contains(name)

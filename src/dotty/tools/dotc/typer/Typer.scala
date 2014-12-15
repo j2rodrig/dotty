@@ -20,6 +20,7 @@ import NameOps._
 import Flags._
 import Decorators._
 import ErrorReporting._
+import Checking._
 import EtaExpansion.etaExpand
 import dotty.tools.dotc.transform.Erasure.Boxing
 import util.Positions._
@@ -169,9 +170,11 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
         selectors match {
           case Pair(Ident(from), Ident(Name)) :: rest =>
             val selName = if (name.isTypeName) from.toTypeName else from
-            checkUnambiguous(selectionType(site, selName, tree.pos))
+            // Pass refctx so that any errors are reported in the context of the
+            // reference instead of the context of the import.
+            checkUnambiguous(selectionType(site, selName, tree.pos)(refctx))
           case Ident(Name) :: rest =>
-            checkUnambiguous(selectionType(site, name, tree.pos))
+            checkUnambiguous(selectionType(site, name, tree.pos)(refctx))
           case _ :: rest =>
             namedImportRef(site, rest)
           case nil =>
@@ -302,9 +305,38 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
   }
 
   def typedSelect(tree: untpd.Select, pt: Type)(implicit ctx: Context): Tree = track("typedSelect") {
-    val qual1 = typedExpr(tree.qualifier, selectionProto(tree.name, pt, this))
-    if (tree.name.isTypeName) checkStable(qual1.tpe, qual1.pos)
-    checkValue(assignType(cpy.Select(tree)(qual1, tree.name), qual1), pt)
+    def asSelect(implicit ctx: Context): Tree = {
+      val qual1 = typedExpr(tree.qualifier, selectionProto(tree.name, pt, this))
+      if (tree.name.isTypeName) checkStable(qual1.tpe, qual1.pos)
+      checkValue(assignType(cpy.Select(tree)(qual1, tree.name), qual1), pt)
+    }
+
+    def asJavaSelectFromTypeTree(implicit ctx: Context): Tree = {
+      // Translate names in Select/Ident nodes to type names.
+      def convertToTypeName(tree: untpd.Tree): Option[untpd.Tree] = tree match {
+        case Select(qual, name) => Some(untpd.Select(qual, name.toTypeName))
+        case Ident(name)        => Some(untpd.Ident(name.toTypeName))
+        case _                  => None
+      }
+
+      // Try to convert Select(qual, name) to a SelectFromTypeTree.
+      def convertToSelectFromType(qual: untpd.Tree, origName: Name): Option[untpd.SelectFromTypeTree] =
+        convertToTypeName(qual) match {
+          case Some(qual1)  => Some(untpd.SelectFromTypeTree(qual1 withPos qual.pos, origName.toTypeName))
+          case _            => None
+        }
+
+      convertToSelectFromType(tree.qualifier, tree.name) match {
+        case Some(sftt) => typedSelectFromTypeTree(sftt, pt)
+        case _ => ctx.error(d"Could not convert $tree to a SelectFromTypeTree"); EmptyTree
+      }
+    }
+
+    if(ctx.compilationUnit.isJava && tree.name.isTypeName) {
+      // SI-3120 Java uses the same syntax, A.B, to express selection from the
+      // value A and from the type A. We have to try both.
+      tryEither(tryCtx => asSelect(tryCtx))((_,_) => asJavaSelectFromTypeTree(ctx))
+    } else asSelect(ctx)
   }
 
   def typedSelectFromTypeTree(tree: untpd.SelectFromTypeTree, pt: Type)(implicit ctx: Context): Tree = track("typedSelectFromTypeTree") {
@@ -784,20 +816,13 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
 
   def typedRefinedTypeTree(tree: untpd.RefinedTypeTree)(implicit ctx: Context): RefinedTypeTree = track("typedRefinedTypeTree") {
     val tpt1 = if (tree.tpt.isEmpty) TypeTree(defn.ObjectType) else typedAheadType(tree.tpt)
-    val refineClsDef = desugar.refinedTypeToClass(tree)
+    val refineClsDef = desugar.refinedTypeToClass(tpt1, tree.refinements)
     val refineCls = createSymbol(refineClsDef).asClass
     val TypeDef(_, Template(_, _, _, refinements1)) = typed(refineClsDef)
     assert(tree.refinements.length == refinements1.length, s"${tree.refinements} != $refinements1")
     def addRefinement(parent: Type, refinement: Tree): Type = {
       typr.println(s"adding refinement $refinement")
-      def checkRef(tree: Tree, sym: Symbol) =
-        if (sym.maybeOwner == refineCls && tree.pos.start <= sym.pos.end)
-          ctx.error("illegal forward reference in refinement", tree.pos)
-      refinement foreachSubTree {
-        case tree: RefTree => checkRef(tree, tree.symbol)
-        case tree: TypeTree => checkRef(tree, tree.tpe.typeSymbol)
-        case _ =>
-      }
+      checkRefinementNonCyclic(refinement, refineCls)
       val rsym = refinement.symbol
       val rinfo = if (rsym is Accessor) rsym.info.resultType else rsym.info
       RefinedType(parent, rsym.name, rt => rinfo.substThis(refineCls, RefinedThis(rt)))
@@ -1559,7 +1584,8 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
           if (pt.isInstanceOf[PolyProto]) tree
           else {
             val (_, tvars) = constrained(poly, tree)
-            adaptInterpolated(tree appliedToTypes tvars, pt, original)
+            convertNewArray(
+              adaptInterpolated(tree.appliedToTypes(tvars), pt, original))
           }
         case wtp =>
           pt match {

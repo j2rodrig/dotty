@@ -95,8 +95,9 @@ object TypeErasure {
   def erasure(tp: Type)(implicit ctx: Context): Type = scalaErasureFn(tp)(erasureCtx)
   def semiErasure(tp: Type)(implicit ctx: Context): Type = semiErasureFn(tp)(erasureCtx)
   def sigName(tp: Type, isJava: Boolean)(implicit ctx: Context): TypeName = {
+    val seqClass = if(isJava) defn.ArrayClass else defn.SeqClass
     val normTp =
-      if (tp.isRepeatedParam) tp.translateParameterized(defn.RepeatedParamClass, defn.SeqClass)
+      if (tp.isRepeatedParam) tp.translateParameterized(defn.RepeatedParamClass, seqClass)
       else tp
     (if (isJava) javaSigFn else scalaSigFn).sigName(normTp)(erasureCtx)
   }
@@ -141,7 +142,7 @@ object TypeErasure {
       tp.derivedPolyType(
         tp.paramNames, tp.paramNames map (Function.const(TypeBounds.upper(defn.ObjectType))), tp.resultType)
 
-    if ((sym eq defn.Any_asInstanceOf) || (sym eq defn.Any_isInstanceOf)) eraseParamBounds(sym.info.asInstanceOf[PolyType])
+    if (defn.isPolymorphicAfterErasure(sym)) eraseParamBounds(sym.info.asInstanceOf[PolyType])
     else if (sym.isAbstractType) TypeAlias(WildcardType)
     else if (sym.isConstructor) outer.addParam(sym.owner.asClass, erase(tp)(erasureCtx))
     else eraseInfo(tp)(erasureCtx) match {
@@ -152,10 +153,24 @@ object TypeErasure {
     }
   }
 
-  def isUnboundedGeneric(tp: Type)(implicit ctx: Context) = !(
-    (tp derivesFrom defn.ObjectClass) ||
-    tp.classSymbol.isPrimitiveValueClass ||
-    (tp.typeSymbol is JavaDefined))
+  /** Is `tp` an abstract type or polymorphic type parameter that has `Any`
+   *  as upper bound and that is not Java defined? Arrays of such types are
+   *  erased to `Object` instead of `ObjectArray`.
+   */
+  def isUnboundedGeneric(tp: Type)(implicit ctx: Context): Boolean = tp match {
+    case tp: TypeRef =>
+      tp.symbol.isAbstractType &&
+      !tp.derivesFrom(defn.ObjectClass) &&
+      !tp.typeSymbol.is(JavaDefined)
+    case tp: PolyParam =>
+      !tp.derivesFrom(defn.ObjectClass) &&
+      !tp.binder.resultType.isInstanceOf[JavaMethodType]
+    case tp: TypeProxy => isUnboundedGeneric(tp.underlying)
+    case tp: AndType => isUnboundedGeneric(tp.tp1) || isUnboundedGeneric(tp.tp2)
+    case tp: OrType => isUnboundedGeneric(tp.tp1) && isUnboundedGeneric(tp.tp2)
+    case _ => false
+  }
+
 
   /** The erased least upper bound is computed as follows
    *  - if both argument are arrays, an array of the lub of the element types
@@ -238,7 +253,7 @@ class TypeErasure(isJava: Boolean, isSemi: Boolean, isConstructor: Boolean, wild
    *      - otherwise, if T is a type paramter coming from Java, []Object
    *      - otherwise, Object
    *   - For a term ref p.x, the type <noprefix> # x.
-   *   - For a typeref scala.Any, scala.AnyVal, scala.Singleon or scala.NotNull: |java.lang.Object|
+   *   - For a typeref scala.Any, scala.AnyVal or scala.Singleton: |java.lang.Object|
    *   - For a typeref scala.Unit, |scala.runtime.BoxedUnit|.
    *   - For a typeref P.C where C refers to a class, <noprefix> # C.
    *   - For a typeref P.C where C refers to an alias type, the erasure of C's alias.
@@ -272,8 +287,8 @@ class TypeErasure(isJava: Boolean, isSemi: Boolean, isConstructor: Boolean, wild
       else this(parent)
     case tp: TermRef =>
       this(tp.widen)
-    case ThisType(_) =>
-      this(tp.widen)
+    case tp: ThisType =>
+      this(tp.cls.typeRef)
     case SuperType(thistpe, supertpe) =>
       SuperType(this(thistpe), this(supertpe))
     case ExprType(rt) =>
@@ -304,7 +319,13 @@ class TypeErasure(isJava: Boolean, isSemi: Boolean, isConstructor: Boolean, wild
         def eraseTypeRef(p: TypeRef) = this(p).asInstanceOf[TypeRef]
         val parents: List[TypeRef] =
           if ((cls eq defn.ObjectClass) || cls.isPrimitiveValueClass) Nil
-          else removeLaterObjects(classParents.mapConserve(eraseTypeRef))
+          else classParents.mapConserve(eraseTypeRef) match {
+            case tr :: trs1 =>
+              assert(!tr.classSymbol.is(Trait), cls)
+              val tr1 = if (cls is Trait) defn.ObjectClass.typeRef else tr
+              tr1 :: trs1.filterNot(_ isRef defn.ObjectClass)
+            case nil => nil
+          }
         val erasedDecls = decls.filteredScope(d => !d.isType || d.isClass)
         tp.derivedClassInfo(NoPrefix, parents, erasedDecls, erasedRef(tp.selfType))
           // can't replace selftype by NoType because this would lose the sourceModule link
@@ -353,17 +374,12 @@ class TypeErasure(isJava: Boolean, isSemi: Boolean, isConstructor: Boolean, wild
 
   private def normalizeClass(cls: ClassSymbol)(implicit ctx: Context): ClassSymbol = {
     if (cls.owner == defn.ScalaPackageClass) {
-      if (cls == defn.AnyClass || cls == defn.AnyValClass || cls == defn.SingletonClass || cls == defn.NotNullClass)
+      if (cls == defn.AnyClass || cls == defn.AnyValClass || cls == defn.SingletonClass)
         return defn.ObjectClass
       if (cls == defn.UnitClass)
         return defn.BoxedUnitClass
     }
     cls
-  }
-
-  private def removeLaterObjects(trs: List[TypeRef])(implicit ctx: Context): List[TypeRef] = trs match {
-    case tr :: trs1 => tr :: trs1.filterNot(_ isRef defn.ObjectClass)
-    case nil => nil
   }
 
   /** The name of the type as it is used in `Signature`s.

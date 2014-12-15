@@ -35,6 +35,8 @@ object Types {
 
   private var recCount = 0 // used temporarily for debugging. TODO: remove
 
+  private var nextId = 0
+
   /** The class of types.
    *  The principal subclasses and sub-objects are as follows:
    *
@@ -70,6 +72,13 @@ object Types {
 
 // ----- Tests -----------------------------------------------------
 
+    val uniqId = {
+      nextId = nextId + 1
+//      if(nextId == 19555)
+//        println("foo")
+      nextId
+    }
+
     /** Is this type different from NoType? */
     def exists: Boolean = true
 
@@ -95,12 +104,22 @@ object Types {
      */
     def isRef(sym: Symbol)(implicit ctx: Context): Boolean = stripTypeVar match {
       case this1: TypeRef =>
-        val thissym = this1.symbol
-        if (thissym.isAliasType) this1.info.bounds.hi.isRef(sym)
-        else thissym eq sym
+        this1.info match { // see comment in Namers/typeDefSig
+          case TypeBounds(lo, hi) if lo eq hi => hi.isRef(sym)
+          case _ =>  this1.symbol eq sym
+        }
       case this1: RefinedType =>
         // make sure all refinements are type arguments
         this1.parent.isRef(sym) && this.argInfos.nonEmpty
+      case _ =>
+        false
+    }
+
+    /** Is this type a (neither aliased nor applied) reference to class `sym`? */
+    def isDirectRef(sym: Symbol)(implicit ctx: Context): Boolean = stripTypeVar match {
+      case this1: TypeRef =>
+        this1.name == sym.name && // avoid forcing info if names differ
+        (this1.symbol eq sym)
       case _ =>
         false
     }
@@ -388,7 +407,7 @@ object Types {
      */
     final def findMember(name: Name, pre: Type, excluded: FlagSet)(implicit ctx: Context): Denotation = try {
       recCount += 1
-      assert(recCount < 20)
+      assert(recCount < 40)
       @tailrec def go(tp: Type): Denotation = tp match {
         case tp: RefinedType =>
           if (name eq tp.refinedName) goRefined(tp) else go(tp.parent)
@@ -534,6 +553,22 @@ object Types {
 	  ctx.typeComparer.topLevelSubType(this, that) && ctx.typeComparer.topLevelSubType(that, this)
     }
 
+    /** Is this type a legal type for a member that overrides another
+     *  member of type `that`? This is the same as `<:<`, except that
+     *  the types ()T and => T are identified, and T is seen as overriding
+     *  either type.
+     */
+    final def overrides(that: Type)(implicit ctx: Context) = {
+      def result(tp: Type): Type = tp match {
+        case ExprType(_) | MethodType(Nil, _) => tp.resultType
+        case _ => tp
+      }
+      this <:< that || {
+        val rthat = result(that)
+        (rthat ne that) && result(this) <:< rthat
+      }
+    }
+
     /** Is this type close enough to that type so that members
      *  with the two type would override each other?d
      *  This means:
@@ -588,6 +623,10 @@ object Types {
      */
     def stripTypeVar(implicit ctx: Context): Type = this
 
+    /** Remove all AnnotatedTypes wrapping this type.
+      */
+    def stripAnnots(implicit ctx: Context): Type = this
+
     /** Widen from singleton type to its underlying non-singleton
      *  base type by applying one or more `underlying` dereferences,
      *  Also go from => T to T.
@@ -639,6 +678,8 @@ object Types {
         if (tp1.exists) tp1.dealias else tp
       case tp: LazyRef =>
         tp.ref.dealias
+      case tp: AnnotatedType =>
+        tp.derivedAnnotatedType(tp.annot, tp.tpe.dealias)
       case tp => tp
     }
 
@@ -664,21 +705,22 @@ object Types {
       case _ => this
     }
 
-    /** Map references to Object to references to Any; needed for Java interop */
-    final def objToAny(implicit ctx: Context) =
-      if ((this isRef defn.ObjectClass) && !ctx.phase.erasedTypes) defn.AnyType else this
-
     /** If this is a (possibly aliased, annotated, and/or parameterized) reference to
      *  a class, the class type ref, otherwise NoType.
+     *  @param  refinementOK   If `true` we also skip non-parameter refinements.
      */
-    def underlyingClassRef(implicit ctx: Context): Type = dealias match {
+    def underlyingClassRef(refinementOK: Boolean)(implicit ctx: Context): Type = dealias match {
       case tp: TypeRef =>
         if (tp.symbol.isClass) tp
-        else if (tp.symbol.isAliasType) tp.underlying.underlyingClassRef
+        else if (tp.symbol.isAliasType) tp.underlying.underlyingClassRef(refinementOK)
         else NoType
-      case tp: TypeVar => tp.underlying.underlyingClassRef
-      case tp: AnnotatedType => tp.underlying.underlyingClassRef
-      case tp: RefinedType => tp.underlying.underlyingClassRef
+      case tp: AnnotatedType => tp.underlying.underlyingClassRef(refinementOK)
+      case tp: RefinedType =>
+        if (refinementOK) tp.underlying.underlyingClassRef(refinementOK)
+        else {
+          val tycon = tp.withoutArgs(tp.argInfos)
+          if (tycon eq tp) NoType else tycon.underlyingClassRef(refinementOK)
+        }
       case _ => NoType
     }
 
@@ -690,10 +732,13 @@ object Types {
       case _ => Nil
     }
 
-    /** A prefix-less termRef to a new skolem symbol that has the given type as info */
-    def narrow(implicit ctx: Context): TermRef = TermRef(NoPrefix, ctx.newSkolem(this))
+    /** A prefix-less refined this or a termRef to a new skolem symbol
+     *  that has the given type as info
+     */
+    def narrow(implicit ctx: Context): TermRef =
+      TermRef(NoPrefix, ctx.newSkolem(this))
 
- // ----- Normalizing typerefs over refined types ----------------------------
+    // ----- Normalizing typerefs over refined types ----------------------------
 
     /** If this is a refinement type that has a refinement for `name` (which might be followed
      *  by other refinements), and the refined info is a type alias, return the alias,
@@ -704,58 +749,58 @@ object Types {
      *  to just U. Does not perform the reduction if the resulting type would contain
      *  a reference to the "this" of the current refined type.
      */
-    def lookupRefined(name: Name)(implicit ctx: Context): Type = stripTypeVar match {
-      case pre: RefinedType =>
-        def dependsOnThis(tp: Type): Boolean = tp match {
-          case tp @ TypeRef(RefinedThis(rt), _) if rt refines pre =>
-            tp.info match {
-              case TypeBounds(lo, hi) if lo eq hi => dependsOnThis(hi)
-              case _ => true
-            }
-          case RefinedThis(rt) =>
-            rt refines pre
-          case _ => false
-        }
-        if (pre.refinedName ne name)
-          pre.parent.lookupRefined(name)
-        else pre.refinedInfo match {
-          case TypeBounds(lo, hi) if lo eq hi =>
-            if (hi.existsPart(dependsOnThis)) NoType else hi
-          case _ => NoType
-        }
-      case RefinedThis(rt) =>
-        rt.lookupRefined(name)
-      case pre: WildcardType =>
-        WildcardType
-      case _ =>
-        NoType
+    def lookupRefined(name: Name)(implicit ctx: Context): Type = {
+
+      def dependsOnRefinedThis(tp: Type): Boolean = tp.stripTypeVar match {
+        case tp @ TypeRef(RefinedThis(rt), _) if rt refines this =>
+          tp.info match {
+            case TypeBounds(lo, hi) if lo eq hi => dependsOnRefinedThis(hi)
+            case _ => true
+          }
+        case RefinedThis(rt) => rt refines this
+        case tp: NamedType =>
+          !tp.symbol.isStatic && dependsOnRefinedThis(tp.prefix)
+        case tp: RefinedType => dependsOnRefinedThis(tp.refinedInfo) || dependsOnRefinedThis(tp.parent)
+        case tp: TypeBounds => dependsOnRefinedThis(tp.lo) || dependsOnRefinedThis(tp.hi)
+        case tp: AnnotatedType => dependsOnRefinedThis(tp.underlying)
+        case tp: AndOrType => dependsOnRefinedThis(tp.tp1) || dependsOnRefinedThis(tp.tp2)
+        case _ => false
+      }
+
+      def loop(pre: Type): Type = pre.stripTypeVar match {
+        case pre: RefinedType =>
+          if (pre.refinedName ne name) loop(pre.parent)
+          else this.member(name).info match {
+            case TypeBounds(lo, hi) if (lo eq hi) && !dependsOnRefinedThis(hi) => hi
+            case _ => NoType
+          }
+        case RefinedThis(rt) =>
+          rt.lookupRefined(name)
+        case pre: WildcardType =>
+          WildcardType
+        case _ =>
+          NoType
+      }
+
+      loop(this)
     }
 
     /** The type <this . name> , reduced if possible */
     def select(name: Name)(implicit ctx: Context): Type = name match {
-      case name: TermName =>
-        TermRef.all(this, name)
-      case name: TypeName =>
-        val res = lookupRefined(name)
-        if (res.exists) res else TypeRef(this, name)
+      case name: TermName => TermRef.all(this, name)
+      case name: TypeName => TypeRef(this, name).reduceProjection
     }
 
     /** The type <this . name> , reduced if possible, with given denotation if unreduced */
     def select(name: Name, denot: Denotation)(implicit ctx: Context): Type = name match {
-      case name: TermName =>
-        TermRef(this, name, denot)
-      case name: TypeName =>
-        val res = lookupRefined(name)
-        if (res.exists) res else TypeRef(this, name, denot)
+      case name: TermName => TermRef(this, name, denot)
+      case name: TypeName => TypeRef(this, name, denot).reduceProjection
     }
 
     /** The type <this . name> with given symbol, reduced if possible */
     def select(sym: Symbol)(implicit ctx: Context): Type =
       if (sym.isTerm) TermRef(this, sym.asTerm)
-      else {
-        val res = lookupRefined(sym.name)
-        if (res.exists) res else TypeRef(this, sym.asType)
-      }
+      else TypeRef(this, sym.asType).reduceProjection
 
 // ----- Access to parts --------------------------------------------
 
@@ -1287,6 +1332,18 @@ object Types {
       if (name.isInheritedName) prefix.nonPrivateMember(name.revertInherited)
       else prefix.member(name)
 
+    /** (1) Reduce a type-ref `W # X` or `W { ... } # U`, where `W` is a wildcard type
+     *  to an (unbounded) wildcard type.
+     *
+     *  (2) Reduce a type-ref `T { X = U; ... } # X`  to   `U`
+     *  provided `U` does not refer with a RefinedThis to the
+     *  refinement type `T { X = U; ... }`
+     */
+    def reduceProjection(implicit ctx: Context): Type = {
+      val reduced = prefix.lookupRefined(name)
+      if (reduced.exists) reduced else this
+    }
+
     def symbol(implicit ctx: Context): Symbol = {
       val now = ctx.period
       if (checkedPeriod == now ||
@@ -1513,6 +1570,8 @@ object Types {
 
   object TermRef {
 
+    private def symbolicRefs(implicit ctx: Context) = ctx.phase.symbolicRefs
+
     /** Create term ref with given name, without specifying a signature.
      *  Its meaning is the (potentially multi-) denotation of the member(s)
      *  of prefix with given name.
@@ -1536,7 +1595,7 @@ object Types {
      *  signature, if denotation is not yet completed.
      */
     def apply(prefix: Type, name: TermName, denot: Denotation)(implicit ctx: Context): TermRef = {
-      if ((prefix eq NoPrefix) || denot.symbol.isFresh || ctx.erasedTypes)
+      if ((prefix eq NoPrefix) || denot.symbol.isFresh || symbolicRefs)
         apply(prefix, denot.symbol.asTerm)
       else denot match {
         case denot: SymDenotation if denot.isCompleted => withSig(prefix, name, denot.signature)
@@ -1561,7 +1620,7 @@ object Types {
      *  (2) The name in the term ref need not be the same as the name of the Symbol.
      */
     def withSymAndName(prefix: Type, sym: TermSymbol, name: TermName)(implicit ctx: Context): TermRef =
-      if ((prefix eq NoPrefix) || sym.isFresh || ctx.erasedTypes)
+      if ((prefix eq NoPrefix) || sym.isFresh || symbolicRefs)
         withFixedSym(prefix, name, sym)
       else if (sym.defRunId != NoRunId && sym.isCompleted)
         withSig(prefix, name, sym.signature) withSym (sym, sym.signature)
@@ -1572,7 +1631,7 @@ object Types {
      *  (which must be completed).
      */
     def withSig(prefix: Type, sym: TermSymbol)(implicit ctx: Context): TermRef =
-      if ((prefix eq NoPrefix) || sym.isFresh || ctx.erasedTypes) withFixedSym(prefix, sym.name, sym)
+      if ((prefix eq NoPrefix) || sym.isFresh || symbolicRefs) withFixedSym(prefix, sym.name, sym)
       else withSig(prefix, sym.name, sym.signature).withSym(sym, sym.signature)
 
     /** Create a term ref with given prefix, name and signature */
@@ -1584,7 +1643,7 @@ object Types {
 
     /** Create a term ref with given prefix, name, signature, and initial denotation */
     def withSigAndDenot(prefix: Type, name: TermName, sig: Signature, denot: Denotation)(implicit ctx: Context): TermRef = {
-      if ((prefix eq NoPrefix) || denot.symbol.isFresh || ctx.erasedTypes)
+      if ((prefix eq NoPrefix) || denot.symbol.isFresh || symbolicRefs)
         withFixedSym(prefix, denot.symbol.asTerm.name, denot.symbol.asTerm)
       else
         withSig(prefix, name, sig)
@@ -1974,7 +2033,9 @@ object Types {
     def fromSymbols(params: List[Symbol], resultType: Type)(implicit ctx: Context) = {
       def paramInfo(param: Symbol): Type = param.info match {
         case AnnotatedType(annot, tp) if annot matches defn.RepeatedAnnot =>
-          tp.translateParameterized(defn.SeqClass, defn.RepeatedParamClass)
+          val typeSym = param.info.typeSymbol.asClass
+          assert(typeSym == defn.SeqClass || typeSym == defn.ArrayClass)
+          tp.translateParameterized(typeSym, defn.RepeatedParamClass)
         case tp =>
           tp
       }
@@ -2033,9 +2094,9 @@ object Types {
 
     def derivedPolyType(paramNames: List[TypeName], paramBounds: List[TypeBounds], restpe: Type)(implicit ctx: Context) =
       if ((paramNames eq this.paramNames) && (paramBounds eq this.paramBounds) && (restpe eq this.resultType)) this
-      else copy(paramNames, paramBounds, restpe)
+      else duplicate(paramNames, paramBounds, restpe)
 
-    def copy(paramNames: List[TypeName], paramBounds: List[TypeBounds], restpe: Type)(implicit ctx: Context) =
+    def duplicate(paramNames: List[TypeName] = this.paramNames, paramBounds: List[TypeBounds] = this.paramBounds, restpe: Type)(implicit ctx: Context) =
       PolyType(paramNames)(
           x => paramBounds mapConserve (_.subst(this, x).bounds),
           x => restpe.subst(this, x))
@@ -2128,7 +2189,7 @@ object Types {
 
   case class RefinedThis(binder: RefinedType) extends BoundType with SingletonType {
     type BT = RefinedType
-    override def underlying(implicit ctx: Context) = binder.parent
+    override def underlying(implicit ctx: Context) = binder
     def copyBoundType(bt: BT) = RefinedThis(bt)
 
     // need to customize hashCode and equals to prevent infinite recursion for
@@ -2478,6 +2539,9 @@ object Types {
     def derivedAnnotatedType(annot: Annotation, tpe: Type) =
       if ((annot eq this.annot) && (tpe eq this.tpe)) this
       else AnnotatedType(annot, tpe)
+
+    override def stripTypeVar(implicit ctx: Context): Type = tpe.stripTypeVar
+    override def stripAnnots(implicit ctx: Context): Type = tpe.stripAnnots
   }
 
   object AnnotatedType {
