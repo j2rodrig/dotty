@@ -33,7 +33,7 @@ object immutable {
 	 *  @version 1.0, 15/07/2003
 	 *  @since   2.8
 	 */
-	final case class ::[B](override val head: B, private[immutable] var tl: List[B]) extends List[B] {
+	final case class ::[B](override val head: B @readonly, private[immutable] var tl: List[B]) extends List[B] {
 	  override def tail : List[B] = tl
 	  override def isEmpty: Boolean = false
 	}

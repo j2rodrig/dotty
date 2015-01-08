@@ -18,6 +18,6 @@ trait override1 {
 		@readonly def x = this                    // error expected: result types do not match
 	}
 	
-	class E extends D {}
+	//class E extends D {}
 	
 }
