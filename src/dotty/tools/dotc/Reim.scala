@@ -56,9 +56,8 @@ object Reim {
         case tpe: TermRef =>
           val symbol = tpe.symbol
 
-          if (tpe.prefix == NoPrefix && !insidePureBoundary(tpe.symbol)) return Some(defn.ReadOnlyAnnot)
-
-          if(symbol.is(Method) || symbol.hasAnnotation(defn.NonRepAnnot)) symbol.info.reimAnnotation(bound)
+          if ((tpe.prefix eq NoPrefix) && !insidePureBoundary(tpe.symbol)) Some(defn.ReadOnlyAnnot)
+          else if(symbol.is(Method) || symbol.hasAnnotation(defn.NonRepAnnot)) symbol.info.reimAnnotation(bound)
           else bound match {
             case Inferred =>
               val preAnnot = tpe.prefix.reimAnnotation(Inferred)
@@ -69,7 +68,9 @@ object Reim {
               val symAnnot = symbol.info.reimAnnotation(bound).get
               Some(symAnnot.lub(preAnnot))
           }
-        case tpe: ThisType => Some(getAnnotationOfThis(tpe.cls))
+        case tpe: ThisType =>
+          if (!classInsidePureBoundary(tpe.cls)) Some(defn.ReadOnlyAnnot)
+          else Some(getAnnotationOfThis(tpe.cls))
         case tpe: SuperType => tpe.thistpe.reimAnnotation(bound)
         case tpe: ConstantType => Some(defn.MutableAnnot)
         case tpe: MethodParam => tpe.underlying.reimAnnotation(bound)
@@ -227,7 +228,7 @@ object Reim {
   /** Does the given symbol have a @pure annotation? */
   def isPure(sym: Symbol)(implicit ctx: Context): Boolean = {
     if (sym.isCompleted) {
-      sym.annotations.exists(_.symbol == defn.PureAnnot)
+      sym.annotations.exists(_.symbol eq defn.PureAnnot)
     } else {
       // Evil hack: We only need the annotations, but the symbol is not yet completed.
       // So we reach into the completer to get the corresponding tree, and look at the
@@ -236,7 +237,7 @@ object Reim {
       val completer = sym.completer.asInstanceOf[typer.Completer]
       val tree = completer.original.asInstanceOf[untpd.MemberDef]
       val annots = untpd.modsDeco(tree).mods.annotations.mapconserve(typer.typedAnnotation)
-      annots.exists(_.symbol.owner == defn.PureAnnot)
+      annots.exists(_.symbol.owner eq defn.PureAnnot)
     }
   }
 
@@ -245,10 +246,20 @@ object Reim {
     val ctx_owner = ctx.owner
     if (!ctx_owner.exists) true   // no @pure found
     else {
-      val sym_owner = symbol.owner
-      if (sym_owner == ctx_owner) true   // symbol is owned by current context owner, so no @pure
+      if (symbol.owner == ctx_owner) true   // symbol is owned by current context owner, so no @pure
       else if (isPure(ctx_owner)) false
       else insidePureBoundary(symbol)(ctx.outer)
+    }
+  }
+
+  /** Is the given class symbol not outside a @pure-delimited boundary? (As seen from the current context.) */
+  def classInsidePureBoundary(symbol: ClassSymbol)(implicit ctx: Context): Boolean = {
+    val ctx_owner = ctx.owner
+    if (!ctx_owner.exists) true   // no @pure found
+    else {
+      if (symbol == ctx_owner) true   // symbol is the current context owner, so no @pure
+      else if (isPure(ctx_owner)) false
+      else classInsidePureBoundary(symbol)(ctx.outer)
     }
   }
 
@@ -296,7 +307,7 @@ object Reim {
         case _: tpd.Select | _: tpd.Ident =>
           val annot = tree.lhs.tpe.stripAnnots match {
             case tr: TermRef =>
-              if (tr.prefix == NoPrefix) {
+              if (tr.prefix eq NoPrefix) {
                 if (insidePureBoundary(tr.symbol)) defn.MutableAnnot else defn.ReadOnlyAnnot
               } else tr.prefix.reimAnnotation(Hi).get
           }

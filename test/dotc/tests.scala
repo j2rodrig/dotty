@@ -171,8 +171,8 @@ class tests extends CompilerTest {
   @Test def neg_reimrefchecks3 = compileFile(negDir, "reimrefchecks3", xerrors = 2)
   @Test def neg_reimrefchecks4 = compileFile(negDir, "reimrefchecks4", xerrors = 2)
 
-  @Test def neg_purity = compileFile(negDir, "purity", xerrors = 1)
-  @Test def neg_purity2 = compileFile(negDir, "purity2", xerrors = 1)
+  @Test def neg_purity = compileFile(negDir, "purity", xerrors = 5)
+  @Test def neg_purity2 = compileFile(negDir, "purity2", xerrors = 5)
 
   @Test def reim_all = {
     neg_reim
