@@ -5,7 +5,7 @@ object purity2 {
   class C
 
   def A = {
-    var ref1 = new C
+    var ref1: C @readonly = new C
 
     @pure def B = {
       var ref2 = new C

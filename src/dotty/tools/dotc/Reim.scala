@@ -69,8 +69,9 @@ object Reim {
               Some(symAnnot.lub(preAnnot))
           }
         case tpe: ThisType =>
-          if (!classInsidePureBoundary(tpe.cls)) Some(defn.ReadOnlyAnnot)
-          else Some(getAnnotationOfThis(tpe.cls))
+          var annot = getAnnotationOfThis(tpe.cls)
+          if ((annot eq defn.MutableAnnot) && !insidePureBoundary(tpe.cls)) annot = defn.PolyReadAnnot
+          Some(annot)
         case tpe: SuperType => tpe.thistpe.reimAnnotation(bound)
         case tpe: ConstantType => Some(defn.MutableAnnot)
         case tpe: MethodParam => tpe.underlying.reimAnnotation(bound)
@@ -121,6 +122,25 @@ object Reim {
     def reimAnnotationWithDefault(default: ClassSymbol)(implicit ctx: Context): ClassSymbol =
       symbol.annotations.map(_.symbol).filter(isAnnotation(_))
         .headOption.getOrElse(default).asInstanceOf[ClassSymbol]
+
+    def getAnnotTrees(cls: ClassSymbol)(implicit ctx: Context): List[tpd.Tree] = {
+      if (symbol.isCompleted) {
+        symbol.annotations.filter(_.symbol eq cls).map(_.tree)
+      } else {
+        // Evil hack: We only need the annotations, but the symbol is not yet completed.
+        // So we reach into the completer to get the corresponding tree, and look at the
+        // annotations on the tree.
+        val typer = ctx.typer
+        val completer = symbol.completer.asInstanceOf[typer.Completer]
+        val tree = completer.original.asInstanceOf[untpd.MemberDef]
+        val annotTrees = untpd.modsDeco(tree).mods.annotations.mapconserve(typer.typedAnnotation)
+        annotTrees.filter { tree =>
+          cls eq (if (tree.symbol.isConstructor) tree.symbol.owner else tree.tpe.typeSymbol)
+        }
+      }
+    }
+
+    def isAnnotatedWith(cls: ClassSymbol)(implicit ctx: Context): Boolean = getAnnotTrees(cls).nonEmpty
 
     def isVal(implicit ctx: Context): Boolean =
       !(symbol.isClass || symbol.isType || (symbol is Method))
@@ -225,42 +245,38 @@ object Reim {
     }
   }
 
-  /** Does the given symbol have a @pure annotation? */
-  def isPure(sym: Symbol)(implicit ctx: Context): Boolean = {
-    if (sym.isCompleted) {
-      sym.annotations.exists(_.symbol eq defn.PureAnnot)
-    } else {
-      // Evil hack: We only need the annotations, but the symbol is not yet completed.
-      // So we reach into the completer to get the corresponding tree, and look at the
-      // annotations on the tree.
-      val typer = ctx.typer
-      val completer = sym.completer.asInstanceOf[typer.Completer]
-      val tree = completer.original.asInstanceOf[untpd.MemberDef]
-      val annots = untpd.modsDeco(tree).mods.annotations.mapconserve(typer.typedAnnotation)
-      annots.exists(_.symbol.owner eq defn.PureAnnot)
+
+  def isExplicitlyPureMethod(methodSym: Symbol)(implicit ctx: Context): Boolean = {
+    assert(methodSym is Method)
+    methodSym.isAnnotatedWith(defn.PureAnnot) ||
+      (methodSym.isConstructor && methodSym.enclosingClass.isAnnotatedWith(defn.PureAnnot))
+  }
+
+  def isDefaultedPureMethod(methodSym: Symbol)(implicit ctx: Context): Boolean = {
+    assert(methodSym is Method)
+    methodSym.isConstructor || methodSym.isGetter
+  }
+
+  def isPureMethod(sym: Symbol)(implicit ctx: Context): Boolean =
+    (sym is Method) && (isExplicitlyPureMethod(sym) || isDefaultedPureMethod(sym))
+
+  def isPureClassMethodOrVal(sym: Symbol)(implicit ctx: Context): Boolean =
+    isPureMethod(sym) ||
+      ((sym.isClass || sym.isVal) && sym.isAnnotatedWith(defn.PureAnnot))
+
+  def innermostEnclosingPure(symbol: Symbol)(implicit ctx: Context): Symbol = {
+    if (!symbol.exists) {
+      NoSymbol
+    } else if (isPureClassMethodOrVal(symbol)) {
+      if (symbol.isConstructor) symbol.enclosingClass else symbol
     }
+    else innermostEnclosingPure(symbol.owner)
   }
 
   /** Is the given symbol not outside a @pure-delimited boundary? (As seen from the current context.) */
   def insidePureBoundary(symbol: Symbol)(implicit ctx: Context): Boolean = {
-    val ctx_owner = ctx.owner
-    if (!ctx_owner.exists) true   // no @pure found
-    else {
-      if (symbol.owner == ctx_owner) true   // symbol is owned by current context owner, so no @pure
-      else if (isPure(ctx_owner)) false
-      else insidePureBoundary(symbol)(ctx.outer)
-    }
-  }
-
-  /** Is the given class symbol not outside a @pure-delimited boundary? (As seen from the current context.) */
-  def classInsidePureBoundary(symbol: ClassSymbol)(implicit ctx: Context): Boolean = {
-    val ctx_owner = ctx.owner
-    if (!ctx_owner.exists) true   // no @pure found
-    else {
-      if (symbol == ctx_owner) true   // symbol is the current context owner, so no @pure
-      else if (isPure(ctx_owner)) false
-      else classInsidePureBoundary(symbol)(ctx.outer)
-    }
+    val pureBoundary = innermostEnclosingPure(ctx.owner)
+    (pureBoundary eq NoSymbol) || symbol.isContainedIn(pureBoundary)
   }
 
   def getAnnotationOfThis(thisSym: Symbol)(implicit ctx: Context): ClassSymbol = {
