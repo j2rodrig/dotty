@@ -245,7 +245,6 @@ object Reim {
     }
   }
 
-
   def isExplicitlyPureMethod(methodSym: Symbol)(implicit ctx: Context): Boolean = {
     assert(methodSym is Method)
     methodSym.isAnnotatedWith(defn.PureAnnot) ||
@@ -257,17 +256,17 @@ object Reim {
     methodSym.isConstructor || methodSym.isGetter
   }
 
-  def isPureMethod(sym: Symbol)(implicit ctx: Context): Boolean =
-    (sym is Method) && (isExplicitlyPureMethod(sym) || isDefaultedPureMethod(sym))
+  def isPureMethod(sym: Symbol, allowDefaultPure: Boolean)(implicit ctx: Context): Boolean =
+    (sym is Method) && (isExplicitlyPureMethod(sym) || (allowDefaultPure && isDefaultedPureMethod(sym)))
 
-  def isPureClassMethodOrVal(sym: Symbol)(implicit ctx: Context): Boolean =
-    isPureMethod(sym) ||
+  def isPureMethodOrClassOrVal(sym: Symbol, allowDefaultPure: Boolean)(implicit ctx: Context): Boolean =
+    isPureMethod(sym, allowDefaultPure) ||
       ((sym.isClass || sym.isVal) && sym.isAnnotatedWith(defn.PureAnnot))
 
-  def innermostEnclosingPure(symbol: Symbol)(implicit ctx: Context): Symbol = {
+  def innermostEnclosingPure(symbol: Symbol, allowDefaultPure: Boolean = true)(implicit ctx: Context): Symbol = {
     if (!symbol.exists) {
       NoSymbol
-    } else if (isPureClassMethodOrVal(symbol)) {
+    } else if (isPureMethodOrClassOrVal(symbol, allowDefaultPure)) {
       if (symbol.isConstructor) symbol.enclosingClass else symbol
     }
     else innermostEnclosingPure(symbol.owner)
@@ -356,21 +355,61 @@ object Reim {
   class ReimRefChecks2 extends MiniPhase { thisTransformer =>
     val treeTransform = new TreeTransform {
 
+      private def checkPurity(fun: tpd.Tree, tree: tpd.Tree)(implicit ctx: Context) = {
+        val methodSym = tree.symbol
+        if (!isPureMethod(methodSym, allowDefaultPure = true)) {  // the method is not independently pure
+          val ctxPurityBoundary = innermostEnclosingPure(ctx.owner)
+          if (ctxPurityBoundary ne NoSymbol) {  // there exists a purity boundary here
+            if (!methodSym.isContainedIn(ctxPurityBoundary)) {  // the method is not inside the local purity boundary
+              if (!isPureMethodOrClassOrVal(ctxPurityBoundary, allowDefaultPure = false))   // issue a warning instead of an error if the purity boundary was defaulted
+                ctx.warning(s"call of $methodSym is not contained by the default-pure boundary $ctxPurityBoundary", ctx.tree.pos)
+              else
+                ctx.error(s"call of $methodSym is not contained by pure boundary $ctxPurityBoundary", ctx.tree.pos)
+            }
+          }
+        }
+      }
+      
       private def checkReceiver(fun: tpd.Tree, tree: tpd.Tree)(implicit ctx: Context) = {
         val receiverType = tree.tpe.stripAnnots.asInstanceOf[TermRef].prefix
         val receiverAnnot = receiverType.reimAnnotation(Hi).get
         val methodSym = tree.symbol
         val methodAnnot = methodSym.reimAnnotation
         if(methodAnnot == defn.MutableAnnot && receiverAnnot != defn.MutableAnnot) {
-          errorTree(tree, s"call of $methodSym taking @${methodAnnot.name} this on @${receiverAnnot.name} receiver")
+          // TODO: upgrade to an error when pure-related defaults are correctly implemented
+          ctx.warning(s"call of $methodSym on ${methodSym.enclosingClass} taking @${methodAnnot.name} this on @${receiverAnnot.name} receiver", tree.pos)
+          tree
+          //errorTree(tree, s"call of $methodSym on ${methodSym.enclosingClass} taking @${methodAnnot.name} this on @${receiverAnnot.name} receiver")
         } else tree
       }
 
-      override def transformSelect(tree: tpd.Select)(implicit ctx: Context, info: TransformerInfo): tpd.Tree =
-        if(tree.symbol is Method) checkReceiver(tree, tree) else tree
+      private def checkPurityOverride(overriding: Symbol, overridden: Symbol, allowDefaultPure: Boolean = true)(implicit ctx: Context): Boolean = {
+        if (!isPureMethod(overriding, allowDefaultPure)) {  // overriding method is not independently pure
+          val overriddenPurityBoundary = innermostEnclosingPure(overridden, allowDefaultPure)
+          if (overriddenPurityBoundary ne NoSymbol) {  // the overridden method is inside a purity boundary
+            if (!overriding.isContainedIn(overriddenPurityBoundary)) {  // overriding method is not within the overridden purity boundary
+              if (allowDefaultPure) {  // if either overridden or overriding purity was defaulted, issue a warning instead of an error
+                if (checkPurityOverride(overriding, overridden, allowDefaultPure = false))
+                  ctx.warning(s"$overriding should not override $overridden due to incompatible purity", overriding.pos)
+              } else {
+                ctx.error(s"$overriding cannot override $overridden due to incompatible purity", overriding.pos)
+                return false
+              }
+            }
+          }
+        }
+        true
+      }
 
-      override def transformIdent(tree: tpd.Ident)(implicit ctx: Context, info: TransformerInfo): tpd.Tree =
-        if(tree.symbol is Method) checkReceiver(tree, tree) else tree
+      override def transformSelect(tree: tpd.Select)(implicit ctx: Context, info: TransformerInfo): tpd.Tree = {
+        checkPurity(tree, tree)
+        if (tree.symbol is Method) checkReceiver(tree, tree) else tree
+      }
+
+      override def transformIdent(tree: tpd.Ident)(implicit ctx: Context, info: TransformerInfo): tpd.Tree = {
+        checkPurity(tree, tree)
+        if (tree.symbol is Method) checkReceiver(tree, tree) else tree
+      }
 
       override def transformTemplate(tree: tpd.Template)(implicit ctx: Context, info: TransformerInfo): tpd.Tree = {
         def adjustedAnnotation(symbol: Symbol): ClassSymbol =
@@ -387,7 +426,10 @@ object Reim {
             if(!(defn.PolyReadAnnot <:< cursor.overridden.info.finalResultType.reimAnnotation(Lo).get))
               ctx.error(s"${cursor.overriding} cannot override ${cursor.overridden} that could return @mutable", cursor.overriding.pos)
             else if(cursor.overridden.is(Method) && defn.PolyReadAnnot != cursor.overridden.reimAnnotation)
-              ctx.error(s"${cursor.overriding} cannot override ${cursor.overridden} that does not have @polyread this", cursor.overriding.pos)
+              // TODO: upgrade to an error when pure-related defaults are correctly implemented
+              ctx.warning(s"${cursor.overriding} cannot override ${cursor.overridden} that does not have @polyread this", cursor.overriding.pos)
+
+          checkPurityOverride(cursor.overriding, cursor.overridden)
 
           cursor.next()
         }

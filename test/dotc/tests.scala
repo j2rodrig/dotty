@@ -173,6 +173,7 @@ class tests extends CompilerTest {
 
   @Test def neg_purity = compileFile(negDir, "purity", xerrors = 5)
   @Test def neg_purity2 = compileFile(negDir, "purity2", xerrors = 5)
+  @Test def neg_purityrefchecks = compileFile(negDir, "purityrefchecks", xerrors = 1)
 
   @Test def reim_all = {
     neg_reim
@@ -184,6 +185,7 @@ class tests extends CompilerTest {
     neg_reimrefchecks4
     neg_purity
     neg_purity2
+    neg_purityrefchecks
   }
 
   //@Test def dotc_compilercommand = compileFile(dotcDir + "tools/dotc/config/", "CompilerCommand")
