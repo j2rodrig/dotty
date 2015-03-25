@@ -22,9 +22,68 @@ object Reim {
   case object Lo extends BoundSpec
   case object Inferred extends BoundSpec
 
+
+  abstract class ReimType {
+    def cls(implicit ctx: Context): ClassSymbol
+    def origin(implicit ctx: Context): Symbol
+
+    def isMutable(implicit ctx: Context) = cls eq defn.MutableAnnot
+    def isReadOnly(implicit ctx: Context) = cls eq defn.ReadOnlyAnnot
+
+    def show(implicit ctx: Context) = if (origin eq NoSymbol) s"@${cls.name}" else s"@${cls.name}[${origin.name}}]"
+
+    def <:<(other: ReimType)(implicit ctx: Context): Boolean = {
+      (cls eq defn.MutableAnnot) || (other.cls eq defn.ReadOnlyAnnot) ||
+        (cls eq other.cls)
+        //((cls eq other.cls) && (origin eq other.origin))
+    }
+    def lub(other: ReimType)(implicit ctx: Context): ReimType = {
+      if (this <:< other) other
+      else if (other <:< this) this
+      else ReimType.ReadOnly
+    }
+    def glb(other: ReimType)(implicit ctx: Context): ReimType = {
+      if (this <:< other) this
+      else if (other <:< this) other
+      else ReimType.Mutable
+    }
+    def =:=(other: ReimType)(implicit ctx: Context): Boolean =
+      (this <:< other) && (other <:< this)
+  }
+  object ReimType {
+    val Mutable: ReimType = new ReimType {
+      def cls(implicit ctx: Context) = defn.MutableAnnot
+      def origin(implicit ctx: Context) = NoSymbol
+    }
+    val ReadOnly: ReimType = new ReimType {
+      def cls(implicit ctx: Context) = defn.ReadOnlyAnnot
+      def origin(implicit ctx: Context) = NoSymbol
+    }
+    def PolyRead(_origin: Symbol)(implicit ctx: Context): ReimType = new ReimType {
+      def cls(implicit ctx: Context) = defn.PolyReadAnnot
+      def origin(implicit ctx: Context) = _origin.enclosingClassOrMethod
+    }
+    def apply(cls: ClassSymbol, _origin: Symbol)(implicit ctx: Context) =
+      if (cls eq defn.ReadOnlyAnnot) ReadOnly
+      else if (cls eq defn.PolyReadAnnot) PolyRead(_origin)
+      else Mutable
+  }
+
+  abstract class ReimAnnotation extends Annotation {
+    val reimType: ReimType
+    def show(implicit ctx: Context) = reimType.show
+  }
+  object ReimAnnotation {
+    def apply(_reimType: ReimType)(implicit ctx: Context) = new ReimAnnotation {
+      private val _tree = tpd.New(_reimType.cls.typeRef, Nil)
+      def tree(implicit ctx: Context) = _tree
+      val reimType = _reimType
+    }
+  }
+
   implicit class TypeDecorator(val tpe: Type) extends AnyVal {
-    def withAnnotation(cls: ClassSymbol)(implicit ctx: Context) =
-      AnnotatedType(Annotation(cls, Nil), tpe.removeAnnotations)
+    def withAnnotation(reimType: ReimType)(implicit ctx: Context) =
+      AnnotatedType(ReimAnnotation(reimType), tpe.removeAnnotations)
 
     def removeAnnotations(implicit ctx: Context): Type = tpe match {
       case tpe: AnnotatedType if isAnnotation(tpe.annot.symbol) => tpe.tpe.removeAnnotations
@@ -32,23 +91,24 @@ object Reim {
       case _ => tpe
     }
 
-    def directReimAnnotation(implicit ctx: Context): Option[ClassSymbol] = tpe match {
+    def directReimAnnotation(implicit ctx: Context): Option[ReimType] = tpe match {
       case tpe: AnnotatedType =>
-        if(isAnnotation(tpe.annot.symbol)) Some(tpe.annot.symbol.asInstanceOf[ClassSymbol]) else tpe.tpe.directReimAnnotation
+        if (isAnnotation(tpe.annot.symbol)) Some(ReimType(tpe.annot.symbol.asInstanceOf[ClassSymbol], tpe.termSymbol))
+        else tpe.tpe.directReimAnnotation
       case _ => None
     }
 
-    def reimAnnotation(bound: BoundSpec = Inferred)(implicit ctx: Context): Option[ClassSymbol] = {
-      def ifConsistent(tpe: Type): Option[ClassSymbol] = {
+    def reimAnnotation(bound: BoundSpec = Inferred)(implicit ctx: Context): Option[ReimType] = {
+      def ifConsistent(tpe: Type): Option[ReimType] = {
         val hi = tpe.reimAnnotation(Hi).get
         val lo = tpe.reimAnnotation(Lo).get
-        if(hi == lo) Some(hi) else None
+        if (hi =:= lo) Some(hi) else None
       }
-      def anyAnnot: Option[ClassSymbol] = {
+      def anyAnnot: Option[ReimType] = {
         bound match {
           case Inferred => None
-          case Hi => Some(defn.ReadOnlyAnnot)
-          case Lo => Some(defn.MutableAnnot)
+          case Hi => Some(ReimType.ReadOnly)
+          case Lo => Some(ReimType.Mutable)
         }
       }
       tpe.directReimAnnotation.orElse(tpe.stripAnnots match {
@@ -56,7 +116,7 @@ object Reim {
         case tpe: TermRef =>
           val symbol = tpe.symbol
 
-          if ((tpe.prefix eq NoPrefix) && !insidePureBoundary(tpe.symbol)) Some(defn.ReadOnlyAnnot)
+          if ((tpe.prefix eq NoPrefix) && !insidePureBoundary(tpe.symbol)) Some(ReimType.ReadOnly)
           else if(symbol.is(Method) || symbol.hasAnnotation(defn.NonRepAnnot)) symbol.info.reimAnnotation(bound)
           else bound match {
             case Inferred =>
@@ -70,10 +130,10 @@ object Reim {
           }
         case tpe: ThisType =>
           var annot = getAnnotationOfThis(tpe.cls)
-          if ((annot eq defn.MutableAnnot) && !insidePureBoundary(tpe.cls)) annot = defn.PolyReadAnnot
+          if ((annot.cls eq defn.MutableAnnot) && !insidePureBoundary(tpe.cls)) annot = ReimType.PolyRead(tpe.cls)
           Some(annot)
         case tpe: SuperType => tpe.thistpe.reimAnnotation(bound)
-        case tpe: ConstantType => Some(defn.MutableAnnot)
+        case tpe: ConstantType => Some(ReimType.Mutable)
         case tpe: MethodParam => tpe.underlying.reimAnnotation(bound)
         // TODO: SkolemType
         case tpe: PolyParam => ctx.typerState.constraint.fullBounds(tpe).reimAnnotation(bound)
@@ -83,7 +143,7 @@ object Reim {
           case Lo => tpe.lo.reimAnnotation(Lo)
           case Hi => tpe.hi.reimAnnotation(Hi)
         }
-        case tpe: TypeAlias => tpe.underlying.reimAnnotation(bound)
+        //case tpe: TypeAlias => tpe.underlying.reimAnnotation(bound)  // covered by TypeBounds
         case tpe: ExprType => tpe.underlying.reimAnnotation(bound)
         case tpe: TypeVar => tpe.underlying.reimAnnotation(bound)
         case tpe: AndType => bound match {
@@ -96,9 +156,9 @@ object Reim {
           case _ =>
             Some(tpe.tp1.reimAnnotation(bound).get.glb(tpe.tp2.reimAnnotation(bound).get))
         }
-        case tpe: ClassInfo => Some(defn.MutableAnnot)
-        case NoPrefix => Some(defn.MutableAnnot)
-        case tpe: ErrorType => Some(defn.MutableAnnot)
+        case tpe: ClassInfo => Some(ReimType.Mutable)
+        case NoPrefix => Some(ReimType.Mutable)
+        case tpe: ErrorType => Some(ReimType.Mutable)
         case tpe: WildcardType => tpe.optBounds match {
           case info: TypeBounds => info.reimAnnotation(bound)
           case NoType => anyAnnot
@@ -112,16 +172,17 @@ object Reim {
   }
 
   implicit class TreeDecorator(val tree: tpd.Tree) extends AnyVal {
-    def withAnnotation(cls: ClassSymbol)(implicit ctx: Context) = tree.withType(tree.tpe.withAnnotation(cls))
+    def withAnnotation(reimType: ReimType)(implicit ctx: Context) = tree.withType(tree.tpe.withAnnotation(reimType))
   }
 
   implicit class SymbolDecorator(val symbol: Symbol) extends AnyVal {
-    def reimAnnotation(implicit ctx: Context): ClassSymbol =
+    def reimAnnotation(implicit ctx: Context): ReimType =
       reimAnnotationWithDefault(defn.MutableAnnot)
 
-    def reimAnnotationWithDefault(default: ClassSymbol)(implicit ctx: Context): ClassSymbol =
-      symbol.annotations.map(_.symbol).filter(isAnnotation(_))
-        .headOption.getOrElse(default).asInstanceOf[ClassSymbol]
+    def reimAnnotationWithDefault(default: ClassSymbol)(implicit ctx: Context): ReimType =
+      ReimType(
+        symbol.annotations.map(_.symbol).filter(isAnnotation(_))
+          .headOption.getOrElse(default).asInstanceOf[ClassSymbol], symbol)
 
     def getAnnotTrees(cls: ClassSymbol)(implicit ctx: Context): List[tpd.Tree] = {
       if (symbol.isCompleted) {
@@ -141,6 +202,10 @@ object Reim {
     }
 
     def isAnnotatedWith(cls: ClassSymbol)(implicit ctx: Context): Boolean = getAnnotTrees(cls).nonEmpty
+
+    def enclosingClassOrMethod(implicit ctx: Context): Symbol =
+      if (!symbol.exists || (symbol is Method) || symbol.isClass) symbol
+      else symbol.effectiveOwner.enclosingClassOrMethod
 
     def isVal(implicit ctx: Context): Boolean =
       !(symbol.isClass || symbol.isType || (symbol is Method))
@@ -166,7 +231,7 @@ object Reim {
   sealed abstract class PolyReadAttachments
   object Arg extends PolyReadAttachments
   object PolyReadNeedsToBeReadOnly extends PolyReadAttachments
-  object PolyReadNeedsToBePolyRead extends PolyReadAttachments
+  case class PolyReadNeedsToBePolyRead(origin: Symbol) extends PolyReadAttachments
 
   class ReimTyper extends Typer {
 
@@ -180,8 +245,8 @@ object Reim {
     private def checkValDefAnnot(tree: tpd.Tree)(implicit ctx: Context) = tree match {
       case tree: tpd.ValDef =>
         val annot = tree.tpe.reimAnnotation(Lo).get
-        if(annot == defn.MutableAnnot && !tree.symbol.hasAnnotation(defn.NonRepAnnot))
-          tree.withType(tree.tpe.withAnnotation(defn.PolyReadAnnot))
+        if((annot.cls eq defn.MutableAnnot) && !tree.symbol.hasAnnotation(defn.NonRepAnnot))
+          tree.withType(tree.tpe.withAnnotation(ReimType.PolyRead(tree.symbol)))
         else tree
       case _ => tree
     }
@@ -191,7 +256,7 @@ object Reim {
       /** Perform viewpoint adaptation on a method call. */
       def viewPointAdapt(tree: tpd.Tree): tpd.Tree =
         if ((tree.symbol is Method) && (!tree.isInstanceOf[tpd.DefTree])
-          && (tree.tpe.reimAnnotation(Hi).get == defn.PolyReadAnnot || tree.symbol.isConstructor)) {
+          && (tree.tpe.reimAnnotation(Hi).get.cls == defn.PolyReadAnnot || tree.symbol.isConstructor)) {
           def fun(tree: tpd.Tree): tpd.Tree = tree match {
             case _: tpd.Ident | _: tpd.Select => tree
             case tree: tpd.Apply => fun(tree.fun)
@@ -199,16 +264,20 @@ object Reim {
             case tree: tpd.Typed => fun(tree.expr)
           }
           val receiverType = fun(tree).tpe.stripAnnots.asInstanceOf[TermRef].prefix
-          var replacement = defn.MutableAnnot
+          var replacement = ReimType.Mutable
           // is the receiver parameter polyread and is the argument receiver non-mutable?
-          if(tree.symbol.reimAnnotation == defn.PolyReadAnnot) replacement = receiverType.reimAnnotation(Hi).get
+          if (tree.symbol.reimAnnotation.cls == defn.PolyReadAnnot) replacement = receiverType.reimAnnotation(Hi).get
           reim.println(s"reimAnnotation of ${tree.symbol} is ${tree.symbol.reimAnnotation}")
           // do any polyread parameters have non-mutable arguments?
           original match {
             case original: untpd.Apply => for(arg <- original.args) {
-              val attachment = arg.removeAttachment(PolyReadKey)
-              if(attachment.contains(PolyReadNeedsToBeReadOnly)) replacement = replacement.lub(defn.ReadOnlyAnnot)
-              if(attachment.contains(PolyReadNeedsToBePolyRead)) replacement = replacement.lub(defn.PolyReadAnnot)
+              arg.removeAttachment(PolyReadKey).foreach { attachment =>
+                replacement = attachment match {
+                  case PolyReadNeedsToBeReadOnly => ReimType.ReadOnly
+                  case PolyReadNeedsToBePolyRead(origin) => replacement.lub(ReimType.PolyRead(origin))
+                  case _ => replacement
+                }
+              }
             }
             case _ =>
           }
@@ -234,11 +303,12 @@ object Reim {
       if(dontCheck) tree else {
         val ptAnnot = pt.reimAnnotation(Lo).get
         val treeAnnot = tree.tpe.reimAnnotation(Hi).get
-        if(ptAnnot == defn.PolyReadAnnot && original.removeAttachment(PolyReadKey).contains(Arg)) {
-          if(treeAnnot == defn.ReadOnlyAnnot) original.putAttachment(PolyReadKey, PolyReadNeedsToBeReadOnly)
-          if(treeAnnot == defn.PolyReadAnnot) original.putAttachment(PolyReadKey, PolyReadNeedsToBePolyRead)
+        if((ptAnnot.cls eq defn.PolyReadAnnot) && original.removeAttachment(PolyReadKey).contains(Arg)) {
+          if(treeAnnot.cls eq defn.ReadOnlyAnnot) original.putAttachment(PolyReadKey, PolyReadNeedsToBeReadOnly)
+          if(treeAnnot.cls eq defn.PolyReadAnnot) original.putAttachment(PolyReadKey, PolyReadNeedsToBePolyRead(treeAnnot.origin))
           tree
         } else if (!((tree.tpe == pt) || (treeAnnot <:< ptAnnot))) {
+          println(s"${treeAnnot.origin} does not match ${ptAnnot.origin}")
           err.typeMismatch(tree, pt)
         } else tree
       }
@@ -278,7 +348,7 @@ object Reim {
     (pureBoundary eq NoSymbol) || symbol.isContainedIn(pureBoundary)
   }
 
-  def getAnnotationOfThis(thisSym: Symbol)(implicit ctx: Context): ClassSymbol = {
+  def getAnnotationOfThis(thisSym: Symbol)(implicit ctx: Context): ReimType = {
     val owner = ctx.owner
     assert(owner ne null)
     if (!owner.exists) {
@@ -289,7 +359,7 @@ object Reim {
       // I don't know of a condition to assert for case 2 (we would need the `Tree`), so we have
       // to comment the assertion for case 1 out.
 //      assert(thisSym is ModuleClass)
-      defn.MutableAnnot
+      ReimType.Mutable
     } else if (owner == thisSym || ((owner is Flags.Method) && (owner.owner == thisSym))) {
       if (owner.isCompleted) owner.reimAnnotation
       else {
@@ -300,12 +370,12 @@ object Reim {
         val completer = owner.completer.asInstanceOf[typer.Completer]
         val tree = completer.original.asInstanceOf[untpd.MemberDef]
         val annots = untpd.modsDeco(tree).mods.annotations.mapconserve(typer.typedAnnotation(_))
-        def annot(annots: List[tpd.Tree]): ClassSymbol = annots match {
-          case Nil => defn.MutableAnnot
+        def annot(annots: List[tpd.Tree]): ReimType = annots match {
+          case Nil => ReimType.Mutable
           case head :: tail =>
             val symbol = head.symbol
             // TODO: I think we need to test symbol.owner here, not symbol (which could be a constructor)... verify?
-            if (isAnnotation(symbol.owner)) symbol.owner.asInstanceOf[ClassSymbol] else annot(tail)
+            if (isAnnotation(symbol.owner)) ReimType(symbol.owner.asInstanceOf[ClassSymbol], thisSym) else annot(tail)
         }
         annot(annots)
       }
@@ -323,11 +393,10 @@ object Reim {
           val annot = tree.lhs.tpe.stripAnnots match {
             case tr: TermRef =>
               if (tr.prefix eq NoPrefix) {
-                if (insidePureBoundary(tr.symbol)) defn.MutableAnnot else defn.ReadOnlyAnnot
+                if (insidePureBoundary(tr.symbol)) ReimType.Mutable else ReimType.ReadOnly
               } else tr.prefix.reimAnnotation(Hi).get
           }
-          if(annot == defn.MutableAnnot) tree
-          else errorTree(tree, s"assignment to field of @${annot.name} reference")
+          if (annot.isMutable) tree else errorTree(tree, s"assignment to field of @${annot.cls.name} reference")
       }
   }
 
@@ -369,15 +438,15 @@ object Reim {
           }
         }
       }
-      
+
       private def checkReceiver(fun: tpd.Tree, tree: tpd.Tree)(implicit ctx: Context) = {
         val receiverType = tree.tpe.stripAnnots.asInstanceOf[TermRef].prefix
         val receiverAnnot = receiverType.reimAnnotation(Hi).get
         val methodSym = tree.symbol
         val methodAnnot = methodSym.reimAnnotation
-        if(methodAnnot == defn.MutableAnnot && receiverAnnot != defn.MutableAnnot) {
+        if (methodAnnot.isMutable && !receiverAnnot.isMutable) {
           // TODO: upgrade to an error when pure-related defaults are correctly implemented
-          ctx.warning(s"call of $methodSym on ${methodSym.enclosingClass} taking @${methodAnnot.name} this on @${receiverAnnot.name} receiver", tree.pos)
+          ctx.warning(s"call of $methodSym on ${methodSym.enclosingClass} taking @${methodAnnot.cls.name} this on @${receiverAnnot.cls.name} receiver", tree.pos)
           tree
           //errorTree(tree, s"call of $methodSym on ${methodSym.enclosingClass} taking @${methodAnnot.name} this on @${receiverAnnot.name} receiver")
         } else tree
@@ -412,22 +481,23 @@ object Reim {
       }
 
       override def transformTemplate(tree: tpd.Template)(implicit ctx: Context, info: TransformerInfo): tpd.Tree = {
-        def adjustedAnnotation(symbol: Symbol): ClassSymbol =
-          if(symbol.is(Method)) symbol.reimAnnotation
-          else defn.ReadOnlyAnnot
+        def adjustedAnnotation(symbol: Symbol): ReimType =
+          if (symbol is Method) symbol.reimAnnotation
+          else ReimType.ReadOnly
         val cursor = new OverridingPairs.Cursor(ctx.owner)
         while (cursor.hasNext) {
           val overridingAnnot = adjustedAnnotation(cursor.overriding)
           val overriddenAnnot = adjustedAnnotation(cursor.overridden)
           if(!(overriddenAnnot <:< overridingAnnot))
-            ctx.error(s"${cursor.overriding} with @${overridingAnnot.name} this cannot override ${cursor.overridden} with @${overriddenAnnot.name} this", cursor.overriding.pos)
+            ctx.error(s"${cursor.overriding} with @${overridingAnnot.cls.name} this cannot override ${cursor.overridden} with @${overriddenAnnot.cls.name} this", cursor.overriding.pos)
           // If a val overrides a method, the method's return type must be at least @polyread, since the val will be viewpoint-adapted.
-          if(cursor.overriding.isVal && !cursor.overriding.hasAnnotation(defn.NonRepAnnot))
-            if(!(defn.PolyReadAnnot <:< cursor.overridden.info.finalResultType.reimAnnotation(Lo).get))
+          if(cursor.overriding.isVal && !cursor.overriding.hasAnnotation(defn.NonRepAnnot)) {
+            if (cursor.overridden.info.finalResultType.reimAnnotation(Lo).get.isMutable)
               ctx.error(s"${cursor.overriding} cannot override ${cursor.overridden} that could return @mutable", cursor.overriding.pos)
-            else if(cursor.overridden.is(Method) && defn.PolyReadAnnot != cursor.overridden.reimAnnotation)
-              // TODO: upgrade to an error when pure-related defaults are correctly implemented
+            else if (cursor.overridden.is(Method) &&  (cursor.overridden.reimAnnotation.cls ne defn.PolyReadAnnot))
+            // TODO: upgrade to an error when pure-related defaults are correctly implemented
               ctx.warning(s"${cursor.overriding} cannot override ${cursor.overridden} that does not have @polyread this", cursor.overriding.pos)
+          }
 
           checkPurityOverride(cursor.overriding, cursor.overridden)
 
