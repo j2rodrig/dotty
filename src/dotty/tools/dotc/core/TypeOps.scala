@@ -312,6 +312,9 @@ trait TypeOps { this: Context =>
       case tp: TypeRef =>
         if (tp.symbol.info.isAlias) normalizeToRef(tp.info.bounds.hi)
         else tp
+      case tp: AnnotatedType =>
+        println(s"*** AnnotatedType on parent ${tp.show} of class $cls ***")
+        normalizeToRef(tp.underlying)
       case ErrorType =>
         defn.AnyClass.typeRef
       case _ =>
