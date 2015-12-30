@@ -7,6 +7,7 @@ import Periods._
 import Symbols._
 import Types._
 import Scopes._
+import DotMod._
 import typer.{FrontEnd, Typer, Mode, ImportInfo, RefChecks}
 import reporting.{Reporter, ConsoleReporter}
 import Phases.Phase
@@ -109,7 +110,7 @@ class Compiler {
     rootScope.enter(ctx.definitions.RootPackage)(bootstrap)
     val start = bootstrap.fresh
       .setOwner(defn.RootClass)
-      .setTyper(new Typer)
+      .setTyper(new DotModTyper)  //.setTyper(new Typer)
       .setMode(Mode.ImplicitsEnabled)
       .setTyperState(new MutableTyperState(ctx.typerState, rootReporter(ctx), isCommittable = true))
     ctx.definitions.init(start) // set context of definitions to start

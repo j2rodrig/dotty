@@ -486,6 +486,14 @@ class Definitions {
   lazy val SetterMetaAnnotType = ctx.requiredClassRef("scala.annotation.meta.setter")
   def SetterMetaAnnot(implicit ctx: Context) = SetterMetaAnnotType.symbol.asClass
 
+  // Side-effect Limitation Types
+  lazy val MutableType = ctx.requiredClassRef("scala.annotation.mutable")
+  def MutableAnnotType(implicit ctx: Context) = MutableType.symbol.asClass
+  lazy val PolyReadType = ctx.requiredClassRef("scala.annotation.polyread")
+  def PolyReadAnnotType(implicit ctx: Context) = PolyReadType.symbol.asClass
+  lazy val ReadonlyType = ctx.requiredClassRef("scala.annotation.readonly")
+  def ReadonlyAnnotType(implicit ctx: Context) = ReadonlyType.symbol.asClass
+
   // convenient one-parameter method types
   def methOfAny(tp: Type) = MethodType(List(AnyType), tp)
   def methOfAnyVal(tp: Type) = MethodType(List(AnyValType), tp)
