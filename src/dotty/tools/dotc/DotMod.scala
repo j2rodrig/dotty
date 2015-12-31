@@ -8,6 +8,7 @@ import core.Annotations._
 import core.Contexts._
 import core.Decorators._
 import core.DenotTransformers._
+import core.Flags._
 import core.Phases._
 import core.Symbols._
 import core.Types._
@@ -49,13 +50,48 @@ object DotMod {
 
 
   class DotModTyper extends Typer {
+
+    def isGetter(sym: Symbol)(implicit ctx: Context): Boolean = {
+      // A symbol refers to a getter method if:
+      //  - the symbol has no parameters (ExprType)
+      //  - or the symbol has one empty parameter list and the name starts with "get" + S where S does not start with a lower-case letter
+      //  - or the symbol is annotated with @polyread
+      if (!(sym is Method)) false
+      else if (sym.annotations.exists(_.matches(defn.PolyReadAnnotType))) true
+      else sym.info match {
+        case _: ExprType => true
+        case tpe: MethodType =>
+          tpe.paramNames.isEmpty && sym.name.startsWith("get") && (sym.name.length == 3 || !sym.name.toString.charAt(3).isLower)
+        // TODO: PolyType?
+      }
+    }
+
     override def adapt(tree0: tpd.Tree, pt: Type, original: untpd.Tree)(implicit ctx: Context): tpd.Tree = {
 
       def viewpointAdapt(tree: Tree): Tree = {
-        if (tree.isInstanceOf[Apply]) {
-          // TODO viewpoint adaptation of getter method applications
+        if (!tree.hasType || tree.tpe.isError || !tree.isInstanceOf[Select] || !isGetter(tree.symbol))
           tree
-        } else tree
+        else {
+          println(tree + " => " + fun(tree).tpe)
+
+          def fun(tree: Tree): Tree = tree match {
+            case _: Ident | _: Select => tree
+            case tree: Apply => fun(tree.fun)
+            case tree: TypeApply => fun(tree.fun)
+            case tree: Typed => fun(tree.expr)
+          }
+
+          val functionType = fun(tree).tpe
+          if (functionType.isError) tree
+          else {
+            val receiverType = functionType.stripAnnots.asInstanceOf[TermRef].prefix
+            if (receiverType.isError) tree
+            else {
+              //println("       (apply getter)  " + receiverType + " . " + tree.symbol)
+              tree
+            }
+          }
+        }
       }
 
       val tree = viewpointAdapt(super.adapt(tree0, pt, original))
