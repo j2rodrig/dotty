@@ -49,6 +49,9 @@ object DotMod {
   }
 
 
+  //def getAnnotatedMutabilityBound(mtp: Type): ClassSymbol
+
+
   class DotModTyper extends Typer {
 
     def isGetter(sym: Symbol)(implicit ctx: Context): Boolean = {
@@ -65,6 +68,10 @@ object DotMod {
         // TODO: PolyType?
       }
     }
+
+    //def intersectWithMutability(tp: Type, mtp: Type): Type = {
+
+    //}
 
     override def adapt(tree0: tpd.Tree, pt: Type, original: untpd.Tree)(implicit ctx: Context): tpd.Tree = {
 

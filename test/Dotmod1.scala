@@ -1,4 +1,4 @@
-import scala.annotation.polyread
+package dotty
 
 trait Dotmod1 {
   def x: Int = 2
