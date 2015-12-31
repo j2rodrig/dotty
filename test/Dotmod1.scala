@@ -3,9 +3,13 @@ package dotty
 trait Dotmod1 {
   def x: Int = 2
   @polyread def y()() = x
+  def z[T]: Int = 2
+  @polyread def z1[T >: Int](): T = 2
 
   val n = x   // tree type: Select(this,x)
   val n3 = y()()
+  val n4 = z[AnyVal]
+  val n5 = z1[AnyVal]
 }
 trait Dotmod2 extends Dotmod1 {
   override val x = 3

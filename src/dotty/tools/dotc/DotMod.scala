@@ -49,8 +49,11 @@ object DotMod {
   }
 
 
-  //def getAnnotatedMutabilityBound(mtp: Type): ClassSymbol
+  //def getAnnotatedLowerMutabilityBound(tp: Type): ClassSymbol = {
 
+  //}
+
+  //def getPolymorphicMutabilityVars(tp: Type): List[Type] =
 
   class DotModTyper extends Typer {
 
@@ -61,11 +64,23 @@ object DotMod {
       //  - or the symbol is annotated with @polyread
       if (!(sym is Method)) false
       else if (sym.annotations.exists(_.matches(defn.PolyReadAnnotType))) true
-      else sym.info match {
-        case _: ExprType => true
-        case tpe: MethodType =>
-          tpe.paramNames.isEmpty && sym.name.startsWith("get") && (sym.name.length == 3 || !sym.name.toString.charAt(3).isLower)
-        // TODO: PolyType?
+      else {
+        def isGetterMethodType(tpe: Type): Boolean = {
+          tpe match {
+            case _: ExprType => true
+            case tpe: MethodType =>
+              tpe.paramNames.isEmpty && sym.name.startsWith("get") && (sym.name.length == 3 || !sym.name.toString.charAt(3).isLower)
+            case tpe: PolyType =>
+              // If we've got a polymorphic type, then one of two cases applies:
+              //  - the result is a method/expression that may be a getter
+              //  - or the result is something else, in which case this PolyType is an expression, which is treated as a getter
+              tpe.resType match {
+                case _: ExprType | _: MethodType | _: PolyType => isGetterMethodType(tpe.resType)
+                case _ => true
+              }
+          }
+        }
+        isGetterMethodType(sym.info)
       }
     }
 
@@ -79,7 +94,7 @@ object DotMod {
         if (!tree.hasType || tree.tpe.isError || !tree.isInstanceOf[Select] || !isGetter(tree.symbol))
           tree
         else {
-          println(tree + " => " + fun(tree).tpe)
+          //println(tree + " => " + fun(tree).tpe + " => " + tree.symbol.info.resultType)
 
           def fun(tree: Tree): Tree = tree match {
             case _: Ident | _: Select => tree
