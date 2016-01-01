@@ -1,10 +1,24 @@
 package dotty
 
+trait D0[T0 >: AnyRef @mutable <: Any @readonly] {
+}
+
+trait D1 {
+  type T1
+}
+
 trait Dotmod1 {
   def x: Int = 2
   @polyread def y()() = x
   def z[T]: Int = 2
   @polyread def z1[T >: Int](): T = 2
+
+  def qwe: Dotmod1 = this
+  val qwe2: Dotmod1 = this
+  def rty: Dotmod1 = this
+
+  val x5 = qwe.rty
+  val x6 = qwe2.rty
 
   val n = x   // tree type: Select(this,x)
   val n3 = y()()
