@@ -1,5 +1,7 @@
 package dotty
 
+import scala.annotation.meta._
+
 trait D0[T0 >: AnyRef @mutable <: Any @readonly] {
 }
 
@@ -9,9 +11,9 @@ trait D1 {
 
 trait Dotmod1 {
   def x: Int = 2
-  @polyread def y()() = x
+  @getter def y()() = x
   def z[T]: Int = 2
-  @polyread def z1[T >: Int](): T = 2
+  @getter def z1[T >: Int](): T = 2
 
   def qwe: Dotmod1 = this
   val qwe2: Dotmod1 = this

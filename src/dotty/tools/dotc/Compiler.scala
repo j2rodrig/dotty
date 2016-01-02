@@ -111,6 +111,7 @@ class Compiler {
     val start = bootstrap.fresh
       .setOwner(defn.RootClass)
       .setTyper(new DotModTyper)  //.setTyper(new Typer)
+      .setTypeComparerFn(new DotModTypeComparer(_))
       .setMode(Mode.ImplicitsEnabled)
       .setTyperState(new MutableTyperState(ctx.typerState, rootReporter(ctx), isCommittable = true))
     ctx.definitions.init(start) // set context of definitions to start

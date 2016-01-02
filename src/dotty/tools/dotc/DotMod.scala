@@ -15,6 +15,8 @@ import core.Types._
 import transform.TreeTransforms._
 import typer.Typer
 
+import scala.annotation.meta.getter
+
 // Philosophical approach:
 //  - Add @readonly to every type that I don't want to be mutable.
 //
@@ -28,32 +30,32 @@ import typer.Typer
 //
 // A RefChecks phase can check constructibility of parent classes.
 // And overriding, etc.
+//
+// TODO An alternative to @polyread:
+// TODO  @getter as a method annotation (already exists in the standard library as annotation.meta.getter)!
+// TODO  @rothis as the viewpoint-adapted mutability of a this-prefixed field selection in a getter method.
 
 object DotMod {
 
   def isRecognizedTypeAnnotation(annot: Annotation)(implicit ctx: Context) = {
     val sym = annot.symbol
-    (sym.derivesFrom(defn.MutableAnnotType)
-      || sym.derivesFrom(defn.ReadonlyAnnotType)
-      || sym.derivesFrom(defn.PolyReadAnnotType))
+    sym.derivesFrom(defn.MutableAnnot) || sym.derivesFrom(defn.RoThisAnnot) || sym.derivesFrom(defn.ReadonlyAnnot)
   }
 
   def canAnnotateMethod(annot: Annotation)(implicit ctx: Context) = {
-    (annot.symbol == defn.MutableAnnotType
-      || annot.symbol == defn.ReadonlyAnnotType
-      || annot.symbol == defn.PolyReadAnnotType)
+    val sym = annot.symbol
+    sym.derivesFrom(defn.MutableAnnot) || sym.derivesFrom(defn.ReadonlyAnnot) || sym.derivesFrom(defn.GetterMetaAnnot)
   }
 
   def canAnnotateClass(annot: Annotation)(implicit ctx: Context) = {
-    (annot.symbol == defn.MutableAnnotType
-      || annot.symbol == defn.ReadonlyAnnotType)
+    val sym = annot.symbol
+    sym.derivesFrom(defn.MutableAnnot) || sym.derivesFrom(defn.ReadonlyAnnot)
   }
 
 
-  class PermissionType {
-    // A permission type is a (possibly polymorphic) type that holds mutability information.
+  def createAnnotation(fromSym: Symbol)(implicit ctx: Context): Annotation = {
+    new ConcreteAnnotation(tpd.New(fromSym.typeRef, Nil))
   }
-
 
   /*sealed abstract class BoundSpec
   case object Hi extends BoundSpec
@@ -123,12 +125,12 @@ object DotMod {
   }*/
 
   def isGetter(sym: Symbol)(implicit ctx: Context): Boolean = {
-    // A symbol refers to a getter method if:
+    // A method symbol refers to a getter method if:
     //  - the symbol has no parameters (ExprType)
     //  - or the symbol has one empty parameter list and the name starts with "get" + S where S does not start with a lower-case letter
-    //  - or the symbol is annotated with @polyread
+    //  - or the symbol is annotated with @getter
     if (!(sym is Method)) false
-    else if (sym.annotations.exists(_.matches(defn.PolyReadAnnotType))) true
+    else if (sym.annotations.exists(_.matches(defn.GetterMetaAnnot))) true
     else {
       def isGetterMethodType(tpe: Type): Boolean = {
         tpe match {
@@ -149,8 +151,59 @@ object DotMod {
     }
   }
 
-  /// Is the annotation symbol sym1 a subtype of sym2?
-  def isSubMutability(sym1: Symbol, sym2: Symbol)(implicit ctx: Context): Boolean = {
+  def defaultMutabilityType(implicit ctx: Context): Type = {
+    AnnotatedType(defn.AnyType, createAnnotation(defn.MutableAnnot))
+  }
+
+  /**
+   * Finds the mutability of the outer-accessor path traversed to reach a symbol sym from
+   * the current location in the source code.
+   */
+  def getEnvironmentPathMutabilityTo(sym: Symbol)(implicit ctx: Context): Type = {
+    // TODO find common owner of current (context) location and sym
+    // TODO find all annotated owner symbols between current location and common owner, computing adapted mutability
+
+    defaultMutabilityType
+  }
+
+  /**
+   * Makes a best-effort attempt to extract the mutability components of a type.
+   *
+   * If no mutability information is extractable, returns defaultMutabilityType.
+   */
+  def getMutabilityOf(tp: Type)(implicit ctx: Context): Type = {
+
+    /**
+     * If the annotated type atp has an underlying type Any, then
+     * atp is already an extractable mutability type, so return it.
+     * Otherwise, create an extractable mutability type with the given annotation.
+     */
+    def reuseOrCreate(atp: AnnotatedType) = {
+      if (atp.underlying.matches(defn.AnyType))
+        atp
+      else
+        AnnotatedType(defn.AnyType, atp.annot)
+    }
+
+    defaultMutabilityType   // TODO implement
+
+    /*tp match {
+      case tp: AnnotatedType =>
+        if (isRecognizedTypeAnnotation(tp.annot)) reuseOrCreate(tp)
+        else getMutabilityOf(tp.underlying)
+
+      case tp: TermRef =>
+        val prefixMutability =
+          if (tp.prefix eq NoPrefix) getEnvironmentPathMutabilityTo(tp.symbol)
+          else getMutabilityOf(tp.prefix)
+        val underlyingMutability =
+          getMutabilityOf(tp.underlying)
+    }*/
+  }
+
+
+  /*/// Is the annotation symbol sym1 a subtype of sym2?
+  def isSubMutabilityDep(sym1: Symbol, sym2: Symbol)(implicit ctx: Context): Boolean = {
     if (sym1.derivesFrom(defn.MutableAnnotType)) true
     else if (sym2.derivesFrom(defn.MutableAnnotType)) false
     else if (sym1.derivesFrom(defn.PolyReadAnnotType)) true
@@ -159,7 +212,7 @@ object DotMod {
   }
 
   /// Is tp1 a subtype of the given annotation symbol?
-  def isSubMutability(tp1: Type, sym2: Symbol)(implicit ctx: Context): Boolean = {
+  def isSubMutabilityDep(tp1: Type, sym2: Symbol)(implicit ctx: Context): Boolean = {
     // TODO I'm not certain I actually need AndType, OrType, or MethodicType (since they do not directly involve
     // TODO  viewpoint adaptation, and isSubType should already recurse through the necessary types).
     // TODO On the contrary, AndType and OrType might be buried underneath (e.g.) a TermRef prefix, which
@@ -170,9 +223,9 @@ object DotMod {
 
       case tp1: AnnotatedType =>
         if (isRecognizedTypeAnnotation(tp1.annot))
-          isSubMutability(tp1.annot.symbol, sym2)  // found an annotation
+          isSubMutabilityDep(tp1.annot.symbol, sym2)  // found an annotation
         else
-          isSubMutability(tp1.underlying, sym2)    // ignore the annotation, and check underlying
+          isSubMutabilityDep(tp1.underlying, sym2)    // ignore the annotation, and check underlying
 
       case tp1: TermRef =>
         if (tp1.symbol is Method) false   // a methodic type cannot be a subtype of a value type
@@ -181,33 +234,33 @@ object DotMod {
           // see if the union of tp2's prefix and underlying type is a subtype of sym2.
           // reason: the viewpoint-adapted result has only those permissions common to the prefix and underlying type.
           val prefixIsSubtype: Boolean =
-            if (tp1.prefix ne NoPrefix) isSubMutability(tp1.prefix, sym2)
+            if (tp1.prefix ne NoPrefix) isSubMutabilityDep(tp1.prefix, sym2)
             else {
               // TODO viewpoint adaptation for a reach into the enclosing environment
               true
             }
-          val underlyingIsSubtype = isSubMutability(tp1.underlying, sym2)
+          val underlyingIsSubtype = isSubMutabilityDep(tp1.underlying, sym2)
           prefixIsSubtype && underlyingIsSubtype
         }
 
       case tp1: ThisType =>
         // TODO viewpoint adaptation for a reach into the enclosing environment
-        isSubMutability(tp1.underlying, sym2)
+        isSubMutabilityDep(tp1.underlying, sym2)
 
       case tp1: SuperType =>
         // do viewpoint adaptation on reach into enclosing environment via thistpe
-        isSubMutability(tp1.thistpe, sym2) && isSubMutability(tp1.supertpe, sym2)
+        isSubMutabilityDep(tp1.thistpe, sym2) && isSubMutabilityDep(tp1.supertpe, sym2)
 
       case AndType(tp11, tp12) =>
-        isSubMutability(tp11, sym2) || isSubMutability(tp12, sym2)
+        isSubMutabilityDep(tp11, sym2) || isSubMutabilityDep(tp12, sym2)
 
       case OrType(tp11, tp12) =>
-        isSubMutability(tp11, sym2) && isSubMutability(tp12, sym2)
+        isSubMutabilityDep(tp11, sym2) && isSubMutabilityDep(tp12, sym2)
 
       case tp1: MethodicType =>
-        isSubMutability(tp1.finalResultType, sym2)
+        isSubMutabilityDep(tp1.finalResultType, sym2)
 
-      case tp1: TypeProxy => isSubMutability(tp1.underlying, sym2)
+      case tp1: TypeProxy => isSubMutabilityDep(tp1.underlying, sym2)
 
     }
   }
@@ -220,15 +273,15 @@ object DotMod {
    * @param tp2
    * @return
    */
-  def isSubMutability(tp1: Type, tp2: Type)(implicit ctx: Context): Boolean = {
+  def isSubMutabilityDep(tp1: Type, tp2: Type)(implicit ctx: Context): Boolean = {
 
     tp2 match {
 
       case tp2: AnnotatedType =>
         if (isRecognizedTypeAnnotation(tp2.annot))
-          isSubMutability(tp1, tp2.annot.symbol)  // found an annotation
+          isSubMutabilityDep(tp1, tp2.annot.symbol)  // found an annotation
         else
-          isSubMutability(tp1, tp2.underlying)    // ignore the annotation, and check underlying TODO already checked by isSubType
+          isSubMutabilityDep(tp1, tp2.underlying)    // ignore the annotation, and check underlying TODO already checked by isSubType
 
       case tp2: TermRef =>
         if (tp2.symbol is Method) {
@@ -240,53 +293,144 @@ object DotMod {
           // TODO   isSubMutability), then I really only need to check TermRefs, ThisTypes/SuperTypes, and AnnotatedTypes.
           //if (isGetter(tp2.symbol))
 
-          isSubMutability(tp1, tp2.underlying)  // no adaptation of non-getter methods
+          isSubMutabilityDep(tp1, tp2.underlying)  // no adaptation of non-getter methods
         } else {
           // viewpoint adaptation of field reads.
           // see if tp1 is a subtype of the union of tp2's prefix and underlying type.
           // reason: the viewpoint-adapted result has only those permissions common to the prefix and underlying type.
           // TODO check that tp1 <:< tp2.prefix (which wouldn't normally be checked by the type comparer)
           val isSubtypeOfPrefix: Boolean =
-            if (tp2.prefix ne NoPrefix) isSubMutability(tp1, tp2.prefix)
+            if (tp2.prefix ne NoPrefix) isSubMutabilityDep(tp1, tp2.prefix)
             else {
               // TODO viewpoint adaptation for a reach into the enclosing environment
               true
             }
-          val isSubtypeOfUnderlying = isSubMutability(tp1, tp2.underlying)
+          val isSubtypeOfUnderlying = isSubMutabilityDep(tp1, tp2.underlying)
           isSubtypeOfPrefix || isSubtypeOfUnderlying
         }
 
       case tp2: ThisType =>
         // TODO viewpoint adaptation for a reach into the enclosing environment
-        isSubMutability(tp1, tp2.underlying)
+        isSubMutabilityDep(tp1, tp2.underlying)
 
       case tp2: SuperType =>
         // do viewpoint adaptation on reach into enclosing environment via thistpe
-        isSubMutability(tp1, tp2.thistpe) || isSubMutability(tp1, tp2.supertpe)
+        isSubMutabilityDep(tp1, tp2.thistpe) || isSubMutabilityDep(tp1, tp2.supertpe)
 
       case AndType(tp21, tp22) =>
-        isSubMutability(tp1, tp21) && isSubMutability(tp1, tp22)
+        isSubMutabilityDep(tp1, tp21) && isSubMutabilityDep(tp1, tp22)
 
       case OrType(tp21, tp22) =>
-        isSubMutability(tp1, tp21) || isSubMutability(tp1, tp22)
+        isSubMutabilityDep(tp1, tp21) || isSubMutabilityDep(tp1, tp22)
 
       case tp2: MethodicType =>
         // check the (possibly viewpoint adapted) final result type.
         // TODO: anything else needed here?
-        isSubMutability(tp1, tp2.finalResultType)
+        isSubMutabilityDep(tp1, tp2.finalResultType)
 
     }
+  }*/
+
+  // I need a Type Comparer that also checks mutability.
+  // I can instantiate a new type comparer with a context, which should make it possible to use in the typer phase.
+
+  /**
+   * A TypeComparer that also compares mutability.
+   * @param initCtx the context the comparer operates within
+   */
+  class DotModTypeComparer(initCtx: Context) extends TypeComparer(initCtx) {
+
+    /**
+     * We keep around an ordinary type comparer, which is used when a non-mutability-related
+     * type comparison is required.
+     */
+    val ordinaryTypeComparer = new TypeComparer(initCtx)
+
+    /**
+     * Is mutability annotation symbol sym1 considered a subtype of mutability annotation symbol sym2?
+     */
+    def isSubMutability(sym1: Symbol, sym2: Symbol): Boolean = {
+      if (sym1.derivesFrom(defn.MutableAnnot)) true
+      else if (sym2.derivesFrom(defn.MutableAnnot)) false
+      else if (sym1.derivesFrom(defn.RoThisAnnot)) true
+      else if (sym2.derivesFrom(defn.RoThisAnnot)) false
+      else true  // both symbols are @readonly
+    }
+
+    /**
+     * Is the type tp1 considered a subtype of the mutability annotation symbol mutSym?
+     */
+    protected def isSubMutability(tp1: Type, mutSym: Symbol): Boolean = {
+      tp1 match {
+
+        case tp1: AnnotatedType =>
+          if (isRecognizedTypeAnnotation(tp1.annot))
+            isSubMutability(tp1.annot.symbol, mutSym)  // found an annotation--check that it is compatible with mutSym
+          else
+            isSubMutability(tp1.underlying, mutSym)    // ignore the annotation, and check underlying
+
+        case tp1: TermRef if !(tp1.symbol is Method) =>  // method selections are not viewpoint adapated here
+          // viewpoint adaptation of field reads.
+          // see if mutSym represents a supertype of the union of tp1's prefix and underlying type.
+          // reason: the viewpoint-adapted result has only those permissions common to the prefix and underlying type.
+          val prefixMutability =
+            if (tp1.prefix eq NoPrefix) getEnvironmentPathMutabilityTo(tp1.symbol)
+            else getMutabilityOf(tp1.prefix)
+          isSubMutability(prefixMutability, mutSym) && isSubMutability(tp1.underlying, mutSym)
+
+        //TODO case tp1: ThisType =>
+
+        case _ => true   // assume a default of @mutable, which is compatible with any passed symbol
+      }
+    }
+
+    /**
+     * Is the type tp1 a subtype of tp2, with respect to ordinary typing rules and to mutability rules?
+     */
+    protected def isSubTypeWithMutability(tp1: Type, tp2: Type): Boolean = {
+      // First check for key types where ordinary subtyping behaviour should be is overridden.
+      // Then call either ordinaryTypeComparer.isSubType or super.isSubType, depending on
+      //   whether subsequent comparisons should take mutability into account.
+      tp2 match {
+
+        case tp2: AnnotatedType =>
+          if (isRecognizedTypeAnnotation(tp2.annot))
+            isSubMutability(tp1, tp2.annot.symbol) &&     // found an annotation--check that tp1 is compatible with it
+              ordinaryTypeComparer.topLevelSubType(tp1, tp2.underlying)  // do underlying types check without annotations?
+          else
+            isSubTypeWithMutability(tp1, tp2.underlying)  // ignore the annotation, and check underlying
+
+        case tp2: TermRef if !(tp2.symbol is Method) =>   // method selections are not viewpoint adapted here
+          // viewpoint adaptation of field reads.
+          // see if tp1 is a subtype of the union of tp2's prefix and underlying type.
+          // reason: the viewpoint-adapted result has only those permissions common to the prefix and underlying type.
+          val prefixMutability =
+            if (tp2.prefix eq NoPrefix) getEnvironmentPathMutabilityTo(tp2.symbol)
+            else getMutabilityOf(tp2.prefix)
+
+          // is tp1 compatible with either the prefix mutability OR tp2 with annotations?
+          // we do it this way so we don't have to separate out the (possibly complicated) mutability from tp2.
+          val isMutabilityOk = isSubTypeWithMutability(tp1, prefixMutability) || super.isSubType(tp1, tp2)
+          
+          // is tp1's mutability compatible with tp2, AND is unannotated tp1 compatible with unannotated tp2?
+          isMutabilityOk && ordinaryTypeComparer.topLevelSubType(tp1, tp2)
+
+        //TODO case tp2: ThisType =>
+
+        case _ => super.isSubType(tp1, tp2)  // default to ordinary subtype handling for other types
+      }
+    }
+    
+    override def isSubType(tp1: Type, tp2: Type): Boolean = isSubTypeWithMutability(tp1, tp2)
+
+    override def copyIn(ctx: Context): TypeComparer = new DotModTypeComparer(ctx)
   }
 
   class DotModTyper extends Typer {
 
-    //def intersectWithMutability(tp: Type, mtp: Type): Type = {
-
-    //}
-
     override def adapt(tree0: tpd.Tree, pt: Type, original: untpd.Tree)(implicit ctx: Context): tpd.Tree = {
 
-      if (tree0.isInstanceOf[Select]) println("Select " + tree0.symbol + ": " + tree0.tpe)
+      //if (tree0.isInstanceOf[Select]) println("Select " + tree0.symbol + ": " + tree0.tpe)
       //if (tree0.isInstanceOf[TypeDef]) println("TypeDef " + tree0.symbol + ": " + tree0.tpe)
       //if (tree0.isInstanceOf[TypTree]) println("TypTree " + tree0.symbol + ": " + tree0.tpe)
 
