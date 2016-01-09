@@ -3,6 +3,8 @@
 *.log
 *~
 
+temp/
+
 # sbt specific
 dist/*
 target/

@@ -56,6 +56,7 @@ class Run(comp: Compiler)(implicit ctx: Context) {
     ctx.usePhases(phases)
     for (phase <- ctx.allPhases)
       if (!ctx.reporter.hasErrors) {
+        // ctx.println(s"[$phase]")
         if (ctx.settings.verbose.value) ctx.println(s"[$phase]")
         units = phase.runOn(units)
         def foreachUnit(op: Context => Unit)(implicit ctx: Context): Unit =
