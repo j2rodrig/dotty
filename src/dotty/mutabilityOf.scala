@@ -5,4 +5,4 @@ package dotty
  *
  * This annotation is used by the DotMod compiler extension.
  */
-class mutabilityOf(ref: Any @Readonly) extends scala.annotation.StaticAnnotation
+class mutabilityOf(ref: Any) extends scala.annotation.StaticAnnotation
