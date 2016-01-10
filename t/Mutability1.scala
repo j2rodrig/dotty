@@ -3,6 +3,7 @@ package dotty
 trait Mutability1 {
 
   type T = Mutability1
+  type TR = Mutability1 @readonly
 
   val x: T
   val x1: T @readonly
@@ -17,15 +18,16 @@ trait Mutability1 {
 
   type U0 >: Mutable
   type U1
-  type U2 >: Any @readonly
+  type U2 >: TR
 
   val a: T with U0 = x    // OK
   val a1: T with U0 = x1  // ERROR
   val a2: T with U1 = x   // ERROR
   val a3: T with U1 = x1  // ERROR
-  val a4: T with U2 = x   // OK
-  val a5: T with U2 = x1  // OK
+  val a4: T@readonly with T = x1   // ERROR: intersection with mutable T produces mutable type
+  val a5: U2 = x1  // OK
 
-  val b4: T = a4
-  val b5: T = a5
+  val b5a: Any = a5  // OK
+  val b5b: Any @mutable = a5  // ERROR
+  val b5c: Any with Mutable = a5  // ERROR
 }

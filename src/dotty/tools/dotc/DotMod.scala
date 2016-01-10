@@ -92,6 +92,10 @@ object DotMod {
      */
     def addMutableIntersectionIfRequired(tp: Type)(implicit ctx: Context): Type
 
+    def upperConcreteBound(implicit ctx: Context): Symbol
+
+    def lowerConcreteBound(implicit ctx: Context): Symbol
+
     /**
      * Finds an upper bound of this and another mutability.
      */
@@ -156,12 +160,14 @@ object DotMod {
       else tp
     }
     def upperConcreteBound(implicit ctx: Context): Symbol = {
-      if (getBounds eq NoType) defn.MutableAnnot
-      else defn.ReadonlyAnnot  // todo may return MutableAnnot if upper bound is mutable
+      val bounds = getBounds
+      if (bounds eq NoType) defn.MutableAnnot
+      else bounds.asInstanceOf[TypeBounds].hi.getMutability.upperConcreteBound
     }
     def lowerConcreteBound(implicit ctx: Context): Symbol = {
-      if (getBounds eq NoType) defn.ReadonlyAnnot
-      else defn.MutableAnnot  // todo may return ReadonlyAnnot if lower bound is readonly
+      val bounds = getBounds
+      if (bounds eq NoType) defn.ReadonlyAnnot
+      else bounds.asInstanceOf[TypeBounds].lo.getMutability.lowerConcreteBound
     }
   }
 
@@ -187,6 +193,8 @@ object DotMod {
       if (tp.isInstanceOf[ValueType]) AndType(tp, defn.RoThisType)
       else tp
     }
+    def upperConcreteBound(implicit ctx: Context): Symbol = defn.ReadonlyAnnot
+    def lowerConcreteBound(implicit ctx: Context): Symbol = defn.MutableAnnot
   }
 
   /**
@@ -208,6 +216,8 @@ object DotMod {
       if ((symbol eq defn.MutableAnnot) && tp.isInstanceOf[ValueType]) AndType(tp, defn.MutableType)
       else tp
     }
+    def upperConcreteBound(implicit ctx: Context): Symbol = symbol
+    def lowerConcreteBound(implicit ctx: Context): Symbol = symbol
   }
 
 
