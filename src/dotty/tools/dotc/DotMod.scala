@@ -213,7 +213,8 @@ object DotMod {
       case rhs: AbstractMutabilityType => (symbol eq defn.MutableAnnot) || (rhs.lowerConcreteBound eq defn.ReadonlyAnnot)
     }
     def addMutableIntersectionIfRequired(tp: Type)(implicit ctx: Context): Type = {
-      if ((symbol eq defn.MutableAnnot) && tp.isInstanceOf[ValueType]) AndType(tp, defn.MutableType)
+      if ((symbol eq defn.MutableAnnot) && tp.isInstanceOf[ValueType])
+        AndType(tp, defn.MutableType)
       else tp
     }
     def upperConcreteBound(implicit ctx: Context): Symbol = symbol
@@ -446,13 +447,17 @@ object DotMod {
 
     override def topLevelSubType(tp1: Type, tp2: Type): Boolean = {
 
-      val m1 = tp1.getMutability
-      val m2 = tp2.getMutability
+      if (ctx.phase.erasedTypes || tp2.isInstanceOf[ProtoType]) {
+        super.topLevelSubType(tp1, tp2)
+      } else {
+        val m1 = tp1.getMutability
+        val m2 = tp2.getMutability
 
-      val tpe1 = m1.addMutableIntersectionIfRequired(tp1)
-      val tpe2 = m2.addMutableIntersectionIfRequired(tp2)
+        val tpe1 = m1.addMutableIntersectionIfRequired(tp1)
+        val tpe2 = m2.addMutableIntersectionIfRequired(tp2)
 
-      super.topLevelSubType(tpe1, tpe2) && m1 <:< m2
+        super.topLevelSubType(tpe1, tpe2) && m1 <:< m2
+      }
       //super.topLevelSubType(tp1, tp2) && (
       //  !tp1.exists || !tp2.exists || tp2.isInstanceOf[ProtoType] ||
       //  tp1.getMutability <:< tp2.getMutability
