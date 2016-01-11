@@ -96,11 +96,15 @@ object DotMod {
 
     def lowerConcreteBound(implicit ctx: Context): Symbol
 
+    /// that is, this mutability came from Mutable or RoThis types, not annotations.
+    def isFromMutableClass: Boolean = false
+
     /**
      * Finds an upper bound of this and another mutability.
      */
     def lub(rhs: Mutability)(implicit ctx: Context): Mutability = {
-      if (this <:< rhs) rhs
+      if (isInstanceOf[WildMutability]) this
+      else if (this <:< rhs) rhs
       else if (rhs <:< this) this
       else ConcreteMutability(defn.ReadonlyAnnot)
     }
@@ -109,7 +113,8 @@ object DotMod {
      * Finds a lower bound of this and another mutability.
      */
     def glb(rhs: Mutability)(implicit ctx: Context): Mutability = {
-      if (this <:< rhs) this
+      if (isInstanceOf[WildMutability]) rhs
+      else if (this <:< rhs) this
       else if (rhs <:< this) rhs
       else ConcreteMutability(defn.MutableAnnot)
     }
@@ -117,6 +122,14 @@ object DotMod {
 
   /** A marker trait for abstract mutability types */
   trait AbstractMutability extends Mutability
+
+  case class WildMutability() extends Mutability {
+    def viewpointAdapt(rhs: Mutability)(implicit ctx: Context): Mutability = rhs
+    def <:<(rhs: Mutability)(implicit ctx: Context): Boolean = true
+    def upperConcreteBound(implicit ctx: Context): Symbol = defn.MutableAnnot
+    def lowerConcreteBound(implicit ctx: Context): Symbol = defn.ReadonlyAnnot
+    def addMutableIntersectionIfRequired(tp: Type)(implicit ctx: Context): Type = tp
+  }
 
   /**
    * An abstract type.
@@ -128,46 +141,65 @@ object DotMod {
         if (rhs.symbol eq defn.ReadonlyAnnot) rhs else this
       case rhs: ReceiverMutability => this
       case rhs: AbstractMutabilityType =>
-        if (isIdenticalTo(rhs)) rhs
-        else if (upperConcreteBound eq defn.ReadonlyAnnot) ConcreteMutability(defn.ReadonlyAnnot)
-        else rhs
+        if (tp <:< rhs.tp) rhs  // if LHS won't remove any permissions from RHS, then return RHS.
+        else ConcreteMutability(defn.ReadonlyAnnot)  // default to removing all permissions from RHS. // todo is this precise enough?
+        //if (isIdenticalTo(rhs)) rhs
+        //else if (upperConcreteBound eq defn.ReadonlyAnnot) ConcreteMutability(defn.ReadonlyAnnot)
+        //else rhs
+      case rhs: WildMutability => this
     }
     def <:<(rhs: Mutability)(implicit ctx: Context): Boolean = rhs match {
       case rhs: ConcreteMutability => (rhs.symbol eq defn.ReadonlyAnnot) || (upperConcreteBound eq defn.MutableAnnot)
       case rhs: ReceiverMutability => upperConcreteBound eq defn.MutableAnnot
       case rhs: AbstractMutabilityType =>
-        // todo it may be possible that the upper or lower bound is annotated @RoThis, but it is probably a rare enough case that we don't need to check for it
-        isIdenticalTo(rhs) || (upperConcreteBound eq defn.MutableAnnot) || (rhs.lowerConcreteBound eq defn.ReadonlyAnnot)
+        true // todo what stronger conditions do we actually need here?
+        //isIdenticalTo(rhs) || (upperConcreteBound eq defn.MutableAnnot) || (rhs.lowerConcreteBound eq defn.ReadonlyAnnot)
+      case rhs: WildMutability => true
     }
     def isIdenticalTo(rhs: AbstractMutabilityType)(implicit ctx: Context): Boolean = {
       // todo may improve precision with a more extensive equality check (but probably unnecessary)
-      tp == rhs.tp || (tp.typeSymbol eq rhs.tp.typeSymbol)
+      tp == rhs.tp || (tp.dealias.typeSymbol eq rhs.tp.dealias.typeSymbol)
     }
-    /** Returns true if Mutable <:< tp, which means it is ok to apply in viewpoint adaptation. */
+    /**
+     * Returns true if Mutable <:< tp, which means it is ok to apply in viewpoint adaptation.
+     * Returns false if Any <:< tp, since intersections with Any are redundant.
+     */
     def isIndependentOfType(implicit ctx: Context): Boolean = {
-      val bounds = getBounds
-      !bounds.exists || (defn.MutableType <:< bounds.asInstanceOf[TypeBounds].lo)
+      (defn.MutableType <:< tp) && !(defn.AnyType <:< tp)
     }
     /** Returns either a TypeBounds or NoType (which indicates maximal bounds) */
     def getBounds(implicit ctx: Context): Type = tp match {
       case tp: TypeRef => tp.info.asInstanceOf[TypeBounds]
-      case tp: PolyParam => ctx.typerState.constraint.fullBounds(tp)
+      case tp: PolyParam =>
+        if (ctx.typerState.constraint.entry(tp) eq NoType) NoType
+        else ctx.typerState.constraint.fullBounds(tp)
       case tp: WildcardType => tp.optBounds
-      case tp: ErrorType => NoType
     }
     def addMutableIntersectionIfRequired(tp: Type)(implicit ctx: Context): Type = {
       if ((upperConcreteBound eq defn.MutableAnnot) && tp.isInstanceOf[ValueType]) AndType(tp, defn.MutableType)
       else tp
     }
     def upperConcreteBound(implicit ctx: Context): Symbol = {
-      val bounds = getBounds
-      if (bounds eq NoType) defn.MutableAnnot
-      else bounds.asInstanceOf[TypeBounds].hi.getMutability.upperConcreteBound
+      defn.ReadonlyAnnot  // conservatively say upper bound is readonly  // todo improve precision?
+      /*val bounds = getBounds
+      if (bounds eq NoType) defn.ReadonlyAnnot
+      else {
+        val mutHi = bounds.asInstanceOf[TypeBounds].hi.dealias.getMutabilityDep
+        if (mutHi.isInstanceOf[AbstractMutabilityType]) defn.ReadonlyAnnot  // just return readonly to avoid recursion
+        else mutHi.upperConcreteBound
+      }*/
+      //else bounds.asInstanceOf[TypeBounds].hi.getMutability.upperConcreteBound
     }
     def lowerConcreteBound(implicit ctx: Context): Symbol = {
-      val bounds = getBounds
-      if (bounds eq NoType) defn.ReadonlyAnnot
-      else bounds.asInstanceOf[TypeBounds].lo.getMutability.lowerConcreteBound
+      defn.MutableAnnot  // conservatively say lower bound is mutable  // todo improve precision?
+      /*val bounds = getBounds
+      if (bounds eq NoType) defn.MutableAnnot
+      else {
+        val mutLo = bounds.asInstanceOf[TypeBounds].lo.dealias.getMutabilityDep
+        if (mutLo.isInstanceOf[AbstractMutabilityType]) defn.MutableAnnot  // just return mutable to avoid recursion
+        else mutLo.lowerConcreteBound
+      }*/
+      //else bounds.asInstanceOf[TypeBounds].lo.getMutability.lowerConcreteBound
     }
   }
 
@@ -177,30 +209,33 @@ object DotMod {
    * and all uses of RoThis within a method refer to the same mutability type.
    * The origin symbol is the method or class RoThis refers to.
    */
-  case class ReceiverMutability(origin: Symbol) extends AbstractMutability {
+  case class ReceiverMutability(origin: Symbol, _fromMutableClass: Boolean = false) extends AbstractMutability {
     def viewpointAdapt(rhs: Mutability)(implicit ctx: Context): Mutability = rhs match {
       case rhs: ConcreteMutability => if (rhs.symbol eq defn.ReadonlyAnnot) rhs else this
       case rhs: ReceiverMutability => this
       case rhs: AbstractMutabilityType =>
         if (rhs.upperConcreteBound eq defn.MutableAnnot) this else ConcreteMutability(defn.ReadonlyAnnot)
+      case rhs: WildMutability => this
     }
     def <:<(rhs: Mutability)(implicit ctx: Context): Boolean = rhs match {
       case rhs: ConcreteMutability => rhs.symbol eq defn.ReadonlyAnnot
       case rhs: ReceiverMutability => origin eq rhs.origin
       case rhs: AbstractMutabilityType => rhs.lowerConcreteBound eq defn.ReadonlyAnnot
+      case rhs: WildMutability => true
     }
     def addMutableIntersectionIfRequired(tp: Type)(implicit ctx: Context): Type = {
-      if (tp.isInstanceOf[ValueType]) AndType(tp, defn.RoThisType)
+      if (!isFromMutableClass && tp.isInstanceOf[ValueType]) AndType(tp, defn.RoThisType)
       else tp
     }
     def upperConcreteBound(implicit ctx: Context): Symbol = defn.ReadonlyAnnot
     def lowerConcreteBound(implicit ctx: Context): Symbol = defn.MutableAnnot
+    override def isFromMutableClass: Boolean = _fromMutableClass
   }
 
   /**
    * A concrete mutability. The symbol must be either MutableAnnot or ReadonlyAnnot.
    */
-  case class ConcreteMutability(symbol: Symbol) extends Mutability {
+  case class ConcreteMutability(symbol: Symbol, _fromMutableClass: Boolean = false) extends Mutability {
     def viewpointAdapt(rhs: Mutability)(implicit ctx: Context): Mutability = rhs match {
       case rhs: ConcreteMutability =>
         if ((symbol eq defn.ReadonlyAnnot) && (rhs.symbol eq defn.MutableAnnot)) this else rhs
@@ -211,14 +246,30 @@ object DotMod {
       case rhs: ConcreteMutability => (symbol eq defn.MutableAnnot) || (rhs.symbol eq defn.ReadonlyAnnot)
       case rhs: ReceiverMutability => symbol eq defn.MutableAnnot
       case rhs: AbstractMutabilityType => (symbol eq defn.MutableAnnot) || (rhs.lowerConcreteBound eq defn.ReadonlyAnnot)
+      case rhs: WildMutability => true
     }
     def addMutableIntersectionIfRequired(tp: Type)(implicit ctx: Context): Type = {
-      if ((symbol eq defn.MutableAnnot) && tp.isInstanceOf[ValueType])
+      if (!isFromMutableClass && (symbol eq defn.MutableAnnot) && tp.isInstanceOf[ValueType])
         AndType(tp, defn.MutableType)
       else tp
     }
     def upperConcreteBound(implicit ctx: Context): Symbol = symbol
     def lowerConcreteBound(implicit ctx: Context): Symbol = symbol
+    override def lub(rhs: Mutability)(implicit ctx: Context): Mutability = rhs match {
+      // make sure the _fromMutableClass flag is set correctly
+      case rhs: ConcreteMutability if (symbol eq defn.MutableAnnot) && (rhs.symbol eq defn.MutableAnnot) =>
+        if (isFromMutableClass && rhs.isFromMutableClass) this
+        else ConcreteMutability(defn.MutableAnnot, _fromMutableClass = false)
+      case _ => super.lub(rhs)
+    }
+    override def glb(rhs: Mutability)(implicit ctx: Context): Mutability = rhs match {
+      // always make sure to choose the mutability that's from the Mutable class
+      case rhs: ConcreteMutability if (symbol eq defn.MutableAnnot) && (rhs.symbol eq defn.MutableAnnot) =>
+        if (isFromMutableClass) this
+        else rhs
+      case _ => super.glb(rhs)
+    }
+    override def isFromMutableClass: Boolean = _fromMutableClass
   }
 
 
@@ -331,44 +382,65 @@ object DotMod {
 
   }
 
+  sealed abstract class BoundSpec
+  case object Hi extends BoundSpec
+  case object Lo extends BoundSpec
+  //case object Inferred extends BoundSpec
+
   implicit class TypeDecorator(val tp: Type) extends AnyVal {
 
-    def getMutability(implicit ctx: Context): Mutability = tp.stripTypeVar match {
+    def requiresMutabilityComparison(implicit ctx: Context): Boolean = tp match {
+      case tp: AnnotatedType => isRecognizedTypeAnnotation(tp.annot) || tp.tpe.requiresMutabilityComparison
+      case tp: ClassInfo => true
+      case tp: PolyParam => false
+      case tp: TypeAlias => tp.underlying.requiresMutabilityComparison
+      case tp: TypeBounds => false
+      case tp: MethodicType => false
+      case tp: TypeProxy => tp.underlying.requiresMutabilityComparison
+      case _ => false
+    }
+
+    def getMutability(spec: BoundSpec, maxBoundsRecursion: Int = 12)(implicit ctx: Context): Mutability = tp match {
+      // todo return an abstract mutability when a qualifying type (Mutable <:< tp) is encountered (regardless of spec)
       case tp: AnnotatedType =>
         if ((tp.annot.symbol eq defn.MutableAnnot) || (tp.annot.symbol eq defn.ReadonlyAnnot))
           ConcreteMutability(tp.annot.symbol)
         else if (tp.annot.symbol eq defn.RoThisAnnot)
           ReceiverMutability(ctx.owner.skipWeakOwner)
         else
-          tp.tpe.getMutability
+          tp.tpe.getMutability(spec, maxBoundsRecursion)
 
-      case tp: TypeRef => tp.info match {
-        case info: TypeAlias => info.underlying.getMutability
-        case info: TypeBounds => AbstractMutabilityType(tp)
-        case info => info.getMutability
-      }
-
-      case tp: PolyParam => AbstractMutabilityType(tp)
-
-      case tp: WildcardType => AbstractMutabilityType(tp)
-
-      case tp: MethodicType => tp.finalResultType.getMutability
-
-      case AndType(tp1, tp2) => tp1.getMutability glb tp2.getMutability
-
-      case OrType(tp1, tp2) => tp1.getMutability lub tp2.getMutability
+      case tp: TypeBounds =>
+        spec match {
+          case Hi => if (maxBoundsRecursion > 0) tp.hi.getMutability(Hi, maxBoundsRecursion - 1) else ConcreteMutability(defn.ReadonlyAnnot)
+          case Lo => if (maxBoundsRecursion > 0) tp.lo.getMutability(Lo, maxBoundsRecursion - 1) else ConcreteMutability(defn.MutableAnnot)
+        }
 
       case tp: ClassInfo =>
-        if (tp.cls.derivesFrom(defn.MutableClass)) ConcreteMutability(defn.MutableAnnot)
-        else if (tp.cls.derivesFrom(defn.RoThisClass)) ReceiverMutability(ctx.owner.skipWeakOwner)
+        if (tp.cls.derivesFrom(defn.MutableClass)) ConcreteMutability(defn.MutableAnnot, _fromMutableClass = true)
+        else if (tp.cls.derivesFrom(defn.RoThisClass)) ReceiverMutability(ctx.owner.skipWeakOwner, _fromMutableClass = true)
         else if (tp.cls eq defn.AnyClass) ConcreteMutability(defn.ReadonlyAnnot)   // assume Any is Readonly
         else ConcreteMutability(defn.MutableAnnot)  // default other classes to Mutable
 
-      case tp: ErrorType => AbstractMutabilityType(tp)
+      case tp: RefinedType =>
+        // Refinements of Any are mutable, although Any itself is readonly.
+        if (tp.parent.isRef(defn.AnyClass)) ConcreteMutability(defn.MutableAnnot)
+        else tp.parent.getMutability(spec, maxBoundsRecursion)
 
-      case tp: TypeProxy => tp.underlying.getMutability
+      case AndType(tp1, tp2) => tp1.getMutability(spec, maxBoundsRecursion) glb tp2.getMutability(spec, maxBoundsRecursion)
 
-      case _ => ConcreteMutability(defn.MutableAnnot)
+      case OrType(tp1, tp2) => tp1.getMutability(spec, maxBoundsRecursion) lub tp2.getMutability(spec, maxBoundsRecursion)
+
+      case tp: MethodicType => tp.finalResultType.getMutability(spec, maxBoundsRecursion)
+
+      case tp: WildcardType =>
+        if (tp.optBounds eq NoType) WildMutability()
+        else tp.optBounds.getMutability(spec, maxBoundsRecursion)
+
+      case _: ImportType | NoType | NoPrefix | _: ErrorType =>
+        WildMutability()
+
+      case tp: TypeProxy => tp.underlying.getMutability(spec, maxBoundsRecursion)
     }
 
     def stripMutabilityAnnotations(implicit ctx: Context): Type = tp match {
@@ -387,9 +459,10 @@ object DotMod {
       case mut: ConcreteMutability => tp.withMutabilityAnnotation(mut.symbol)
       case mut: ReceiverMutability => tp.withMutabilityAnnotation(defn.RoThisAnnot)
       case mut: AbstractMutabilityType =>
-        val readonlyTp = tp.withMutabilityAnnotation(defn.RoThisAnnot)  // todo could be more precise where mut's upper bound is not Readonly
-        if (mut.isIndependentOfType) AndType(readonlyTp, mut.tp)   // add mutability permissions via a type intersection
-        else readonlyTp
+        tp.withMutabilityAnnotation(mut.upperConcreteBound)
+        //val readonlyTp = tp.withMutabilityAnnotation(defn.RoThisAnnot)
+        //if (mut.isIndependentOfType) AndType(readonlyTp, mut.tp)   // add mutability permissions via a type intersection
+        //else readonlyTp
     }
 
     def withMutability(mut: Mutability)(implicit ctx: Context): Type = tp match {
@@ -414,9 +487,13 @@ object DotMod {
   }
 
   def viewpointAdapt(prefixMut: Mutability, tp: Type)(implicit ctx: Context): Type = {
-    val currentMut = tp.getMutability
+    val currentMut = tp.getMutability(Hi)
     val adaptedMut = prefixMut.viewpointAdapt(currentMut)
-    if (currentMut =:= adaptedMut) tp else tp.withMutability(adaptedMut)
+    if (currentMut eq adaptedMut) tp else tp.withMutability(adaptedMut)
+
+    // todo remove when ready
+    //if (!currentMut.isInstanceOf[ReceiverMutability] && (adaptedMut <:< currentMut)) tp  // if viewpoint adaptation doesn't reduce permissions, then we don't need to do anything
+    //else tp.withMutability(adaptedMut)
   }
 
   /**
@@ -445,18 +522,33 @@ object DotMod {
      */
     //val ordinaryTypeComparer = new TypeComparer(initCtx)
 
+    //override def isSubType(tp1: Type, tp2: Type): Boolean = {
     override def topLevelSubType(tp1: Type, tp2: Type): Boolean = {
 
-      if (ctx.phase.erasedTypes || tp2.isInstanceOf[ProtoType]) {
+      if (ctx.phase.erasedTypes || tp2.isInstanceOf[ProtoType] || (!tp1.requiresMutabilityComparison && !tp2.requiresMutabilityComparison)) {
+        //super.isSubType(tp1, tp2)
         super.topLevelSubType(tp1, tp2)
       } else {
-        val m1 = tp1.getMutability
-        val m2 = tp2.getMutability
+        val m1 = tp1.getMutability(Hi)
+        val m2 = tp2.getMutability(Lo)
 
-        val tpe1 = m1.addMutableIntersectionIfRequired(tp1)
-        val tpe2 = m2.addMutableIntersectionIfRequired(tp2)
 
-        super.topLevelSubType(tpe1, tpe2) && m1 <:< m2
+        //if (!(m1 <:< m2)) println("MUTABILITY COMPARED FALSE: " + m1 + " <:< " + m2)
+
+        //val bothFromClass = m1.isFromMutableClass && m2.isFromMutableClass
+        //val eitherFromClass = m1.isFromMutableClass || m2.isFromMutableClass
+        //val insertIntersection = eitherFromClass && !bothFromClass
+
+        // We call addMutableIntersectionIfRequired to ensure that T@mutable <:< T with Mutable
+        //val tpe1 = if (insertIntersection) m1.addMutableIntersectionIfRequired(tp1) else tp1  // todo reenable when ready
+        //val tpe2 = if (insertIntersection) m2.addMutableIntersectionIfRequired(tp2) else tp2
+
+
+        val tpe1 = if (m2.isFromMutableClass) m1.addMutableIntersectionIfRequired(tp1) else tp1  // tp1
+        val tpe2 = tp2
+
+        //super.isSubType(tpe1, tpe2) && m1 <:< m2  // todo reenable when ready
+        super.topLevelSubType(tpe1, tpe2) && m1 <:< m2  // todo reenable when ready
       }
       //super.topLevelSubType(tp1, tp2) && (
       //  !tp1.exists || !tp2.exists || tp2.isInstanceOf[ProtoType] ||
@@ -492,7 +584,7 @@ object DotMod {
     def viewpointAdaptTermRef(tp: TermRef)(implicit ctx: Context): Type = {
       val prefixMutability =
         if (tp.prefix eq NoPrefix) getOuterAccessPathMutability(tp.symbol)
-        else tp.prefix.getMutability
+        else tp.prefix.getMutability(Hi)   // todo adaptation with abstract mutability types?
       viewpointAdapt(prefixMutability, tp)
     }
 
