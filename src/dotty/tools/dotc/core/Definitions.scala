@@ -487,12 +487,16 @@ class Definitions {
   def SetterMetaAnnot(implicit ctx: Context) = SetterMetaAnnotType.symbol.asClass
 
   // Side-effect Limitation Types
-  lazy val MutableType = ctx.requiredClassRef("dotty.Mutable")
-  def MutableClass(implicit ctx: Context) = MutableType.symbol.asClass
-  lazy val RoThisType = ctx.requiredClassRef("dotty.RoThis")
-  def RoThisClass(implicit ctx: Context) = RoThisType.symbol.asClass
-  lazy val ReadonlyType = ctx.requiredClassRef("dotty.Readonly")
-  def ReadonlyClass(implicit ctx: Context) = ReadonlyType.symbol.asClass
+  lazy val MutableAnyType = ctx.requiredClassRef("dotty.MutableAny")
+  def MutableAnyClass(implicit ctx: Context) = MutableAnyType.symbol.asClass
+  lazy val ReadonlyNothingType = ctx.requiredClassRef("dotty.ReadonlyNothing")
+  def ReadonlyNothingClass(implicit ctx: Context) = ReadonlyNothingType.symbol.asClass
+  //lazy val MutableType = ctx.requiredClassRef("dotty.Mutable")
+  //def MutableClass(implicit ctx: Context) = MutableType.symbol.asClass
+  //lazy val RoThisType = ctx.requiredClassRef("dotty.RoThis")
+  //def RoThisClass(implicit ctx: Context) = RoThisType.symbol.asClass
+  //lazy val ReadonlyType = ctx.requiredClassRef("dotty.Readonly")
+  //def ReadonlyClass(implicit ctx: Context) = ReadonlyType.symbol.asClass
 
   // Side-effect Limitation Annotations
   lazy val MutableAnnotType = ctx.requiredClassRef("dotty.mutable")

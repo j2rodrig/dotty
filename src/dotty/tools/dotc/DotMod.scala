@@ -11,6 +11,7 @@ import core.DenotTransformers._
 import core.Flags._
 import core.Names._
 import core.Symbols._
+import core.SymDenotations._
 import core.Types._
 import transform.TreeTransforms._
 import typer._
@@ -56,6 +57,9 @@ import typer.ErrorReporting._
 
 
 object DotMod {
+
+/*
+
 
   /**
    * Mutabilities can be concrete or abstract.
@@ -165,7 +169,7 @@ object DotMod {
      * Returns false if Any <:< tp, since intersections with Any are redundant.
      */
     def isIndependentOfType(implicit ctx: Context): Boolean = {
-      (defn.MutableType <:< tp) && !(defn.AnyType <:< tp)
+      (defn.MutableAnyType <:< tp) && !(defn.AnyType <:< tp)
     }
     /** Returns either a TypeBounds or NoType (which indicates maximal bounds) */
     def getBounds(implicit ctx: Context): Type = tp match {
@@ -176,7 +180,7 @@ object DotMod {
       case tp: WildcardType => tp.optBounds
     }
     def addMutableIntersectionIfRequired(tp: Type)(implicit ctx: Context): Type = {
-      if ((upperConcreteBound eq defn.MutableAnnot) && tp.isInstanceOf[ValueType]) AndType(tp, defn.MutableType)
+      if ((upperConcreteBound eq defn.MutableAnnot) && tp.isInstanceOf[ValueType]) AndType(tp, defn.MutableAnyType)
       else tp
     }
     def upperConcreteBound(implicit ctx: Context): Symbol = {
@@ -224,8 +228,9 @@ object DotMod {
       case rhs: WildMutability => true
     }
     def addMutableIntersectionIfRequired(tp: Type)(implicit ctx: Context): Type = {
-      if (!isFromMutableClass && tp.isInstanceOf[ValueType]) AndType(tp, defn.RoThisType)
-      else tp
+    //  if (!isFromMutableClass && tp.isInstanceOf[ValueType]) AndType(tp, defn.RoThisType)
+    //  else tp
+      tp
     }
     def upperConcreteBound(implicit ctx: Context): Symbol = defn.ReadonlyAnnot
     def lowerConcreteBound(implicit ctx: Context): Symbol = defn.MutableAnnot
@@ -250,7 +255,7 @@ object DotMod {
     }
     def addMutableIntersectionIfRequired(tp: Type)(implicit ctx: Context): Type = {
       if (!isFromMutableClass && (symbol eq defn.MutableAnnot) && tp.isInstanceOf[ValueType])
-        AndType(tp, defn.MutableType)
+        AndType(tp, defn.MutableAnyType)
       else tp
     }
     def upperConcreteBound(implicit ctx: Context): Symbol = symbol
@@ -417,8 +422,8 @@ object DotMod {
         }
 
       case tp: ClassInfo =>
-        if (tp.cls.derivesFrom(defn.MutableClass)) ConcreteMutability(defn.MutableAnnot, _fromMutableClass = true)
-        else if (tp.cls.derivesFrom(defn.RoThisClass)) ReceiverMutability(ctx.owner.skipWeakOwner, _fromMutableClass = true)
+        if (tp.cls.derivesFrom(defn.MutableAnyClass)) ConcreteMutability(defn.MutableAnnot, _fromMutableClass = true)
+        //else if (tp.cls.derivesFrom(defn.RoThisClass)) ReceiverMutability(ctx.owner.skipWeakOwner, _fromMutableClass = true)
         else if (tp.cls eq defn.AnyClass) ConcreteMutability(defn.ReadonlyAnnot)   // assume Any is Readonly
         else ConcreteMutability(defn.MutableAnnot)  // default other classes to Mutable
 
@@ -432,6 +437,8 @@ object DotMod {
       case OrType(tp1, tp2) => tp1.getMutability(spec, maxBoundsRecursion) lub tp2.getMutability(spec, maxBoundsRecursion)
 
       case tp: MethodicType => tp.finalResultType.getMutability(spec, maxBoundsRecursion)
+
+      case tp: JavaArrayType => ConcreteMutability(defn.MutableAnnot)   // arrays are mutable by default
 
       case tp: WildcardType =>
         if (tp.optBounds eq NoType) WildMutability()
@@ -508,6 +515,103 @@ object DotMod {
     ConcreteMutability(defn.MutableAnnot)
   }
 
+  /**
+   * Basic approach to receiver polymorphism involves:
+   * - A PolyType subclass that wraps (methods/exprs) or derives from (native poly types).
+   *    The outermost poly type has a type parameter that represents receiver mutability.
+   * - augment methodic selections to reduce derived polytypes by substituting the receiver-mutability type parameter.
+   */
+
+
+
+  def glbAnnotSymbol(sym1: Symbol, sym2: Symbol): Symbol = {
+    if ((sym1 eq defn.MutableAnnot) || (sym2 eq defn.MutableAnnot)) defn.MutableAnnot
+    else if ((sym1 eq defn.RoThisAnnot) || (sym2 eq defn.RoThisAnnot)) defn.RoThisAnnot
+    else defn.ReadonlyAnnot
+  }
+
+  def lubAnnotSymbol(sym1: Symbol, sym2: Symbol): Symbol = {
+    if ((sym1 eq defn.ReadonlyAnnot) || (sym2 eq defn.ReadonlyAnnot)) defn.ReadonlyAnnot
+    else if ((sym1 eq defn.RoThisAnnot) || (sym2 eq defn.RoThisAnnot)) defn.RoThisAnnot
+    else defn.MutableAnnot
+  }
+
+*/
+
+
+  def receiverParamName = "$ROTHIS"
+
+  /** Remove top-level mutability annotations from the given type. */
+  def stripAnnots(tp: Type)(implicit ctx: Context): Type = tp match {
+    case tp: AnnotatedType =>
+      val sym = tp.annot.symbol
+      if ((sym eq defn.ReadonlyAnnot) || (sym eq defn.MutableAnnot) || (sym eq defn.RoThisAnnot)) stripAnnots(tp.tpe)
+      else tp.derivedAnnotatedType(stripAnnots(tp.tpe), tp.annot)
+    case _ => tp
+  }
+
+  /**
+   * Convert T @readonly to T | ReadonlyNothing
+   * Convert T @mutable to T & MutableAny
+   */
+  def convertAnnotationToType(tp: AnnotatedType)(implicit ctx: Context): Type = {
+    val sym = tp.annot.symbol
+    if (sym eq defn.ReadonlyAnnot)
+      OrType(stripAnnots(tp), defn.ReadonlyNothingType)
+    else if (sym eq defn.MutableAnnot)
+      AndType(stripAnnots(tp), defn.MutableAnyType)
+    // else if (sym eq defn.RoThisAnnot)  // todo find the correct polymorphic receiver parameter
+    else tp
+  }
+
+  def viewpointAdaptTermRef(tp: TermRef)(implicit ctx: Context): Type = {
+    // todo adaptation of polytypes with receiver type-params
+    //val prefixMutability =
+    //  if (tp.prefix eq NoPrefix) getOuterAccessPathMutability(tp.symbol)
+    //  else tp.prefix.getMutability(Hi)   // todo adaptation with abstract mutability types?
+    //viewpointAdapt(prefixMutability, tp)
+    tp
+  }
+
+  def viewpointAdaptThisType(tp: ThisType)(implicit ctx: Context): Type = {
+    //val prefixMutability = getOuterAccessPathMutability(tp.cls)
+    //viewpointAdapt(prefixMutability, tp)
+    tp
+  }
+
+  def viewpointAdaptSuperType(tp: SuperType)(implicit ctx: Context): Type = {
+    //val prefixMutability = getOuterAccessPathMutability(tp.thistpe.asInstanceOf[ThisType].cls)
+    //viewpointAdapt(prefixMutability, tp)
+    tp
+  }
+
+  def makePolyTypeWithReceiver(tp: MethodicType)(implicit ctx: Context): Type = {
+
+    // todo finish
+    //val
+    //tp match {
+    //  case tp: PolyType => tp.derivedPolyType()
+    //}
+
+    tp
+  }
+
+
+
+  implicit class TypeDecorator(val tp: Type) extends AnyVal {
+    def nonMut_<:<(tp2: Type)(implicit ctx: Context): Boolean =
+      ctx.typeComparer.asInstanceOf[DotModTypeComparer].ordinaryTypeComparer.topLevelSubType(tp, tp2)
+
+    /// Does the type refer to a single class symbol? Traverses aliases, but not non-parameter type refinements.
+    def underlyingClassSymbol(implicit ctx: Context): Symbol = {
+      val typeRef = tp.underlyingClassRef(refinementOK = false)
+      typeRef match {
+        case typeRef: TypeRef => typeRef.symbol
+        case NoType => NoSymbol
+      }
+    }
+  }
+
 
 
   /**
@@ -517,116 +621,187 @@ object DotMod {
   class DotModTypeComparer(initCtx: Context) extends TypeComparer(initCtx) {
 
     /**
-     * We keep around an ordinary type comparer, which is used when a non-mutability-related
-     * type comparison is required.
+     * We keep around an ordinary type comparer.
+     * Mostly for when we don't want to special-case mutability comparisons.
      */
-    //val ordinaryTypeComparer = new TypeComparer(initCtx)
+    val ordinaryTypeComparer = new TypeComparer(initCtx)
 
-    //override def isSubType(tp1: Type, tp2: Type): Boolean = {
     override def topLevelSubType(tp1: Type, tp2: Type): Boolean = {
-
-      if (ctx.phase.erasedTypes || tp2.isInstanceOf[ProtoType] || (!tp1.requiresMutabilityComparison && !tp2.requiresMutabilityComparison)) {
-        //super.isSubType(tp1, tp2)
-        super.topLevelSubType(tp1, tp2)
-      } else {
-        val m1 = tp1.getMutability(Hi)
-        val m2 = tp2.getMutability(Lo)
-
-
-        //if (!(m1 <:< m2)) println("MUTABILITY COMPARED FALSE: " + m1 + " <:< " + m2)
-
-        //val bothFromClass = m1.isFromMutableClass && m2.isFromMutableClass
-        //val eitherFromClass = m1.isFromMutableClass || m2.isFromMutableClass
-        //val insertIntersection = eitherFromClass && !bothFromClass
-
-        // We call addMutableIntersectionIfRequired to ensure that T@mutable <:< T with Mutable
-        //val tpe1 = if (insertIntersection) m1.addMutableIntersectionIfRequired(tp1) else tp1  // todo reenable when ready
-        //val tpe2 = if (insertIntersection) m2.addMutableIntersectionIfRequired(tp2) else tp2
-
-
-        val tpe1 = if (m2.isFromMutableClass) m1.addMutableIntersectionIfRequired(tp1) else tp1  // tp1
-        val tpe2 = tp2
-
-        //super.isSubType(tpe1, tpe2) && m1 <:< m2  // todo reenable when ready
-        super.topLevelSubType(tpe1, tpe2) && m1 <:< m2  // todo reenable when ready
-      }
-      //super.topLevelSubType(tp1, tp2) && (
-      //  !tp1.exists || !tp2.exists || tp2.isInstanceOf[ProtoType] ||
-      //  tp1.getMutability <:< tp2.getMutability
-      //  )
+      val res = super.topLevelSubType(tp1, tp2)
+      //println("  " + tp1 + " <:< " + tp2 + " = " + res)
+      res
     }
 
-    //override def isSubType(tp1: Type, tp2: Type): Boolean = {
-    //  super.isSubType(tp1, tp2) && tp1.getMutability <:< tp2.getMutability
-    //}
+    override def isSubType(tp1: Type, tp2: Type): Boolean = {
+      //
+      // Since we have two interrelated lattices (a mutable lattice and readonly lattice),
+      // we have to make sure that isSubType never returns true if tp1 is readonly
+      // and tp2 is mutable.
+      // Basically this means that if tp2 is a MutableAny,
+      // then tp1 can be anything except a ReadonlyNothing or an Any.
+      // Other cases are handled by ordinary subtyping relationships.
+      //
+      if (tp2.underlyingClassSymbol eq defn.MutableAnyClass) {
+        val sym1 = tp1.underlyingClassSymbol
+        if (sym1 ne NoSymbol) !((sym1 eq defn.AnyClass) || (sym1 eq defn.ReadonlyNothingClass))
+        else super.isSubType(tp1, tp2)
+      }
+      else super.isSubType(tp1, tp2)
+    }
 
     override def copyIn(ctx: Context): TypeComparer = new DotModTypeComparer(ctx)
   }
 
+  //def isMutable(tp: Type)(implicit ctx: Context) = nonMut_<:<(tp, defn.MutableAnyType) || nonMut_<:<(tp, defn.NothingType)
+  //def isReadonly(tp: Type)(implicit ctx: Context) = nonMut_<:<(defn.ReadonlyNothingType, tp) || nonMut_<:<(defn.AnyType, tp)
+  //def isAnnotation(tp: Type)(implicit ctx: Context) = nonMut_<:<(tp, defn.AnnotationType)
 
   class DotModTyper extends Typer {
 
-    /// The function tree underlying the given tree (always returns a Select or Ident).
-    /*def fun(tree: Tree): Tree = tree match {
-      case _: Ident | _: Select => tree
-      case tree: Apply => fun(tree.fun)
-      case tree: TypeApply => fun(tree.fun)
-      case tree: Typed => fun(tree.expr)
-    }
+    var alreadyStarted = false
 
-    /// Takes a method selection/application tree and returns the type of the given receiver (TermRef or ErrorType).
-    def getActualReceiverType(tree: Tree): Type = {
-      val functionType = fun(tree).tpe
-      if (functionType.isError) ErrorType
-      else functionType.stripAnnots.asInstanceOf[TermRef].prefix
-    }*/
+    def convertType(tpe: Type)(implicit ctx: Context): Type = {
 
-    def viewpointAdaptTermRef(tp: TermRef)(implicit ctx: Context): Type = {
-      val prefixMutability =
-        if (tp.prefix eq NoPrefix) getOuterAccessPathMutability(tp.symbol)
-        else tp.prefix.getMutability(Hi)   // todo adaptation with abstract mutability types?
-      viewpointAdapt(prefixMutability, tp)
-    }
+      if (!alreadyStarted) {
+        println("Nothing <:< ReadonlyNothing == " + (defn.NothingType <:< defn.ReadonlyNothingType))
+        println("Nothing <:< MutableAny == " + (defn.NothingType <:< defn.ReadonlyNothingType))
+        println("ReadonlyNothing <:< Nothing == " + (defn.ReadonlyNothingType <:< defn.NothingType))
+        println("ReadonlyNothing <:< MutableAny == " + (defn.ReadonlyNothingType <:< defn.MutableAnyType))
+        println("ReadonlyNothing <:< ReadonlyNothing == " + (defn.ReadonlyNothingType <:< defn.ReadonlyNothingType))
+        println("ReadonlyNothing <:< Any == " + (defn.ReadonlyNothingType <:< defn.AnyType))
+        println("MutableAny <:< Nothing == " + (defn.MutableAnyType <:< defn.NothingType))
+        println("MutableAny <:< MutableAny == " + (defn.MutableAnyType <:< defn.MutableAnyType))
+        println("MutableAny <:< ReadonlyNothing == " + (defn.MutableAnyType <:< defn.ReadonlyNothingType))
+        println("MutableAny <:< Any == " + (defn.MutableAnyType <:< defn.AnyType))
+        println("Any <:< ReadonlyNothing == " + (defn.AnyType <:< defn.ReadonlyNothingType))
+        println("Any <:< MutableAny == " + (defn.AnyType <:< defn.MutableAnyType))
+        println()
+        println("ReadonlyNothing <:< (MutableAny | ReadonlyNothing) == " +
+          (defn.ReadonlyNothingType <:< OrType(defn.MutableAnyType, defn.ReadonlyNothingType)))
+        println("MutableAny <:< (MutableAny | ReadonlyNothing) == " +
+          (defn.MutableAnyType <:< OrType(defn.MutableAnyType, defn.ReadonlyNothingType)))
+        println("(MutableAny | ReadonlyNothing) <:< ReadonlyNothing == " +
+          (OrType(defn.MutableAnyType, defn.ReadonlyNothingType) <:< defn.ReadonlyNothingType))
+        println("(MutableAny | ReadonlyNothing) <:< MutableAny == " +
+          (OrType(defn.MutableAnyType, defn.ReadonlyNothingType) <:< defn.MutableAnyType))
+        println()
+        println("ReadonlyNothing <:< (MutableAny & ReadonlyNothing) == " +
+          (defn.ReadonlyNothingType <:< AndType(defn.MutableAnyType, defn.ReadonlyNothingType)))
+        println("MutableAny <:< (MutableAny & ReadonlyNothing) == " +
+          (defn.MutableAnyType <:< AndType(defn.MutableAnyType, defn.ReadonlyNothingType)))
+        println("(MutableAny & ReadonlyNothing) <:< ReadonlyNothing == " +
+          (AndType(defn.MutableAnyType, defn.ReadonlyNothingType) <:< defn.ReadonlyNothingType))
+        println("(MutableAny & ReadonlyNothing) <:< MutableAny == " +
+          (AndType(defn.MutableAnyType, defn.ReadonlyNothingType) <:< defn.MutableAnyType))
+        println()
+        alreadyStarted = true
+      }
 
-    def viewpointAdaptThisType(tp: ThisType)(implicit ctx: Context): Type = {
-      val prefixMutability = getOuterAccessPathMutability(tp.cls)
-      viewpointAdapt(prefixMutability, tp)
-    }
+      val tpe0 = tpe match {
+        case tpe: AnnotatedType => convertAnnotationToType(tpe)
+        case tpe: MethodicType => makePolyTypeWithReceiver(tpe)
+        case tpe: TermRef => viewpointAdaptTermRef(tpe)
+        case tpe: ThisType => viewpointAdaptThisType(tpe)
+        case tpe: SuperType => viewpointAdaptSuperType(tpe)
+        case _ => tpe
+      }
 
-    def viewpointAdaptSuperType(tp: SuperType)(implicit ctx: Context): Type = {
-      val prefixMutability = getOuterAccessPathMutability(tp.thistpe.asInstanceOf[ThisType].cls)
-      viewpointAdapt(prefixMutability, tp)
+      //println("Conversion of " + tpe)
+      //println(isMutable(tpe0))
+      //println(isReadonly(tpe0))
+      //println(tpe0.isInstanceOf[NamedType])
+
+      if (tpe ne tpe0) {
+        //println("Conversion of " + tpe)
+        //println("           to " + tpe0)
+        //println()
+      }
+
+
+
+      /*// Named types other than Any should be considered Mutable. Patch up if needed.
+      // Constant types are also defaulted to Mutable to avoid a lot of errors due to unannotated libraries.
+      val tpe1 = {
+        if (isMutable(tpe0) || isReadonly(tpe0) || isAnnotation(tpe0)) tpe0
+        else tpe0 match {
+
+          case tpe0: TypeRef =>
+            if (tpe0.symbol.is(ModuleClass | PackageClass | HigherKinded)) tpe0  // don't do anything with modules/packages/methods
+            else AndType(tpe0, defn.MutableAnyType)     // default to Mutable
+
+          case tpe0: ConstantType => AndType(tpe0, defn.MutableAnyType)  // also default to Mutable
+
+          case _ => tpe0
+        }
+      }
+
+      // CAREFUL! DenotingTrees strip annotations when calling denot.
+
+      if (tpe1 ne tpe0) println("     to: " + tpe1) else println("No conversion")
+      println()
+      */
+
+      /*val tpe1 = {
+        if (tpe0 <:< defn.MutableAnyType || defn.ReadonlyNothingType <:< tpe0) tpe0
+        else if (defn.AnyType <:< tpe0) tpe0   // Any already compares as Readonly, so no modification is needed.
+        else tpe0 match {
+          case tpe0: NamedType => AndType(tpe0, defn.MutableAnyType)  // default to Mutable
+          case tpe0: ConstantType => AndType(tpe0, defn.MutableAnyType)  // also default to Mutable
+          case _ => tpe0
+        }
+      }*/
+
+      tpe0
     }
 
     override def adapt(tree0: tpd.Tree, pt: Type, original: untpd.Tree)(implicit ctx: Context): tpd.Tree = {
 
       val tree = super.adapt(tree0, pt, original)
 
-      val tpe1 = tree.tpe match {
-        case tpe: TermRef => viewpointAdaptTermRef(tpe)
-        case tpe: ThisType => viewpointAdaptThisType(tpe)
-        case tpe: SuperType => viewpointAdaptSuperType(tpe)
-        case tpe => tpe
-      }
-
-      if (tpe1 eq tree.tpe) tree
-      else {
-        val tree1 = tree.withType(tpe1)
-        if ((ctx.mode is Mode.Pattern) || tpe1 <:< pt) tree1
-        else err.typeMismatch(tree1, pt)
-      }
-
-      /*val dontCheck = (
-        pt == WildcardType
-          || !tree1.tpe.exists
-          || pt.isInstanceOf[ProtoType]
-          // || tree1.tpe <:< defn.AnyValType   // classes may extend AnyVal, so we do have to check
-        )
-
-      if(dontCheck) tree1 else {
-        // TODO check that tree.tpe <:< pt wrt. mutability
-        tree1
+      /*// Convert symbol info
+      tree.tpe match {
+        case tpe: NamedType => tpe.denot match {
+          case denot: SymDenotation =>
+            println("SymDenotation " + denot.name + ":::")
+            val info1 = convertType(denot.info)
+            //println("SymDenot of " + denot.name + ": " + denot.info)
+            if (info1 ne denot.info) {
+              denot.info = info1
+              //println("                    to: " + denot.info)
+            }
+          //println("")
+          case _ =>
+        }
+        case _ =>
       }*/
+
+      //println("--> " + tree.tpe)
+      //if (tpe0 ne tree.tpe) println(" 0> " + tpe0)
+      //if (tpe1 ne tree.tpe) println(" 1> " + tpe1)
+      //println("")
+
+      val tpe1 =
+        //if (tree.isInstanceOf[Select] || tree.isInstanceOf[Ident])
+          convertType(tree.tpe)
+        //else tree.tpe
+
+      val tree1 =
+        if (false) tree
+        //if (tpe1 eq tree.tpe) tree
+        else {
+          val tree1 = tree.withType(tpe1)
+
+          //tpe1 match {
+          //  case tpe1: NamedType =>
+          //    println(tpe1.name + ": " + tpe1.info + " <:< " + pt + " = " + (tpe1 <:< pt))
+          //  case _ =>
+          //}
+
+          if ((ctx.mode is Mode.Pattern) || tpe1 <:< pt) tree1
+          else err.typeMismatch(tree1, pt)
+        }
+
+      tree1
     }
   }
 

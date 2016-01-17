@@ -2,11 +2,11 @@ package dotty
 
 import scala.annotation.meta._
 
-@Readonly trait Iterator[T] {
+@readonly trait Iterator[T] {
   def next: T
 }
 
-@Readonly class List[T](val hd: T, val tail: List[T]) {
+@readonly class List[T](val hd: T, val tail: List[T]) {
 
   @rothis def iterator: Iterator[T @mutabilityOf(List.this)] @mutable = {
     // @mutabilityOf[List.this] here is the polymorphic type @rothis(with origin iterator).
@@ -22,18 +22,18 @@ import scala.annotation.meta._
 
     // The call to the constructor of MyIterator involves substitution of all @mutabilityOf(List.this)
     //  in the new object.
-    // See: Type#subst and Substituters@subst1 and called/related methods for reference.
+    // See: Type#subst and Substituters#subst1 and called/related methods for reference.
     new MyIterator
   }
 }
 
 object A extends App {
-  val l: List[Any] @Readonly = new List[Any](null, null)
+  val l: List[Any] @readonly = new List[Any](null, null)
 
   // The application of l.iterator involves substitution of all @mutabilityOf(List.this) in
   //  the iterator signature with the actual receiver mutability l, which here is @readonly.
   // See: Type#subst and Substituters@subst1 and called/related methods for reference.
-  val it: Iterator[Any @Readonly] = l.iterator
+  val it: Iterator[Any @readonly] = l.iterator
 
   val t: Any = it.next
 }
