@@ -628,7 +628,12 @@ object DotMod {
 
     override def topLevelSubType(tp1: Type, tp2: Type): Boolean = {
       val res = super.topLevelSubType(tp1, tp2)
-      //println("  " + tp1 + " <:< " + tp2 + " = " + res)
+      /*println()
+      println("  " + tp1)
+      println("    <:< ")
+      println("  " + tp2)
+      println("    == " + res)
+      println()*/
       res
     }
 
@@ -636,17 +641,57 @@ object DotMod {
       //
       // Since we have two interrelated lattices (a mutable lattice and readonly lattice),
       // we have to make sure that isSubType never returns true if tp1 is readonly
-      // and tp2 is mutable.
-      // Basically this means that if tp2 is a MutableAny,
-      // then tp1 can be anything except a ReadonlyNothing or an Any.
-      // Other cases are handled by ordinary subtyping relationships.
+      // and tp2 is mutable. By default, all classes except Any are mutable.
+      // Basically this means that if tp2 is a MutableAny class,
+      // then tp1 can be any class except ReadonlyNothing or Any.
+      // We treat as special the case where tp2 is MutableAny.
+      // Other simple cases are handled by ordinary subtyping relationships.
       //
       if (tp2.underlyingClassSymbol eq defn.MutableAnyClass) {
         val sym1 = tp1.underlyingClassSymbol
-        if (sym1 ne NoSymbol) !((sym1 eq defn.AnyClass) || (sym1 eq defn.ReadonlyNothingClass))
-        else super.isSubType(tp1, tp2)
+        if (sym1 ne NoSymbol) return !((sym1 eq defn.AnyClass) || (sym1 eq defn.ReadonlyNothingClass))
       }
-      else super.isSubType(tp1, tp2)
+
+      // More complex cases need additional special treatment. For example, we expect:
+      //   (T | ReadonlyNothing) & MutableAny <:< T
+      // But to show this according to DOT subtyping rules, we must show either:
+      //   T | ReadonlyNothing <:< T , or  MutableAny <:< T
+      // neither of which are true.
+      //
+      // The ordinary type comparer will help solve this problem by rewriting the example above to:
+      //   (T & MutableAny) | (ReadonlyNothing & MutableAny) <:< T
+      // However, the rewriting still leaves us having to show that
+      //   ReadonlyNothing & MutableAny <:< T
+      // which cannot be done using ordinary type comparison rules.
+      //
+      // We understand MutableAny as containing a certain permission declaration, and
+      // ReadonlyNothing as containing all but that declaration. We therefore expect that
+      //   ReadonlyNothing & MutableAny <:< Nothing
+      // and
+      //   Any <:< ReadonlyNothing | MutableAny
+      // So we treat these as special cases.
+      //
+      tp1 match {
+        case AndType(tp11, tp12) =>
+          val cls11 = tp11.underlyingClassSymbol
+          val cls12 = tp12.underlyingClassSymbol
+          if (((cls11 eq defn.MutableAnyClass) && (cls12 eq defn.ReadonlyNothingClass)) ||
+              ((cls11 eq defn.ReadonlyNothingClass) && (cls12 eq defn.MutableAnyClass)))
+            return true
+        case _ =>
+      }
+      tp2 match {
+        case OrType(tp21, tp22) =>
+          val cls21 = tp21.underlyingClassSymbol
+          val cls22 = tp22.underlyingClassSymbol
+          if (((cls21 eq defn.MutableAnyClass) && (cls22 eq defn.ReadonlyNothingClass)) ||
+              ((cls21 eq defn.ReadonlyNothingClass) && (cls22 eq defn.MutableAnyClass)))
+            return true
+        case _ =>
+      }
+
+      // All other cases: Handle with ordinary subtyping logic.
+      super.isSubType(tp1, tp2)
     }
 
     override def copyIn(ctx: Context): TypeComparer = new DotModTypeComparer(ctx)
@@ -676,23 +721,41 @@ object DotMod {
         println("Any <:< ReadonlyNothing == " + (defn.AnyType <:< defn.ReadonlyNothingType))
         println("Any <:< MutableAny == " + (defn.AnyType <:< defn.MutableAnyType))
         println()
+        println("Nothing <:< (MutableAny | ReadonlyNothing) == " +
+          (defn.NothingType <:< OrType(defn.MutableAnyType, defn.ReadonlyNothingType)))
         println("ReadonlyNothing <:< (MutableAny | ReadonlyNothing) == " +
           (defn.ReadonlyNothingType <:< OrType(defn.MutableAnyType, defn.ReadonlyNothingType)))
         println("MutableAny <:< (MutableAny | ReadonlyNothing) == " +
           (defn.MutableAnyType <:< OrType(defn.MutableAnyType, defn.ReadonlyNothingType)))
+        println("Any <:< (MutableAny | ReadonlyNothing) == " +
+          (defn.AnyType <:< OrType(defn.MutableAnyType, defn.ReadonlyNothingType)))
+        println()
+        println("(MutableAny | ReadonlyNothing) <:< Nothing == " +
+          (OrType(defn.MutableAnyType, defn.ReadonlyNothingType) <:< defn.NothingType))
         println("(MutableAny | ReadonlyNothing) <:< ReadonlyNothing == " +
           (OrType(defn.MutableAnyType, defn.ReadonlyNothingType) <:< defn.ReadonlyNothingType))
         println("(MutableAny | ReadonlyNothing) <:< MutableAny == " +
           (OrType(defn.MutableAnyType, defn.ReadonlyNothingType) <:< defn.MutableAnyType))
+        println("(MutableAny | ReadonlyNothing) <:< Any == " +
+          (OrType(defn.MutableAnyType, defn.ReadonlyNothingType) <:< defn.AnyType))
         println()
+        println("Nothing <:< (MutableAny & ReadonlyNothing) == " +
+          (defn.NothingType <:< AndType(defn.MutableAnyType, defn.ReadonlyNothingType)))
         println("ReadonlyNothing <:< (MutableAny & ReadonlyNothing) == " +
           (defn.ReadonlyNothingType <:< AndType(defn.MutableAnyType, defn.ReadonlyNothingType)))
         println("MutableAny <:< (MutableAny & ReadonlyNothing) == " +
           (defn.MutableAnyType <:< AndType(defn.MutableAnyType, defn.ReadonlyNothingType)))
+        println("Any <:< (MutableAny & ReadonlyNothing) == " +
+          (defn.AnyType <:< AndType(defn.MutableAnyType, defn.ReadonlyNothingType)))
+        println()
+        println("(MutableAny & ReadonlyNothing) <:< Nothing == " +
+          (AndType(defn.MutableAnyType, defn.ReadonlyNothingType) <:< defn.NothingType))
         println("(MutableAny & ReadonlyNothing) <:< ReadonlyNothing == " +
           (AndType(defn.MutableAnyType, defn.ReadonlyNothingType) <:< defn.ReadonlyNothingType))
         println("(MutableAny & ReadonlyNothing) <:< MutableAny == " +
           (AndType(defn.MutableAnyType, defn.ReadonlyNothingType) <:< defn.MutableAnyType))
+        println("(MutableAny & ReadonlyNothing) <:< Any == " +
+          (AndType(defn.MutableAnyType, defn.ReadonlyNothingType) <:< defn.AnyType))
         println()
         alreadyStarted = true
       }
@@ -758,6 +821,8 @@ object DotMod {
 
       val tree = super.adapt(tree0, pt, original)
 
+      if (!tree.tpe.exists || tree.tpe.isError) return tree
+
       /*// Convert symbol info
       tree.tpe match {
         case tpe: NamedType => tpe.denot match {
@@ -786,17 +851,10 @@ object DotMod {
         //else tree.tpe
 
       val tree1 =
-        if (false) tree
-        //if (tpe1 eq tree.tpe) tree
+        //if (false) tree
+        if (tpe1 eq tree.tpe) tree
         else {
           val tree1 = tree.withType(tpe1)
-
-          //tpe1 match {
-          //  case tpe1: NamedType =>
-          //    println(tpe1.name + ": " + tpe1.info + " <:< " + pt + " = " + (tpe1 <:< pt))
-          //  case _ =>
-          //}
-
           if ((ctx.mode is Mode.Pattern) || tpe1 <:< pt) tree1
           else err.typeMismatch(tree1, pt)
         }

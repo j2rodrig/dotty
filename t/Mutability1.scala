@@ -7,14 +7,20 @@ trait Mutability1 {
 
   val x: T
   val x1: T @readonly
+  val x2: T @readonly @mutable
+  val x3: T @mutable
 
   val y: T @readonly = x
   val y1: T = x1  // ERROR
+  val y2: T = x2  // OK
+  val y3: T = x3  // OK
 
   val z: T = x.x1   // ERROR
   val z1: T = x1.x  // ERROR
+  val z1b: T = x2.x
   val z2: T @readonly = x.x1
   val z3: T @readonly = x1.x
+  val z3b: T @readonly = x2.x1
 
   type U0 >: MutableAny
   type U1
