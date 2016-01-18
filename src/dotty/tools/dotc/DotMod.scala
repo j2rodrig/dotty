@@ -648,13 +648,15 @@ object DotMod {
       // Other simple cases are handled by ordinary subtyping relationships.
       //
       if (tp2.underlyingClassSymbol eq defn.MutableAnyClass) {
-        /// Traverses all aliases, including TermRefs and annotated types.
-        def traverseTermRefs(tp: Type): Type = tp.dealias match {
-          case tp: TermRef => traverseTermRefs(tp.info)
-          case tp: AnnotatedType => traverseTermRefs(tp.tpe)
+        /// Traverses all aliases, including selections and annotated types.
+        def traverseSelectionsAndAliases(tp: Type): Type = tp.dealias match {
+          case tp: TermRef => traverseSelectionsAndAliases(tp.info)
+          case tp: ThisType => traverseSelectionsAndAliases(tp.underlying)
+          case tp: SuperType => traverseSelectionsAndAliases(tp.underlying)
+          case tp: AnnotatedType => traverseSelectionsAndAliases(tp.tpe)
           case tpd => tpd
         }
-        val sym1 = traverseTermRefs(tp1).underlyingClassSymbol
+        val sym1 = traverseSelectionsAndAliases(tp1).underlyingClassSymbol
         if (sym1 ne NoSymbol) return !((sym1 eq defn.AnyClass) || (sym1 eq defn.ReadonlyNothingClass))
       }
 
@@ -701,6 +703,19 @@ object DotMod {
     }
 
     override def copyIn(ctx: Context): TypeComparer = new DotModTypeComparer(ctx)
+  }
+
+  def isAssignable(tp: Type)(implicit ctx: Context): Boolean = tp.dealias match {
+    case tp: TermRef =>
+      //println(s"---checking mutability of ${tp.prefix} , == ${tp.prefix <:< defn.MutableAnyType}")
+      (tp.prefix eq NoPrefix) || (tp.prefix <:< defn.MutableAnyType)
+    case tp: AnnotatedType =>
+      isAssignable(tp.tpe)
+    case OrType(tp1, tp2) =>
+      isAssignable(tp1) && isAssignable(tp2)
+    case AndType(tp1, tp2) =>
+      isAssignable(tp1) || isAssignable(tp2)
+    case _ => false
   }
 
   class DotModTyper extends Typer {
@@ -875,6 +890,14 @@ object DotMod {
       val tree = super.adapt(tree0, pt, original)
 
       if (!tree.tpe.exists || tree.tpe.isError) return tree
+
+      tree match {
+        case tree: Assign =>
+          //println("--- " + tree.lhs.tpe)
+          if (!isAssignable(tree.lhs.tpe))
+            return errorTree(tree, s"${tree.lhs.symbol.name} is not assignable here")
+        case _ =>
+      }
 
       /*// Convert symbol info
       tree.tpe match {
