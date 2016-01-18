@@ -16,6 +16,7 @@ import core.Types._
 import transform.TreeTransforms._
 import typer._
 import typer.ErrorReporting._
+import util.Positions._
 
 // Philosophical approach:
 //  - Add @readonly to every type that I don't want to be mutable.
@@ -597,7 +598,6 @@ object DotMod {
   }
 
 
-
   implicit class TypeDecorator(val tp: Type) extends AnyVal {
     def nonMut_<:<(tp2: Type)(implicit ctx: Context): Boolean =
       ctx.typeComparer.asInstanceOf[DotModTypeComparer].ordinaryTypeComparer.topLevelSubType(tp, tp2)
@@ -648,7 +648,13 @@ object DotMod {
       // Other simple cases are handled by ordinary subtyping relationships.
       //
       if (tp2.underlyingClassSymbol eq defn.MutableAnyClass) {
-        val sym1 = tp1.underlyingClassSymbol
+        /// Traverses all aliases, including TermRefs and annotated types.
+        def traverseTermRefs(tp: Type): Type = tp.dealias match {
+          case tp: TermRef => traverseTermRefs(tp.info)
+          case tp: AnnotatedType => traverseTermRefs(tp.tpe)
+          case tpd => tpd
+        }
+        val sym1 = traverseTermRefs(tp1).underlyingClassSymbol
         if (sym1 ne NoSymbol) return !((sym1 eq defn.AnyClass) || (sym1 eq defn.ReadonlyNothingClass))
       }
 
@@ -697,66 +703,107 @@ object DotMod {
     override def copyIn(ctx: Context): TypeComparer = new DotModTypeComparer(ctx)
   }
 
-  //def isMutable(tp: Type)(implicit ctx: Context) = nonMut_<:<(tp, defn.MutableAnyType) || nonMut_<:<(tp, defn.NothingType)
-  //def isReadonly(tp: Type)(implicit ctx: Context) = nonMut_<:<(defn.ReadonlyNothingType, tp) || nonMut_<:<(defn.AnyType, tp)
-  //def isAnnotation(tp: Type)(implicit ctx: Context) = nonMut_<:<(tp, defn.AnnotationType)
-
   class DotModTyper extends Typer {
 
     var alreadyStarted = false
 
+    override def selectionType(site: Type, name: Name, pos: Position)(implicit ctx: Context): Type = {
+      //
+      // One issue with viewpoint-adapting TermRefs is that when the type assigner tries
+      // to query for the named member of a readonly type, it doesn't succeed.
+      // The reason is that Type#findMember does not understand that ReadonlyNothing
+      // should contain all declarations (except the mutability permission).
+      //
+      // One way to solve this problem is to subclass OrType with an overloaded findMember.
+      // Unfortunately, Type#findMember is declared final, so it would have to be declared
+      // non-final for this solution to work. Also, any other place that creates an OrType
+      // may need to be changed to create the subclassed OrType instead.
+      //
+      // Another way to solve this problem is to subclass the TypeAssigner, and override
+      // the selectionType method. We do this here.
+      // This code is a bit fragile. We only expect some combination of AndType, OrType, and
+      // TermRef. Other types we leave to super#selectType. If the AndType/OrType is wrapped
+      // inside anything more complicated than TermRef, the implementation here may fail.
+      // Second, calls to Type#findMember from other places may fail if they have underlying
+      // AndTypes or OrTypes with mutability information.
+      //
+      site match {
+        case OrType(site1, site2) =>
+          if (site1.underlyingClassSymbol eq defn.ReadonlyNothingClass)
+            return selectionType(site2, name, pos)
+          if (site2.underlyingClassSymbol eq defn.ReadonlyNothingClass)
+            return selectionType(site1, name, pos)
+        case AndType(site1, site2) =>
+          if (site1.underlyingClassSymbol eq defn.MutableAnyClass)
+            return selectionType(site2, name, pos)
+          if (site2.underlyingClassSymbol eq defn.MutableAnyClass)
+            return selectionType(site1, name, pos)
+        case site: TermRef =>
+          return selectionType(site.underlying match {
+            case mt: MethodType if mt.paramTypes.isEmpty && (site.symbol is Stable) => mt.resultType
+            case tp1 => tp1
+          }, name, pos)
+        case _ =>
+      }
+
+      super.selectionType(site, name, pos)
+    }
+
+
     def convertType(tpe: Type)(implicit ctx: Context): Type = {
 
       if (!alreadyStarted) {
-        println("Nothing <:< ReadonlyNothing == " + (defn.NothingType <:< defn.ReadonlyNothingType))
-        println("Nothing <:< MutableAny == " + (defn.NothingType <:< defn.ReadonlyNothingType))
-        println("ReadonlyNothing <:< Nothing == " + (defn.ReadonlyNothingType <:< defn.NothingType))
-        println("ReadonlyNothing <:< MutableAny == " + (defn.ReadonlyNothingType <:< defn.MutableAnyType))
-        println("ReadonlyNothing <:< ReadonlyNothing == " + (defn.ReadonlyNothingType <:< defn.ReadonlyNothingType))
-        println("ReadonlyNothing <:< Any == " + (defn.ReadonlyNothingType <:< defn.AnyType))
-        println("MutableAny <:< Nothing == " + (defn.MutableAnyType <:< defn.NothingType))
-        println("MutableAny <:< MutableAny == " + (defn.MutableAnyType <:< defn.MutableAnyType))
-        println("MutableAny <:< ReadonlyNothing == " + (defn.MutableAnyType <:< defn.ReadonlyNothingType))
-        println("MutableAny <:< Any == " + (defn.MutableAnyType <:< defn.AnyType))
-        println("Any <:< ReadonlyNothing == " + (defn.AnyType <:< defn.ReadonlyNothingType))
-        println("Any <:< MutableAny == " + (defn.AnyType <:< defn.MutableAnyType))
-        println()
-        println("Nothing <:< (MutableAny | ReadonlyNothing) == " +
-          (defn.NothingType <:< OrType(defn.MutableAnyType, defn.ReadonlyNothingType)))
-        println("ReadonlyNothing <:< (MutableAny | ReadonlyNothing) == " +
-          (defn.ReadonlyNothingType <:< OrType(defn.MutableAnyType, defn.ReadonlyNothingType)))
-        println("MutableAny <:< (MutableAny | ReadonlyNothing) == " +
-          (defn.MutableAnyType <:< OrType(defn.MutableAnyType, defn.ReadonlyNothingType)))
-        println("Any <:< (MutableAny | ReadonlyNothing) == " +
-          (defn.AnyType <:< OrType(defn.MutableAnyType, defn.ReadonlyNothingType)))
-        println()
-        println("(MutableAny | ReadonlyNothing) <:< Nothing == " +
-          (OrType(defn.MutableAnyType, defn.ReadonlyNothingType) <:< defn.NothingType))
-        println("(MutableAny | ReadonlyNothing) <:< ReadonlyNothing == " +
-          (OrType(defn.MutableAnyType, defn.ReadonlyNothingType) <:< defn.ReadonlyNothingType))
-        println("(MutableAny | ReadonlyNothing) <:< MutableAny == " +
-          (OrType(defn.MutableAnyType, defn.ReadonlyNothingType) <:< defn.MutableAnyType))
-        println("(MutableAny | ReadonlyNothing) <:< Any == " +
-          (OrType(defn.MutableAnyType, defn.ReadonlyNothingType) <:< defn.AnyType))
-        println()
-        println("Nothing <:< (MutableAny & ReadonlyNothing) == " +
-          (defn.NothingType <:< AndType(defn.MutableAnyType, defn.ReadonlyNothingType)))
-        println("ReadonlyNothing <:< (MutableAny & ReadonlyNothing) == " +
-          (defn.ReadonlyNothingType <:< AndType(defn.MutableAnyType, defn.ReadonlyNothingType)))
-        println("MutableAny <:< (MutableAny & ReadonlyNothing) == " +
-          (defn.MutableAnyType <:< AndType(defn.MutableAnyType, defn.ReadonlyNothingType)))
-        println("Any <:< (MutableAny & ReadonlyNothing) == " +
-          (defn.AnyType <:< AndType(defn.MutableAnyType, defn.ReadonlyNothingType)))
-        println()
-        println("(MutableAny & ReadonlyNothing) <:< Nothing == " +
-          (AndType(defn.MutableAnyType, defn.ReadonlyNothingType) <:< defn.NothingType))
-        println("(MutableAny & ReadonlyNothing) <:< ReadonlyNothing == " +
-          (AndType(defn.MutableAnyType, defn.ReadonlyNothingType) <:< defn.ReadonlyNothingType))
-        println("(MutableAny & ReadonlyNothing) <:< MutableAny == " +
-          (AndType(defn.MutableAnyType, defn.ReadonlyNothingType) <:< defn.MutableAnyType))
-        println("(MutableAny & ReadonlyNothing) <:< Any == " +
-          (AndType(defn.MutableAnyType, defn.ReadonlyNothingType) <:< defn.AnyType))
-        println()
+        if (false) {
+          println("Nothing <:< ReadonlyNothing == " + (defn.NothingType <:< defn.ReadonlyNothingType))
+          println("Nothing <:< MutableAny == " + (defn.NothingType <:< defn.ReadonlyNothingType))
+          println("ReadonlyNothing <:< Nothing == " + (defn.ReadonlyNothingType <:< defn.NothingType))
+          println("ReadonlyNothing <:< MutableAny == " + (defn.ReadonlyNothingType <:< defn.MutableAnyType))
+          println("ReadonlyNothing <:< ReadonlyNothing == " + (defn.ReadonlyNothingType <:< defn.ReadonlyNothingType))
+          println("ReadonlyNothing <:< Any == " + (defn.ReadonlyNothingType <:< defn.AnyType))
+          println("MutableAny <:< Nothing == " + (defn.MutableAnyType <:< defn.NothingType))
+          println("MutableAny <:< MutableAny == " + (defn.MutableAnyType <:< defn.MutableAnyType))
+          println("MutableAny <:< ReadonlyNothing == " + (defn.MutableAnyType <:< defn.ReadonlyNothingType))
+          println("MutableAny <:< Any == " + (defn.MutableAnyType <:< defn.AnyType))
+          println("Any <:< ReadonlyNothing == " + (defn.AnyType <:< defn.ReadonlyNothingType))
+          println("Any <:< MutableAny == " + (defn.AnyType <:< defn.MutableAnyType))
+          println()
+          println("Nothing <:< (MutableAny | ReadonlyNothing) == " +
+            (defn.NothingType <:< OrType(defn.MutableAnyType, defn.ReadonlyNothingType)))
+          println("ReadonlyNothing <:< (MutableAny | ReadonlyNothing) == " +
+            (defn.ReadonlyNothingType <:< OrType(defn.MutableAnyType, defn.ReadonlyNothingType)))
+          println("MutableAny <:< (MutableAny | ReadonlyNothing) == " +
+            (defn.MutableAnyType <:< OrType(defn.MutableAnyType, defn.ReadonlyNothingType)))
+          println("Any <:< (MutableAny | ReadonlyNothing) == " +
+            (defn.AnyType <:< OrType(defn.MutableAnyType, defn.ReadonlyNothingType)))
+          println()
+          println("(MutableAny | ReadonlyNothing) <:< Nothing == " +
+            (OrType(defn.MutableAnyType, defn.ReadonlyNothingType) <:< defn.NothingType))
+          println("(MutableAny | ReadonlyNothing) <:< ReadonlyNothing == " +
+            (OrType(defn.MutableAnyType, defn.ReadonlyNothingType) <:< defn.ReadonlyNothingType))
+          println("(MutableAny | ReadonlyNothing) <:< MutableAny == " +
+            (OrType(defn.MutableAnyType, defn.ReadonlyNothingType) <:< defn.MutableAnyType))
+          println("(MutableAny | ReadonlyNothing) <:< Any == " +
+            (OrType(defn.MutableAnyType, defn.ReadonlyNothingType) <:< defn.AnyType))
+          println()
+          println("Nothing <:< (MutableAny & ReadonlyNothing) == " +
+            (defn.NothingType <:< AndType(defn.MutableAnyType, defn.ReadonlyNothingType)))
+          println("ReadonlyNothing <:< (MutableAny & ReadonlyNothing) == " +
+            (defn.ReadonlyNothingType <:< AndType(defn.MutableAnyType, defn.ReadonlyNothingType)))
+          println("MutableAny <:< (MutableAny & ReadonlyNothing) == " +
+            (defn.MutableAnyType <:< AndType(defn.MutableAnyType, defn.ReadonlyNothingType)))
+          println("Any <:< (MutableAny & ReadonlyNothing) == " +
+            (defn.AnyType <:< AndType(defn.MutableAnyType, defn.ReadonlyNothingType)))
+          println()
+          println("(MutableAny & ReadonlyNothing) <:< Nothing == " +
+            (AndType(defn.MutableAnyType, defn.ReadonlyNothingType) <:< defn.NothingType))
+          println("(MutableAny & ReadonlyNothing) <:< ReadonlyNothing == " +
+            (AndType(defn.MutableAnyType, defn.ReadonlyNothingType) <:< defn.ReadonlyNothingType))
+          println("(MutableAny & ReadonlyNothing) <:< MutableAny == " +
+            (AndType(defn.MutableAnyType, defn.ReadonlyNothingType) <:< defn.MutableAnyType))
+          println("(MutableAny & ReadonlyNothing) <:< Any == " +
+            (AndType(defn.MutableAnyType, defn.ReadonlyNothingType) <:< defn.AnyType))
+          println()
+        }
         alreadyStarted = true
       }
 
