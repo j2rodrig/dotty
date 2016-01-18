@@ -502,7 +502,11 @@ object Types {
         }
       }
       def goAnd(l: Type, r: Type) = go(l) & (go(r), pre)
-      def goOr(l: Type, r: Type) = go(l) | (go(r), pre)
+      def goOr(l: Type, r: Type) = {
+        if (l.typeSymbol eq ctx.base.definitions.ReadonlyNothingClass) go(r)
+        else if (r.typeSymbol eq ctx.base.definitions.ReadonlyNothingClass) go(l)
+        else go(l) | (go(r), pre)
+      }
       def safeAnd(tp1: Type, tp2: Type): Type = (tp1, tp2) match {
         case (TypeBounds(lo1, hi1), TypeBounds(lo2, hi2)) => TypeBounds(lo1 | lo2, AndType(hi1, hi2))
         case _ => tp1 & tp2

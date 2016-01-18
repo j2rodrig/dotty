@@ -721,14 +721,20 @@ object DotMod {
       //
       // Another way to solve this problem is to subclass the TypeAssigner, and override
       // the selectionType method. We do this here.
-      // This code is a bit fragile. We only expect some combination of AndType, OrType, and
+      // This code is fragile. We only expect some combination of AndType, OrType, and
       // TermRef. Other types we leave to super#selectType. If the AndType/OrType is wrapped
       // inside anything more complicated than TermRef, the implementation here may fail.
+      // (And does fail. Testing uncovered an inability to deal correctly with both TermRefs
+      // and ExprTypes, and possibly others.)
       // Second, calls to Type#findMember from other places may fail if they have underlying
       // AndTypes or OrTypes with mutability information.
       //
+      // A third possibility is to special-case OrTypes containing ReadonlyNothing within
+      // findMember itself. The compiler shape does not seem to lend itself well to giving
+      // special meaning to some classes, as we are doing here with ReadonlyNothing.
+      //
       site match {
-        case OrType(site1, site2) =>
+        /*case OrType(site1, site2) =>
           if (site1.underlyingClassSymbol eq defn.ReadonlyNothingClass)
             return selectionType(site2, name, pos)
           if (site2.underlyingClassSymbol eq defn.ReadonlyNothingClass)
@@ -737,12 +743,12 @@ object DotMod {
           if (site1.underlyingClassSymbol eq defn.MutableAnyClass)
             return selectionType(site2, name, pos)
           if (site2.underlyingClassSymbol eq defn.MutableAnyClass)
-            return selectionType(site1, name, pos)
-        case site: TermRef =>
+            return selectionType(site1, name, pos)*/
+        /*case site: TermRef =>
           return selectionType(site.underlying match {
             case mt: MethodType if mt.paramTypes.isEmpty && (site.symbol is Stable) => mt.resultType
             case tp1 => tp1
-          }, name, pos)
+          }, name, pos)*/
         case _ =>
       }
 
