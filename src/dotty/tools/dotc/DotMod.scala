@@ -561,18 +561,32 @@ object DotMod {
       OrType(stripAnnots(tp), defn.ReadonlyNothingType)
     else if (sym eq defn.MutableAnnot)
       AndType(stripAnnots(tp), defn.MutableAnyType)
+    // todo alternative to @rothis: use @mutabilityOf(this)?
     // else if (sym eq defn.RoThisAnnot)  // todo find the correct polymorphic receiver parameter
     else tp
   }
 
-  def viewpointAdaptTermRef(tp: TermRef)(implicit ctx: Context): Type = {
+  /*def viewpointAdaptTermRef(tp: TermRef)(implicit ctx: Context): Type = {
+    tp.dealias.stripAnnots match {
+      case tp1: MethodicType =>  // todo what to do here?
+      case
+    }
+    // todo prefix mutability
+
+    tp.prefix
+
+    tp.info match {
+
+    }
+
+
     // todo adaptation of polytypes with receiver type-params
     //val prefixMutability =
     //  if (tp.prefix eq NoPrefix) getOuterAccessPathMutability(tp.symbol)
     //  else tp.prefix.getMutability(Hi)   // todo adaptation with abstract mutability types?
     //viewpointAdapt(prefixMutability, tp)
     tp
-  }
+  }*/
 
   def viewpointAdaptThisType(tp: ThisType)(implicit ctx: Context): Type = {
     //val prefixMutability = getOuterAccessPathMutability(tp.cls)
@@ -610,8 +624,140 @@ object DotMod {
         case NoType => NoSymbol
       }
     }
-  }
 
+    /**
+     * Finds the TermRef underneath AndTypes, OrTypes, and annotations.
+     * If it doesn't exist, or is ambiguous, returns NoType.
+     */
+    def underlyingTermRef(implicit ctx: Context): Type = tp.dealias.stripAnnots match {
+      case tp: TermRef => tp
+      case tp: AndOrType =>
+        val term1 = tp.tp1.underlyingTermRef
+        val term2 = tp.tp2.underlyingTermRef
+        if (term1.exists && !term2.exists) term1
+        else if (!term1.exists && term2.exists) term2
+        else NoType
+      case _ => NoType
+    }
+
+    /**
+     * Returns the extractable mutability portion of this type.
+     * The returned list should be interpreted as a set of intersection types.
+     * An empty list means readonly.
+     */
+    def mutability(implicit ctx: Context): List[Type] = {
+      val wtp = tp.widenDealias.stripAnnots
+      if (defn.ReadonlyNothingType <:< wtp) List()
+      else if (wtp <:< defn.MutableAnyType) List(defn.MutableAnyType)
+      else if (defn.MutableAnyType <:< wtp) List(tp)  // found a polymorphic mutability type
+      else wtp match {
+        case AndType(tp1, tp2) =>
+          tp1.mutability ::: tp2.mutability   // include mutabilities present in either type
+        case OrType(tp1, tp2) =>
+          val tp2m = tp2.mutability
+          tp1.mutability.filter(tp2m.contains(_))  // include mutabilities present in both types
+        case _ => List()  // default to readonly if mutability cannot be extracted
+      }
+    }
+
+    /**
+     * Returns this type, but with the mutability intersections in the given type list.
+     */
+    def withMutability(tps: List[Type])(implicit ctx: Context): Type = {
+      // If there are any intersections with MutableAny, then ignore all other mutabilities
+      if (tps contains defn.MutableAnyType) {
+        if (tp <:< defn.MutableAnyType) tp     // if this type is already mutable, don't do anything
+        else AndType(tp, defn.MutableAnyType)  // otherwise, return an intersection type
+        // Note: Adding &MutableAny to self-types during viewpoint adaptation (which was happening
+        //  before the tp <:< defn.MutableAnyType condition was added) was causing a failure of
+        //  the findRef method in typedIdent to find the self-reference symbol.
+        // This bug shouldn't crop up when looking for variables/methods.
+      }
+      else {
+        //
+        // We first do a union with ReadonlyNothing to negate the effects of any existing
+        // mutability intersections. Then we add an intersection with all types in the types list.
+        //
+        var tp1 = tp.asReadonly
+        tps.foreach { mut => tp1 = AndType(tp1, mut) }
+        tp1
+      }
+    }
+
+    def asReadonly(implicit ctx: Context): Type = OrType(tp, defn.ReadonlyNothingType)
+
+    /**
+     * Performs viewpoint adaptation with respect to the given prefix type.
+     */
+    def viewpointAdaptMonomorphicWith(prefix: Type)(implicit ctx: Context): Type = {
+      assert(prefix.exists)
+      assert(prefix ne NoPrefix)
+      assert(!tp.dealias.stripAnnots.isInstanceOf[MethodicType])
+      if (prefix <:< defn.MutableAnyType || defn.ReadonlyNothingType <:< tp) tp  // adaptation does not change tp here
+      else {
+        val tpm = tp.mutability
+        val prefixm = prefix.mutability
+        val adapted = tpm.filter(prefixm.contains(_)) // union of mutabilities
+        tp.withMutability(adapted)
+      }
+    }
+
+    //def viewpointAdaptPolymorphic?
+
+    //
+    // On viewpoint adaptation of methods: Every non-getter method is given a polymorphic receiver type
+    //   with a lower bound that respects actual receiver mutability. Assume enclosing class C:
+    //  @readonly m(x:S):T@readonly -->>   m[V >: Any <: Any](x:S): T|RoNothing ,
+    //                                     C.this:(C|RoNothing)&V
+    //  @rothis m(x:S):T@rothis     -->>   m[V >: MutableAny <: Any](x:S): (T|RoNothing)&V ,
+    //                                     C.this:(C|RoNothing)&V
+    //  @mutable m(x:S):T@mutable   -->>   m[V >: MutableAny <: MutableAny](x:S): (T|RoNothing)&MutableAny ,
+    //                                     C.this:(C|RoNothing)&V
+    // And at the call site:
+    //  y = x.m(...)
+    // Cases:
+    //  x:C@mutable    y:C@mutable    -->>  No problem
+    //  x:C@mutable    y:C@readonly   -->>  No problem
+    //  x:C@readonly   y:C@mutable    -->>  Type mismatch
+    //  x:C@readonly   y:C@readonly   -->>  No problem
+    //
+    // @mutabilityOf(this) or @polyread annotations are converted to intersection-type mutabilities.
+    // The basic conversion (since these annotations override underlying mutabilities) is:
+    //  U @mutabilityOf(this)  -->>  (U | ReadonlyNothing) & V
+    //
+    // todo alternative notations: @mutabilityOf[T] , @mutabilityOf(x) , @rothis , @polyread
+    // todo  key considerations: wrt. nested methods, @mutabilityOf doesn't work because we have no
+    // todo    explicit type or term to pass to it.
+    //
+    // Getter methods (viewpoint adaptation of): Same as ordinary methods with @rothis receiver and result.
+    //
+    //  m:T     -->>   m[V >: MutableAny <: Any]: (T|RoNothing)&V ,
+    //                 C.this=(C|RoNothing)&V
+    // At the call site:
+    //  y: R = x.m[solve wrt R]
+    //
+    // Fields: Same as getter methods, but don't bother with the PolyType wrapper.
+    // We set the mutability of the result to be an upper bound of the receiver mutability
+    // and the result type mutability.
+    //
+    // todo Key consideration: when do we adapt wrt. given receiver, and when wrt. the prototype?
+    // todo Possible answer: Let Scala decide. But we still need to check at the call site
+    // todo  to make sure that a non-mutable prefix isn't used to select a method with an incompatible
+    // todo  receiver-type parameter.
+    //
+    // Regardless of whether the type parameter V is resolved with respect to the prototype
+    // or the receiver type, the receiver type must still be checked for substitutability
+    // with V.
+    // The main benefit of using a PolyType in implementation seems to be that we get
+    // substitution of V within the body of the method for free.
+    //
+    // Defaults:
+    // Getter methods default to @rothis receiver mutability and @rothis result mutability,
+    // unless annotated differently. (I.e., annotations given by the programmer are applied
+    // "outside" of any default annotations.)
+    //
+
+  }
 
 
   /**
@@ -647,16 +793,14 @@ object DotMod {
       // We treat as special the case where tp2 is MutableAny.
       // Other simple cases are handled by ordinary subtyping relationships.
       //
+      // We have to make a special case for ImportType.
+      // Import types do not resolve to TypeRefs. (See discussion under Viewpoint Adaptation.)
+      //
+      // todo what's a reasonable solution for avoiding the `stable symbol' errors
+      // todo  that happen when mutability intersections are added to terms that refer to objects?
+      //
       if (tp2.underlyingClassSymbol eq defn.MutableAnyClass) {
-        /// Traverses all aliases, including selections and annotated types.
-        def traverseSelectionsAndAliases(tp: Type): Type = tp.dealias match {
-          case tp: TermRef => traverseSelectionsAndAliases(tp.info)
-          case tp: ThisType => traverseSelectionsAndAliases(tp.underlying)
-          case tp: SuperType => traverseSelectionsAndAliases(tp.underlying)
-          case tp: AnnotatedType => traverseSelectionsAndAliases(tp.tpe)
-          case tpd => tpd
-        }
-        val sym1 = traverseSelectionsAndAliases(tp1).underlyingClassSymbol
+        val sym1 = tp1.widenDealias.stripAnnots.underlyingClassSymbol
         if (sym1 ne NoSymbol) return !((sym1 eq defn.AnyClass) || (sym1 eq defn.ReadonlyNothingClass))
       }
 
@@ -702,21 +846,35 @@ object DotMod {
       super.isSubType(tp1, tp2)
     }
 
+    /** The greatest lower bound of two types */
+    /*override def glb(tp1: Type, tp2: Type): Type = {
+      if (tp2 isRef defn.ReadonlyNothingClass) {
+        if (tp1 <:< defn.MutableAnyType) NothingType else tp2
+      }
+      else super.glb(tp1, tp2)
+    }*/
+
     override def copyIn(ctx: Context): TypeComparer = new DotModTypeComparer(ctx)
   }
 
-  def isAssignable(tp: Type)(implicit ctx: Context): Boolean = tp.dealias match {
+  def isAssignable(tp: TermRef)(implicit ctx: Context): Boolean = {
+    //println(s"---checking mutability of ${tp.prefix} , == ${tp.prefix <:< defn.MutableAnyType}")
+    (tp.prefix eq NoPrefix) || (tp.prefix <:< defn.MutableAnyType)
+    // todo see if prefix reaches into outer environment
+  }
+  /*def isAssignable(tp: Type)(implicit ctx: Context): Boolean = tp.dealias.stripAnnots match {
     case tp: TermRef =>
       //println(s"---checking mutability of ${tp.prefix} , == ${tp.prefix <:< defn.MutableAnyType}")
       (tp.prefix eq NoPrefix) || (tp.prefix <:< defn.MutableAnyType)
-    case tp: AnnotatedType =>
-      isAssignable(tp.tpe)
+      // todo see if prefix reaches into outer environment
+    //case tp: AnnotatedType =>
+    //  isAssignable(tp.tpe)
     case OrType(tp1, tp2) =>
-      isAssignable(tp1) && isAssignable(tp2)
+      isAssignable(tp1) || isAssignable(tp2)
     case AndType(tp1, tp2) =>
       isAssignable(tp1) || isAssignable(tp2)
     case _ => false
-  }
+  }*/
 
   class DotModTyper extends Typer {
 
@@ -828,10 +986,41 @@ object DotMod {
         alreadyStarted = true
       }
 
+      //
+      // Don't do anything with import types.
+      // Other places in the compiler expect references to import types to not have And/OrTypes wrapping them.
+      // Furthermore, what does it mean for an import type to have a mutability?
+      // An import type just seems to the be the underlying type of an Import tree.
+      // As far as I know, an import reference cannot be used inside an ordinary expression
+      // or assignment. Therefore, the mutability of an import type should not matter.
+      //
+      if (tpe.widenDealias.stripAnnots.isInstanceOf[ImportType]) return tpe
+
       val tpe0 = tpe match {
         case tpe: AnnotatedType => convertAnnotationToType(tpe)
         case tpe: MethodicType => makePolyTypeWithReceiver(tpe)
-        case tpe: TermRef => viewpointAdaptTermRef(tpe)
+        case tpe: TermRef =>
+          //viewpointAdaptTermRef(tpe)
+          //
+          // If we're selecting a method, then just check that the receiver mutability matches
+          // the declared receiver mutability. We do not do viewpoint adaptation on methodic
+          // types ourselves--we let the constraint solver take care of that.
+          //
+          // If we're selecting a field, then we perform viewpoint adaptation with respect to
+          // the prefix mutability.
+          //
+          // If we're selecting a variable local to the current method, then viewpoint adaptation
+          // unnecessary because the local frame reference is assumed mutable.
+          //
+          if (tpe.symbol.is(Method)) tpe  // todo check formal vs actual receiver mutability
+          else if (tpe.prefix ne NoPrefix) {
+            //println("---adaping " + tpe)
+            val tpe0 = tpe.viewpointAdaptMonomorphicWith(tpe.prefix)
+            //println("---to " + tpe0)
+            tpe0
+          }
+          else tpe  // no viewpoint adaptation needed
+
         case tpe: ThisType => viewpointAdaptThisType(tpe)
         case tpe: SuperType => viewpointAdaptSuperType(tpe)
         case _ => tpe
@@ -842,11 +1031,11 @@ object DotMod {
       //println(isReadonly(tpe0))
       //println(tpe0.isInstanceOf[NamedType])
 
-      if (tpe ne tpe0) {
+      //if (tpe ne tpe0) {
         //println("Conversion of " + tpe)
         //println("           to " + tpe0)
         //println()
-      }
+      //}
 
 
 
@@ -891,11 +1080,15 @@ object DotMod {
 
       if (!tree.tpe.exists || tree.tpe.isError) return tree
 
+      //
+      // Check Assignability
+      //
       tree match {
         case tree: Assign =>
+          val termRef = tree.lhs.tpe.underlyingTermRef.asInstanceOf[TermRef]
           //println("--- " + tree.lhs.tpe)
-          if (!isAssignable(tree.lhs.tpe))
-            return errorTree(tree, s"${tree.lhs.symbol.name} is not assignable here")
+          if (!isAssignable(termRef))
+            return errorTree(tree, s"${termRef.symbol.name} is not assignable here")
         case _ =>
       }
 
@@ -921,6 +1114,37 @@ object DotMod {
       //if (tpe1 ne tree.tpe) println(" 1> " + tpe1)
       //println("")
 
+
+      /*tree match {
+        case tree: Import =>
+          if (tree.tpe ne convertType(tree.tpe)) {
+            println()
+            println("---IMPORT variance: from " + tree.tpe)
+            println("---to: " + convertType(tree.tpe))
+            println("---prefix mutability: " + tree.tpe.asInstanceOf[TermRef].prefix.mutability)
+            println("---dealiased underlying: " + tree.tpe.asInstanceOf[TermRef].underlying.widenDealias)
+            println("---dealiased underlying mutability: " + tree.tpe.asInstanceOf[TermRef].underlying.widenDealias.mutability)
+            println()
+          }
+        case _ =>
+          if (tree.tpe ne convertType(tree.tpe)) {
+            println()
+            println("---Type variance: from " + tree.tpe)
+            println("---to: " + convertType(tree.tpe))
+            println()
+          }
+      }*/
+
+      //
+      // r = o.m(...)
+      // where m(...): RT
+      // converted to: m[T >: MutableAny <: Any](...): (RT | RONothing) & T
+      //
+      // (RT | RONothing) & T <: type(r)
+      //
+      // type(r) is the prototype
+      //
+
       val tpe1 =
         //if (tree.isInstanceOf[Select] || tree.isInstanceOf[Ident])
           convertType(tree.tpe)
@@ -934,6 +1158,16 @@ object DotMod {
           if ((ctx.mode is Mode.Pattern) || tpe1 <:< pt) tree1
           else err.typeMismatch(tree1, pt)
         }
+
+      /*tree1 match {
+        case tree1: DenotingTree =>
+          if (tree1.symbol eq NoSymbol) {
+            println(s"--- ${tree1.denot} on tree $tree1")
+            println(s"--- original ${tree.denot} tree $tree")
+            println()
+          }
+        case _ =>
+      }*/
 
       tree1
     }
@@ -961,3 +1195,11 @@ object DotMod {
     }
   }
 }
+
+// FUTURE WORK
+//
+// A method is parallelizable if it does not write to its prestate or read from
+// its prestate. This condition can be implemented by adding a "readable" permission
+// as well as a "mutable" permission. However, reading of immutable objects may
+// be allowed (in the object-immutability sense).
+//

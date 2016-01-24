@@ -1,5 +1,7 @@
 package dotty
 
+import scala.annotation.meta._
+
 trait Assignability1 {
 
   type T = Assignability1
@@ -22,5 +24,24 @@ trait Assignability1 {
   x.x1 = x1
   x1.x = x1  // ERROR: mutability and assignability
   x1.x1 = x1  // ERROR: assignability
+
+  def e1 = {  // z1:E1 =>
+
+    var y: T = this
+    var y1: TR = this
+
+    // @getter def y[V >: MutableAny <: Any]: (T|ReadonlyNothing)&V
+
+    @getter def e2 /* [V2 >: MutableAny <: Any](z1: (E1|ReadonlyNothing)&V2) */ = {  // z2:E2 =>
+
+      // z1.y[V2] = z1.y[V2]
+      y = y   // ERROR: assignability
+      y.x = y   // ERROR: assignability
+      y.x = y1   // ERROR: assignability and mutability
+
+      y1
+    }
+    y1
+  }
 
 }
