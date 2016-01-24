@@ -1600,9 +1600,13 @@ object SymDenotations {
           case tp: TypeProxy =>
             baseTypeRefOf(tp.underlying)
           case AndType(tp1, tp2) =>
-            baseTypeRefOf(tp1) & baseTypeRefOf(tp2)
+            if (tp2.typeSymbol eq defn.MutableAnyClass) baseTypeRefOf(tp1)
+            else if (tp1.typeSymbol eq defn.MutableAnyClass) baseTypeRefOf(tp2)
+            else baseTypeRefOf(tp1) & baseTypeRefOf(tp2)
           case OrType(tp1, tp2) =>
-            baseTypeRefOf(tp1) | baseTypeRefOf(tp2)
+            if (tp2.typeSymbol eq defn.ReadonlyNothingClass) baseTypeRefOf(tp1)
+            else if (tp1.typeSymbol eq defn.ReadonlyNothingClass) baseTypeRefOf(tp2)
+            else baseTypeRefOf(tp1) | baseTypeRefOf(tp2)
           case JavaArrayType(_) if symbol == defn.ObjectClass =>
             this.typeRef
           case _ =>

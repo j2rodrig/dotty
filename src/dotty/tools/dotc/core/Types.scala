@@ -862,6 +862,21 @@ object Types {
     def narrow(implicit ctx: Context): TermRef =
       TermRef(NoPrefix, ctx.newSkolem(this))
 
+    /**
+     * If this type is recursively of the form T&M or T|M, where M is a mutability type,
+     * returns T without M.
+     * C.f. stripAnnots, where stripAnnots removes annotations and withoutMutabilty
+     * removes mutability information.
+     */
+    def withoutMutability(implicit ctx: Context): Type = this match {
+      case tp: AndOrType =>
+        val term2 = tp.tp2.widenDealias.stripAnnots.underlyingClassRef(refinementOK = false)
+        val term2isMut = (term2 eq defn.MutableAnyType) || (term2 eq defn.ReadonlyNothingType)
+        if (term2isMut) tp.tp1.withoutMutability
+        else tp
+      case _ => this
+    }
+
     // ----- Normalizing typerefs over refined types ----------------------------
 
     /** If this normalizes* to a refinement type that has a refinement for `name` (which might be followed

@@ -268,6 +268,11 @@ object Trees {
         case tpe: ThisType => tpe.cls.denot
         case _ => NoDenotation
       }
+      case tpe: AndOrType => tpe.withoutMutability match {
+        case tpe: NamedType => tpe.denot
+        case tpe: ThisType => tpe.cls.denot
+        case _ => NoDenotation
+      }
       case _ => NoDenotation
     }
   }
