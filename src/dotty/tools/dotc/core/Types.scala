@@ -698,9 +698,9 @@ object Types {
     /** The basetype TypeRef of this type with given class symbol,
      *  but without including any type arguments
      */
-    final def baseTypeRef(base: Symbol)(implicit ctx: Context): Type = /*ctx.traceIndented(s"$this baseTypeRef $base")*/ /*>|>*/ track("baseTypeRef") /*<|<*/ {
+    final def baseTypeRef(base: Symbol, ignoreMutability: Boolean = false)(implicit ctx: Context): Type = /*ctx.traceIndented(s"$this baseTypeRef $base")*/ /*>|>*/ track("baseTypeRef") /*<|<*/ {
       base.denot match {
-        case classd: ClassDenotation => classd.baseTypeRefOf(this)
+        case classd: ClassDenotation => classd.baseTypeRefOf(this, ignoreMutability)
         case _ => NoType
       }
     }
@@ -865,15 +865,28 @@ object Types {
     /**
      * If this type is recursively of the form T&M or T|M, where M is a mutability type,
      * returns T without M.
-     * C.f. stripAnnots, where stripAnnots removes annotations and withoutMutabilty
+     * C.f. stripAnnots, where stripAnnots removes annotations and withoutMutability
      * removes mutability information.
      */
     def withoutMutability(implicit ctx: Context): Type = this match {
       case tp: AndOrType =>
-        val term2 = tp.tp2.widenDealias.stripAnnots.underlyingClassRef(refinementOK = false)
+        val term2 = tp.tp2.underlyingClassRef(refinementOK = false)
         val term2isMut = (term2 eq defn.MutableAnyType) || (term2 eq defn.ReadonlyNothingType)
         if (term2isMut) tp.tp1.withoutMutability
         else tp
+      case _ => this
+    }
+
+    def withMutabilityOf(tp: Type)(implicit ctx: Context): Type = this match {
+      case _: ExprType | _: TypeBounds | _: RefinedType => this  // don't try to annotate certain proxy types
+      case _: TypeProxy => tp match {
+        case tp: AndOrType =>
+          val term2 = tp.tp2.underlyingClassRef(refinementOK = false)
+          val term2isMut = (term2 eq defn.MutableAnyType) || (term2 eq defn.ReadonlyNothingType)
+          if (term2isMut) tp.derivedAndOrType(this.withMutabilityOf(tp.tp1), tp.tp2)
+          else this
+        case _ => this
+      }
       case _ => this
     }
 

@@ -269,8 +269,16 @@ object Trees {
         case _ => NoDenotation
       }
       case tpe: AndOrType => tpe.withoutMutability match {
-        case tpe: NamedType => tpe.denot
-        case tpe: ThisType => tpe.cls.denot
+        case tpe1: NamedType => tpe1.denot match {
+          case denot: SingleDenotation =>
+            denot.derivedSingleDenotation(denot.symbol, denot.info.withMutabilityOf(tpe))
+          case denot => denot
+        }
+        case tpe1: ThisType => tpe1.cls.denot match {
+          case denot: SingleDenotation =>
+            denot.derivedSingleDenotation(denot.symbol, denot.info.withMutabilityOf(tpe))
+          case denot => denot
+        }
         case _ => NoDenotation
       }
       case _ => NoDenotation

@@ -646,7 +646,7 @@ object SymDenotations {
                | ${owner.showLocated} where target is defined""".stripMargin)
         else if (
           !(  isType // allow accesses to types from arbitrary subclasses fixes #4737
-           || pre.baseTypeRef(cls).exists // ??? why not use derivesFrom ???
+           || pre.baseTypeRef(cls, true).exists // ??? why not use derivesFrom ???
            || isConstructor
            || (owner is ModuleClass) // don't perform this check for static members
            ))
@@ -1556,10 +1556,10 @@ object SymDenotations {
     private[this] var baseTypeRefValid: RunId = NoRunId
 
     /** Compute tp.baseTypeRef(this) */
-    final def baseTypeRefOf(tp: Type)(implicit ctx: Context): Type = {
+    final def baseTypeRefOf(tp: Type, ignoreMutability: Boolean)(implicit ctx: Context): Type = {
 
       def foldGlb(bt: Type, ps: List[Type]): Type = ps match {
-        case p :: ps1 => foldGlb(bt & baseTypeRefOf(p), ps1)
+        case p :: ps1 => foldGlb(bt & baseTypeRefOf(p, ignoreMutability), ps1)
         case _ => bt
       }
 
@@ -1585,7 +1585,7 @@ object SymDenotations {
         Stats.record("computeBaseTypeOf")
         if (symbol.isStatic && tp.derivesFrom(symbol))
           symbol.typeRef
-        else tp match {
+        else (if (ignoreMutability) tp.withoutMutability else tp) match {
           case tp: TypeRef =>
             val subcls = tp.symbol
             if (subcls eq symbol)
@@ -1595,18 +1595,10 @@ object SymDenotations {
                 if (cdenot.superClassBits contains symbol.superId) foldGlb(NoType, tp.parents)
                 else NoType
               case _ =>
-                baseTypeRefOf(tp.underlying)
+                baseTypeRefOf(tp.underlying, ignoreMutability)
             }
           case tp: TypeProxy =>
-            baseTypeRefOf(tp.underlying)
-          case AndType(tp1, tp2) =>
-            if (tp2.typeSymbol eq defn.MutableAnyClass) baseTypeRefOf(tp1)
-            else if (tp1.typeSymbol eq defn.MutableAnyClass) baseTypeRefOf(tp2)
-            else baseTypeRefOf(tp1) & baseTypeRefOf(tp2)
-          case OrType(tp1, tp2) =>
-            if (tp2.typeSymbol eq defn.ReadonlyNothingClass) baseTypeRefOf(tp1)
-            else if (tp1.typeSymbol eq defn.ReadonlyNothingClass) baseTypeRefOf(tp2)
-            else baseTypeRefOf(tp1) | baseTypeRefOf(tp2)
+            baseTypeRefOf(tp.underlying, ignoreMutability)
           case JavaArrayType(_) if symbol == defn.ObjectClass =>
             this.typeRef
           case _ =>

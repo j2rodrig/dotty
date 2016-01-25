@@ -1026,50 +1026,7 @@ object DotMod {
         case _ => tpe
       }
 
-      //println("Conversion of " + tpe)
-      //println(isMutable(tpe0))
-      //println(isReadonly(tpe0))
-      //println(tpe0.isInstanceOf[NamedType])
-
-      //if (tpe ne tpe0) {
-        //println("Conversion of " + tpe)
-        //println("           to " + tpe0)
-        //println()
-      //}
-
-
-
-      /*// Named types other than Any should be considered Mutable. Patch up if needed.
-      // Constant types are also defaulted to Mutable to avoid a lot of errors due to unannotated libraries.
-      val tpe1 = {
-        if (isMutable(tpe0) || isReadonly(tpe0) || isAnnotation(tpe0)) tpe0
-        else tpe0 match {
-
-          case tpe0: TypeRef =>
-            if (tpe0.symbol.is(ModuleClass | PackageClass | HigherKinded)) tpe0  // don't do anything with modules/packages/methods
-            else AndType(tpe0, defn.MutableAnyType)     // default to Mutable
-
-          case tpe0: ConstantType => AndType(tpe0, defn.MutableAnyType)  // also default to Mutable
-
-          case _ => tpe0
-        }
-      }
-
       // CAREFUL! DenotingTrees strip annotations when calling denot.
-
-      if (tpe1 ne tpe0) println("     to: " + tpe1) else println("No conversion")
-      println()
-      */
-
-      /*val tpe1 = {
-        if (tpe0 <:< defn.MutableAnyType || defn.ReadonlyNothingType <:< tpe0) tpe0
-        else if (defn.AnyType <:< tpe0) tpe0   // Any already compares as Readonly, so no modification is needed.
-        else tpe0 match {
-          case tpe0: NamedType => AndType(tpe0, defn.MutableAnyType)  // default to Mutable
-          case tpe0: ConstantType => AndType(tpe0, defn.MutableAnyType)  // also default to Mutable
-          case _ => tpe0
-        }
-      }*/
 
       tpe0
     }
@@ -1086,54 +1043,10 @@ object DotMod {
       tree match {
         case tree: Assign =>
           val termRef = tree.lhs.tpe.underlyingTermRef.asInstanceOf[TermRef]
-          //println("--- " + tree.lhs.tpe)
           if (!isAssignable(termRef))
             return errorTree(tree, s"${termRef.symbol.name} is not assignable here")
         case _ =>
       }
-
-      /*// Convert symbol info
-      tree.tpe match {
-        case tpe: NamedType => tpe.denot match {
-          case denot: SymDenotation =>
-            println("SymDenotation " + denot.name + ":::")
-            val info1 = convertType(denot.info)
-            //println("SymDenot of " + denot.name + ": " + denot.info)
-            if (info1 ne denot.info) {
-              denot.info = info1
-              //println("                    to: " + denot.info)
-            }
-          //println("")
-          case _ =>
-        }
-        case _ =>
-      }*/
-
-      //println("--> " + tree.tpe)
-      //if (tpe0 ne tree.tpe) println(" 0> " + tpe0)
-      //if (tpe1 ne tree.tpe) println(" 1> " + tpe1)
-      //println("")
-
-
-      /*tree match {
-        case tree: Import =>
-          if (tree.tpe ne convertType(tree.tpe)) {
-            println()
-            println("---IMPORT variance: from " + tree.tpe)
-            println("---to: " + convertType(tree.tpe))
-            println("---prefix mutability: " + tree.tpe.asInstanceOf[TermRef].prefix.mutability)
-            println("---dealiased underlying: " + tree.tpe.asInstanceOf[TermRef].underlying.widenDealias)
-            println("---dealiased underlying mutability: " + tree.tpe.asInstanceOf[TermRef].underlying.widenDealias.mutability)
-            println()
-          }
-        case _ =>
-          if (tree.tpe ne convertType(tree.tpe)) {
-            println()
-            println("---Type variance: from " + tree.tpe)
-            println("---to: " + convertType(tree.tpe))
-            println()
-          }
-      }*/
 
       //
       // r = o.m(...)
@@ -1158,16 +1071,6 @@ object DotMod {
           if ((ctx.mode is Mode.Pattern) || tpe1 <:< pt) tree1
           else err.typeMismatch(tree1, pt)
         }
-
-      /*tree1 match {
-        case tree1: DenotingTree =>
-          if (tree1.symbol eq NoSymbol) {
-            println(s"--- ${tree1.denot} on tree $tree1")
-            println(s"--- original ${tree.denot} tree $tree")
-            println()
-          }
-        case _ =>
-      }*/
 
       tree1
     }
