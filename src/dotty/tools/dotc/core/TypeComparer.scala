@@ -328,7 +328,12 @@ class TypeComparer(initctx: Context) extends DotClass with ConstraintHandling {
     case _ =>
       val cls2 = tp2.symbol
       if (cls2.isClass) {
-        val base = tp1.baseTypeRef(cls2)
+        //
+        // Mutability is ignored here because baseTypeRef is not sound due to
+        // baseTypeRef not being able to tell if the classes should be interpreted
+        // as readonly. See notes in SymDenotation#baseTypeRefOf.
+        //
+        val base = tp1.baseTypeRef(cls2, ignoreMutability = false)
         if (base.exists && (base ne tp1)) return isSubType(base, tp2)
         if (cls2 == defn.SingletonClass && tp1.isStable) return true
       }

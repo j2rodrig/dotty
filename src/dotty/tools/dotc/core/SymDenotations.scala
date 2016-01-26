@@ -646,7 +646,7 @@ object SymDenotations {
                | ${owner.showLocated} where target is defined""".stripMargin)
         else if (
           !(  isType // allow accesses to types from arbitrary subclasses fixes #4737
-           || pre.baseTypeRef(cls, true).exists // ??? why not use derivesFrom ???
+           || pre.baseTypeRef(cls).exists // ??? why not use derivesFrom ???
            || isConstructor
            || (owner is ModuleClass) // don't perform this check for static members
            ))
@@ -1366,6 +1366,7 @@ object SymDenotations {
       base.isClass &&
       (  (symbol eq base)
       || (superClassBits contains base.superId)
+      || ((base eq defn.MutableAnyClass) && (symbol ne defn.AnyClass) && (symbol ne defn.ReadonlyNothingClass))
       || (this is Erroneous)
       || (base is Erroneous)
       )
@@ -1585,7 +1586,7 @@ object SymDenotations {
         Stats.record("computeBaseTypeOf")
         if (symbol.isStatic && tp.derivesFrom(symbol))
           symbol.typeRef
-        else (if (ignoreMutability) tp.withoutMutability else tp) match {
+        else (if (false) tp.withoutMutability else tp) match {
           case tp: TypeRef =>
             val subcls = tp.symbol
             if (subcls eq symbol)
@@ -1599,6 +1600,32 @@ object SymDenotations {
             }
           case tp: TypeProxy =>
             baseTypeRefOf(tp.underlying, ignoreMutability)
+          case AndType(tp1, tp2) =>
+            //
+            // The idea here is that an intersection with MutableAny ought not to change the
+            // set of base classes. We don't really know here if symbol should be interpreted
+            // as mutable or readonly, so by default we want to ignore any mutability.
+            //
+            if (ignoreMutability) {
+              if (tp1.widenDealias.stripAnnots eq defn.MutableAnyType)
+                return baseTypeRefOf(tp2, ignoreMutability)
+              if (tp2.widenDealias.stripAnnots eq defn.MutableAnyType)
+                return baseTypeRefOf(tp1, ignoreMutability)
+            }
+            baseTypeRefOf(tp1, ignoreMutability) & baseTypeRefOf(tp2, ignoreMutability)
+          case OrType(tp1, tp2) =>
+            //
+            // The idea here is that a union with ReadonlyNothing ought not to change the
+            // set of base classes. We don't really know here if symbol should be interpreted
+            // as mutable or readonly, so by default we want to ignore any mutability.
+            //
+            if (ignoreMutability) {
+              if (tp1.widenDealias.stripAnnots eq defn.ReadonlyNothingType)
+                return baseTypeRefOf(tp2, ignoreMutability)
+              if (tp2.widenDealias.stripAnnots eq defn.ReadonlyNothingType)
+                return baseTypeRefOf(tp1, ignoreMutability)
+            }
+            baseTypeRefOf(tp1, ignoreMutability) | baseTypeRefOf(tp2, ignoreMutability)
           case JavaArrayType(_) if symbol == defn.ObjectClass =>
             this.typeRef
           case _ =>

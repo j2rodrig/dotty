@@ -666,7 +666,8 @@ object DotMod {
     def withMutability(tps: List[Type])(implicit ctx: Context): Type = {
       // If there are any intersections with MutableAny, then ignore all other mutabilities
       if (tps contains defn.MutableAnyType) {
-        if (tp <:< defn.MutableAnyType) tp     // if this type is already mutable, don't do anything
+        //println(s"---  is <:< Mutable == " + (tp.widenDealias <:< defn.MutableAnyType))
+        if (tp.widenDealias <:< defn.MutableAnyType) tp     // if this type is already mutable, don't do anything
         else AndType(tp, defn.MutableAnyType)  // otherwise, return an intersection type
         // Note: Adding &MutableAny to self-types during viewpoint adaptation (which was happening
         //  before the tp <:< defn.MutableAnyType condition was added) was causing a failure of
@@ -689,16 +690,19 @@ object DotMod {
     /**
      * Performs viewpoint adaptation with respect to the given prefix type.
      */
-    def viewpointAdaptMonomorphicWith(prefix: Type)(implicit ctx: Context): Type = {
+    def viewpointAdaptField(prefix: Type)(implicit ctx: Context): Type = {
       assert(prefix.exists)
       assert(prefix ne NoPrefix)
       assert(!tp.dealias.stripAnnots.isInstanceOf[MethodicType])
       if (prefix <:< defn.MutableAnyType || defn.ReadonlyNothingType <:< tp) tp  // adaptation does not change tp here
       else {
-        val tpm = tp.mutability
-        val prefixm = prefix.mutability
-        val adapted = tpm.filter(prefixm.contains(_)) // union of mutabilities
-        tp.withMutability(adapted)
+        OrType(AndType(prefix, defn.ReadonlyNothingType), tp)
+
+        // Attempt 1
+        //val tpm = tp.mutability
+        //val prefixm = prefix.mutability
+        //val adapted = tpm.filter(prefixm.contains(_)) // union of mutabilities
+        //tp.withMutability(adapted)
       }
     }
 
@@ -760,6 +764,16 @@ object DotMod {
   }
 
 
+  // TODO
+  // What types go in the "Mutable Lattice" by default (stuff that's OK to wrap in Readonly/Mutable
+  //  versus "reference types," which tend to break stuff).
+  //
+
+  // TODO
+  // (prefixtype & ReadonlyNothing) | tp   to  perform viewpoint adaptation.
+  //
+
+
   /**
    * A TypeComparer that also compares mutability.
    * @param initCtx the context the comparer operates within
@@ -799,10 +813,40 @@ object DotMod {
       // todo what's a reasonable solution for avoiding the `stable symbol' errors
       // todo  that happen when mutability intersections are added to terms that refer to objects?
       //
-      if (tp2.underlyingClassSymbol eq defn.MutableAnyClass) {
-        val sym1 = tp1.widenDealias.stripAnnots.underlyingClassSymbol
-        if (sym1 ne NoSymbol) return !((sym1 eq defn.AnyClass) || (sym1 eq defn.ReadonlyNothingClass))
+
+
+      // todo Approach 3
+      //
+      //
+      //
+      tp2.dealias.stripAnnots match {
+        case tp2d: TypeRef => if (tp2d.symbol eq defn.MutableAnyClass) tp1.widenDealias.stripAnnots match {
+            case tp1d: TypeRef =>
+              val sym1 = tp1d.symbol
+              return !((sym1 eq defn.AnyClass) || (sym1 eq defn.ReadonlyNothingClass))
+            case _ =>
+          }
+        case _ =>
       }
+
+      // todo Approach 2: is widening really what we want to do with tp2? Widening here may be unnecessarily expensive, since it is done on every call to isSubType.
+      //tp2.widenDealias.stripAnnots match {
+      //  case tp2w: TypeRef =>
+      //    val sym2 = tp2w.symbol
+      //    if (sym2 eq defn.MutableAnyClass) tp1.widenDealias.stripAnnots match {
+      //      case tp1w: TypeRef =>
+      //        val sym1 = tp1w.symbol
+      //        return !((sym1 eq defn.AnyClass) || (sym1 eq defn.ReadonlyNothingClass))
+      //      case _ =>
+      //    }
+      //  case _ =>
+      //}
+
+      // todo Approach 1: I am suspicious of how underlyingClassRef operates wrt. RefinedTypes.
+      //if (tp2.underlyingClassSymbol eq defn.MutableAnyClass) {
+        //val sym1 = tp1.widenDealias.stripAnnots.underlyingClassSymbol
+        //if (sym1 ne NoSymbol) return !((sym1 eq defn.AnyClass) || (sym1 eq defn.ReadonlyNothingClass))
+      //}
 
       // More complex cases need additional special treatment. For example, we expect:
       //   (T | ReadonlyNothing) & MutableAny <:< T
@@ -825,7 +869,7 @@ object DotMod {
       //
       tp1 match {
         case AndType(tp11, tp12) =>
-          val cls11 = tp11.underlyingClassSymbol
+          val cls11 = tp11.underlyingClassSymbol  // todo change underlyingClassSymbol to something a little more tractable?
           val cls12 = tp12.underlyingClassSymbol
           if (((cls11 eq defn.MutableAnyClass) && (cls12 eq defn.ReadonlyNothingClass)) ||
               ((cls11 eq defn.ReadonlyNothingClass) && (cls12 eq defn.MutableAnyClass)))
@@ -862,19 +906,6 @@ object DotMod {
     (tp.prefix eq NoPrefix) || (tp.prefix <:< defn.MutableAnyType)
     // todo see if prefix reaches into outer environment
   }
-  /*def isAssignable(tp: Type)(implicit ctx: Context): Boolean = tp.dealias.stripAnnots match {
-    case tp: TermRef =>
-      //println(s"---checking mutability of ${tp.prefix} , == ${tp.prefix <:< defn.MutableAnyType}")
-      (tp.prefix eq NoPrefix) || (tp.prefix <:< defn.MutableAnyType)
-      // todo see if prefix reaches into outer environment
-    //case tp: AnnotatedType =>
-    //  isAssignable(tp.tpe)
-    case OrType(tp1, tp2) =>
-      isAssignable(tp1) || isAssignable(tp2)
-    case AndType(tp1, tp2) =>
-      isAssignable(tp1) || isAssignable(tp2)
-    case _ => false
-  }*/
 
   class DotModTyper extends Typer {
 
@@ -1013,10 +1044,11 @@ object DotMod {
           // unnecessary because the local frame reference is assumed mutable.
           //
           if (tpe.symbol.is(Method)) tpe  // todo check formal vs actual receiver mutability
-          else if (tpe.prefix ne NoPrefix) {
-            //println("---adaping " + tpe)
-            val tpe0 = tpe.viewpointAdaptMonomorphicWith(tpe.prefix)
+          else if (tpe.prefix ne NoPrefix) {  // todo is it ok to assume prefix mutability is already taken care of?
+            //println("---adapting " + tpe)
+            val tpe0 = tpe.viewpointAdaptField(tpe.prefix)
             //println("---to " + tpe0)
+            //println()
             tpe0
           }
           else tpe  // no viewpoint adaptation needed

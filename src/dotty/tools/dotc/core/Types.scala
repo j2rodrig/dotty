@@ -698,7 +698,7 @@ object Types {
     /** The basetype TypeRef of this type with given class symbol,
      *  but without including any type arguments
      */
-    final def baseTypeRef(base: Symbol, ignoreMutability: Boolean = false)(implicit ctx: Context): Type = /*ctx.traceIndented(s"$this baseTypeRef $base")*/ /*>|>*/ track("baseTypeRef") /*<|<*/ {
+    final def baseTypeRef(base: Symbol, ignoreMutability: Boolean = true)(implicit ctx: Context): Type = /*ctx.traceIndented(s"$this baseTypeRef $base")*/ /*>|>*/ track("baseTypeRef") /*<|<*/ {
       base.denot match {
         case classd: ClassDenotation => classd.baseTypeRefOf(this, ignoreMutability)
         case _ => NoType
@@ -877,18 +877,20 @@ object Types {
       case _ => this
     }
 
-    def withMutabilityOf(tp: Type)(implicit ctx: Context): Type = this match {
-      case _: ExprType | _: TypeBounds | _: RefinedType => this  // don't try to annotate certain proxy types
-      case _: TypeProxy => tp match {
-        case tp: AndOrType =>
-          val term2 = tp.tp2.underlyingClassRef(refinementOK = false)
-          val term2isMut = (term2 eq defn.MutableAnyType) || (term2 eq defn.ReadonlyNothingType)
-          if (term2isMut) tp.derivedAndOrType(this.withMutabilityOf(tp.tp1), tp.tp2)
-          else this
+    def withMutabilityOf(tp: Type)(implicit ctx: Context): Type =
+      if (ctx.phase.erasedTypes) this
+      else this match {
+        case _: ExprType | _: TypeBounds | _: RefinedType => this  // don't try to annotate certain proxy types
+        case _: TypeProxy => tp match {
+          case tp: AndOrType =>
+            val term2 = tp.tp2.underlyingClassRef(refinementOK = false)
+            val term2isMut = (term2 eq defn.MutableAnyType) || (term2 eq defn.ReadonlyNothingType)
+            if (term2isMut) tp.derivedAndOrType(this.withMutabilityOf(tp.tp1), tp.tp2)
+            else this
+          case _ => this
+        }
         case _ => this
       }
-      case _ => this
-    }
 
     // ----- Normalizing typerefs over refined types ----------------------------
 
