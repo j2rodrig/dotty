@@ -1586,7 +1586,7 @@ object SymDenotations {
         Stats.record("computeBaseTypeOf")
         if (symbol.isStatic && tp.derivesFrom(symbol))
           symbol.typeRef
-        else (if (false) tp.withoutMutability else tp) match {
+        else tp match {
           case tp: TypeRef =>
             val subcls = tp.symbol
             if (subcls eq symbol)

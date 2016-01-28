@@ -687,8 +687,114 @@ object DotMod {
 
     def asReadonly(implicit ctx: Context): Type = OrType(tp, defn.ReadonlyNothingType)
 
+
+    /**
+     * The @mutabilityOf annotation.
+     * When a type of the form T@mutabilityOf(x) is encountered, it is transformed into
+     * (typeOf(x) & ReadonlyNothing) | T.
+     *
+     * Getter methods have a polymorphic receiver reference. E.g., for
+     * class C {
+     *   def m...
+     * }
+     * we have:
+     *   def m[EnvRefType >: C <: C@readonly]...
+     * So that any types inside the body of m of the form
+     *   T@mutabilityOf(C.this)
+     * are transformed to:
+     *   (EnvRefType & ReadonlyNothing) | T
+     *
+     * Where there are multiple enclosing environments, viewpoint adaptation will
+     * take care of multiple hops.
+     * class C {
+     *   class D[EnvRefType$1 >: C <: C@readonly] {  // we do $1 to visually differentiate types. In the implementation, the $1 doesn't exist.
+     *     def m[EnvRefType$2 >: D <: D@readonly]... {
+     *       T@mutabilityOf(C.this)
+     *     }
+     *   }
+     * }
+     * The type of D.this inside the body of m is:
+     *   EnvRefType$2
+     * so the type of C.this inside the body of m is D.this |> C.this, or:
+     *   (EnvRefType$2 & ReadonlyNothing) | EnvRefTypes$1
+     * so the type T@mutabilityOf(C.this) becomes:
+     *   (((EnvRefType$2 & ReadonlyNothing) | EnvRefTypes$1) & ReadonlyNothing) | T
+     *
+     * Any reach into an enclosing environment must go through the correct environment accessors.
+     * Inside the body of m,
+     *   D.this
+     * has not merely the type D, but rather EnvRef$2.
+     *
+     * If the polymorphic environment parameters are pure mutabilities, e.g.:
+     *   def m[EnvRefType >: Nothing <: ReadonlyNothing]...
+     * then the type expressions above can be simplified:
+     *   EnvRefType | T
+     *   EnvRefType$2 | EnvRefType$1 | T
+     * but I'm not sure ATM if this simplification is useful.
+     *
+     *
+     * The @envMut annotation.
+     * The @envMut annotation reaches one level into the enclosing environment.
+     * If the enclosing environment is a class C, then @envMut is the same as @mutabilityOf(C.this).
+     * If the enclosing environment is a method, then @envMut is the mutability
+     * of the frame reference as seen from the current location.
+     * For example:
+     * def m1... = {
+     *   def m2[EnvRefType >: MutableAny <: Any]... = {
+     *     T@envMut   // is transformed to (EnvRefType & ReadonlyNothing) | T.
+     *   }
+     * }
+     * We don't care that we don't have a "type" for the frame of m1.
+     * We only care about the frame's mutability as seen from inside m2,
+     * so the bounds are MutableAny to Any (c.f. C to C@readonly).
+     *
+     * Access to a variable in the body of m1 from within the body of m2 requires
+     * viewpoint adaptation through EnvRefType. E.g.:
+     * def m1... = {
+     *   var s: T
+     *   def m2[EnvRefType >: MutableAny <: Any]... = {
+     *     s
+     *   }
+     * }
+     * From within the body of m1, variable s simply has the type T.
+     * From within the body of m2, the type of s is viewed as:
+     *   (EnvRefType & ReadonlyNothing) | T
+     * which is the same as the type:
+     *   T@mutabilityOf(s)
+     *
+     * In general, typeOf(s) == typeOf(s)@mutabilityOf(s).
+     *
+     *
+     * In implementation, the EnvRefType parameters are generated during tree
+     * adaptation. So we can't count on having access to these parameters, since
+     * they may not yet have been generated! The solution is to use a LazyRef
+     * type that resolves to the correct type parameter when the type's info is
+     * requested. We would then just have to be careful not to ask for its info
+     * before the underlying parameter has been created...
+     *
+     * Another part of the solution is to reshape unadapted DefDef/TypeDef trees
+     * to include polymorphic EnvRefType parameters.
+     *
+     * Perhaps it is necessary to do an unforced symbol lookup to find the correct
+     * EnvRefType parameter. But what is the correct mechanism for creating these
+     * symbols and associating them with trees?
+     *
+     */
+
+
     /**
      * Performs viewpoint adaptation with respect to the given prefix type.
+     *
+     * Constructs types of the form: (prefix & ReadonlyNothing) | tp.
+     *
+     * Intersecting with ReadonlyNothing produces a lower bound of prefix and ReadonlyNothing,
+     * which is either ReadonlyNothing or Nothing.
+     * Then, creating a union with tp produces either a readonly version of tp
+     * (where prefix&ReadonlyNothing =:= ReadonlyNothing), or merely tp
+     * (where prefix&ReadonlyNothing =:= Nothing).
+     *
+     * If the prefix is mutable, or tp is already readonly, then viewpoint adaption
+     * will result in tp unchanged. (These conditions are special-cased.)
      */
     def viewpointAdaptField(prefix: Type)(implicit ctx: Context): Type = {
       assert(prefix.exists)

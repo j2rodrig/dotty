@@ -329,9 +329,16 @@ class TypeComparer(initctx: Context) extends DotClass with ConstraintHandling {
       val cls2 = tp2.symbol
       if (cls2.isClass) {
         //
-        // Mutability is ignored here because baseTypeRef is not sound due to
+        // Mutability not is ignored here because baseTypeRef is not sound due to
         // baseTypeRef not being able to tell if the classes should be interpreted
-        // as readonly. See notes in SymDenotation#baseTypeRefOf.
+        // as readonly. This case may therefore return false when the correct
+        // result should be true, but the derived TypeComparer discovers these
+        // cases before execution can get here. Doing it this way seems to be the
+        // correct approach, since we are conservatively returning a false
+        // result where mutability is involved, unless we can prove in the derived
+        // TypeComparer that the result really ought to be true.
+        //
+        // See notes in SymDenotation#baseTypeRefOf.
         //
         val base = tp1.baseTypeRef(cls2, ignoreMutability = false)
         if (base.exists && (base ne tp1)) return isSubType(base, tp2)
