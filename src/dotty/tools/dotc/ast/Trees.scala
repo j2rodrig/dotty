@@ -268,6 +268,7 @@ object Trees {
         case tpe: ThisType => tpe.cls.denot
         case _ => NoDenotation
       }
+      //todo change Type#withMutabilityOf(Type) to match current approach to changing the mutability of a type
       case tpe: AndOrType => tpe.withoutMutability match {
         case tpe1: NamedType => tpe1.denot match {
           case denot: SingleDenotation =>

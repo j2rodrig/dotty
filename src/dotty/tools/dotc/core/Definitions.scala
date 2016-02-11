@@ -491,18 +491,14 @@ class Definitions {
   def MutableAnyClass(implicit ctx: Context) = MutableAnyType.symbol.asClass
   lazy val ReadonlyNothingType = ctx.requiredClassRef("dotty.ReadonlyNothing")
   def ReadonlyNothingClass(implicit ctx: Context) = ReadonlyNothingType.symbol.asClass
-  //lazy val MutableType = ctx.requiredClassRef("dotty.Mutable")
-  //def MutableClass(implicit ctx: Context) = MutableType.symbol.asClass
-  //lazy val RoThisType = ctx.requiredClassRef("dotty.RoThis")
-  //def RoThisClass(implicit ctx: Context) = RoThisType.symbol.asClass
-  //lazy val ReadonlyType = ctx.requiredClassRef("dotty.Readonly")
-  //def ReadonlyClass(implicit ctx: Context) = ReadonlyType.symbol.asClass
 
   // Side-effect Limitation Annotations
   lazy val MutableAnnotType = ctx.requiredClassRef("dotty.mutable")
   def MutableAnnot(implicit ctx: Context) = MutableAnnotType.symbol.asClass
   lazy val RoThisAnnotType = ctx.requiredClassRef("dotty.rothis")
   def RoThisAnnot(implicit ctx: Context) = RoThisAnnotType.symbol.asClass
+  lazy val PolyReadAnnotType = ctx.requiredClassRef("dotty.polyread")
+  def PolyReadAnnot(implicit ctx: Context) = PolyReadAnnotType.symbol.asClass
   lazy val ReadonlyAnnotType = ctx.requiredClassRef("dotty.readonly")
   def ReadonlyAnnot(implicit ctx: Context) = ReadonlyAnnotType.symbol.asClass
   lazy val UncheckedMutabilityAnnotType = ctx.requiredClassRef("dotty.uncheckedMutability")

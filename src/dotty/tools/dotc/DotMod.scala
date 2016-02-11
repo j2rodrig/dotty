@@ -277,14 +277,13 @@ object DotMod {
     }
     override def isFromMutableClass: Boolean = _fromMutableClass
   }
-
+*/
 
   def isGetterLikeName(name: Name): Boolean = name.startsWith("get") && (name.length == 3 || !name(4).isLower)
 
   def isSetterLikeName(name: Name): Boolean = name.startsWith("set") && (name.length == 3 || !name(4).isLower)
 
   def getAnnotationSymbols(annotations: List[Tree])(implicit ctx: Context): List[Symbol] = {
-    //val annotations = getAnnotations
     annotations map { annotation =>
       if (annotation.symbol.isConstructor) annotation.symbol.owner else annotation.tpe.typeSymbol
     }
@@ -298,6 +297,7 @@ object DotMod {
     NoSymbol
   }
 
+  /*
   def getFormalReceiverMutability(annotations: List[Tree], isGetterLike: => Boolean)(implicit ctx: Context): Symbol = {
     val receiverAnnotation = getFirstMatchingAnnotationOf(
       annotations,
@@ -316,7 +316,7 @@ object DotMod {
   def getFormalReceiverMutability(completedSymbol: Symbol)(implicit ctx: Context): Symbol = {
     assert(completedSymbol.isCompleted)
     getFormalReceiverMutability(completedSymbol.getAnnotations, completedSymbol.isGetterLike)
-  }
+  }*/
 
   /**
    * Get information about the given Def tree.
@@ -331,15 +331,13 @@ object DotMod {
     }
     /** Gets the flags that have been set on this tree, or EmptyFlags if no flags have been set */
     def getFlags(implicit ctx: Context): FlagSet = tree match {
-      case tree: untpd.MemberDef =>
-        if (tree.symbol.isCompleted) tree.symbol.flags
-        else untpd.modsDeco(tree).mods.flags
+      case tree: untpd.MemberDef => untpd.modsDeco(tree).mods.flags
       case _ => EmptyFlags
     }
     /** Gets typed annotation trees from this tree, or empty list if no annotations */
     def getAnnotations(implicit ctx: Context): List[tpd.Tree] = tree match {
       case tree: untpd.MemberDef =>
-        if (tree.symbol.isCompleted)
+        if (tree.hasType && tree.symbol.isCompleted)   // if annotations are already typed, then don't bother retyping
           tree.symbol.annotations.map(_.tree)
         else {
           val untypedAnnotTrees = untpd.modsDeco(tree).mods.annotations
@@ -361,9 +359,28 @@ object DotMod {
         formalList.nonEmpty && formalList.head.getFlags.is(Implicit)
       }
     }
-    def isGetterLike(implicit ctx: Context): Boolean =
-      tree.isInstanceOf[untpd.ValDef] || (tree.isInstanceOf[untpd.DefDef] &&
-        (isGetterLikeName(name) || (hasNoMandatoryFormalLists && !isSetterLikeName(name))))
+    //
+    // Returns true if this tree represents a method that should have a polymorphic environment-reference type.
+    // todo deal with @readonly methods
+    // todo anything to do with respect to synthetic accessor methods?
+    //
+    // todo get rid of special cases here. Just say the method is a getter if annotated with @getter or @polyread.
+    // todo add special case to refchecks to allow mutual overriding of getters and valdefs.
+    // Returns true if this is a method that should be considered a getter method even if not annotated.
+    // A method is considered a getter here if it has a "getter-like" name,
+    //  or is synthetic with no explicit parameter lists.
+    // todo move check for @getter annotation into this class
+    //
+    def isGetterLike(implicit ctx: Context): Boolean = {
+      tree.isInstanceOf[untpd.DefDef] && {
+        val annots = getAnnotationSymbols(getAnnotations)
+        val getterAnnots = List(defn.GetterMetaAnnot, defn.PolyReadAnnot, defn.RoThisAnnot)
+        annots.exists(getterAnnots contains _)
+      }
+    }
+      //tree.isInstanceOf[untpd.DefDef] && isGetterLikeName(name) // || (hasNoMandatoryFormalLists && getFlags.is(Synthetic)))
+      //tree.isInstanceOf[untpd.ValDef] || (tree.isInstanceOf[untpd.DefDef] &&
+      //  (isGetterLikeName(name) || (hasNoMandatoryFormalLists && !isSetterLikeName(name))))
   }
 
   implicit class CompletedSymbolDecorator(val symbol: Symbol) extends AnyVal {
@@ -380,14 +397,32 @@ object DotMod {
       }
       findMethodOrExpr(symbol.info)
     }
-    def isGetterLike(implicit ctx: Context): Boolean =
-      if (symbol is Method)  // methods are "getter-like" if they either have a getter-like name or no mandatory formal parameters
-        isGetterLikeName(symbol.name) || (hasNoMandatoryFormalLists && !isSetterLikeName(symbol.name))
-      else if (symbol.isTerm) true  // variables are considered "getter-like" (for uniformity with getter-like methods)
-      else false
+    //
+    // Returns true if this symbol is a method that should have a polymorphic environment-reference type.
+    // todo deal with @readonly methods
+    // todo anything to do with respect to synthetic accessor methods?
+    //
+    // Returns true if this is a method that should be considered a getter method even if not annotated.
+    // A method is considered a getter here if it has a "getter-like" name,
+    //  or is synthetic with no explicit parameter lists.
+    // todo move check for @getter annotation into this class
+    //
+    def isGetterLike(implicit ctx: Context): Boolean = {
+      (symbol is Method) && {
+        val annots = getAnnotationSymbols(getAnnotations)
+        val getterAnnots = List(defn.GetterMetaAnnot, defn.PolyReadAnnot, defn.RoThisAnnot)
+        annots.exists(getterAnnots contains _)
+      }
+    }
+      //(symbol is Method) && isGetterLikeName(symbol.name) // || (hasNoMandatoryFormalLists && (symbol is Synthetic)))
+      //if (symbol is Method)  // methods are "getter-like" if they either have a getter-like name or no mandatory formal parameters
+        //isGetterLikeName(symbol.name) || (hasNoMandatoryFormalLists && !isSetterLikeName(symbol.name))
+      //else if (symbol.isTerm) true  // variables are considered "getter-like" (for uniformity with getter-like methods)
+      //else false
 
   }
 
+  /*
   sealed abstract class BoundSpec
   case object Hi extends BoundSpec
   case object Lo extends BoundSpec
@@ -539,8 +574,6 @@ object DotMod {
 
 */
 
-
-  def receiverParamName = "$ROTHIS"
 
   /** Remove top-level mutability annotations from the given type. */
   def stripAnnots(tp: Type)(implicit ctx: Context): Type = tp match {
@@ -1017,7 +1050,46 @@ object DotMod {
 
     var alreadyStarted = false
 
-    override def selectionType(site: Type, name: Name, pos: Position)(implicit ctx: Context): Type = {
+    //
+    // We override typedUnadapted to find untyped DefDefs. Then we add a type parameter named
+    // "EnvRef_m" to the type parameter list, where m is the name of the method. We put _m in
+    // the type parameter name to distinguish it from the EnvRef of enclosing methods.
+    //
+    /*override def typedUnadapted(initTree: untpd.Tree, pt: Type)(implicit ctx: Context): Tree = {
+      //
+      // We call expanded and getAttachment to make sure we're looking at exactly the
+      // same tree as in the super implementation.
+      val xtree = expanded(initTree)
+      xtree.getAttachment(TypedAhead) match {
+        case None =>
+          xtree match {
+            case xtree: untpd.DefDef =>
+              //
+              // For every DefDef tree, we add a type parameter.
+              //
+              val paramBound = untpd.TypeBoundsTree(untpd.TypeTree(defn.MutableAnyType), EmptyTree)
+              val envParam = untpd.TypeDef(typeName("EnvRef_" + xtree.name), paramBound)
+              envParam.withMods(untpd.Modifiers(Param|Synthetic))
+              enterSymbol(createSymbol(envParam))
+              //index(envParam)
+
+              val xtree1 = untpd.cpy.DefDef(xtree)(xtree.name, envParam :: xtree.tparams, xtree.vparamss, xtree.tpt, xtree.rhs)
+              //
+              // Copy all attachments to new tree.
+              //
+              xtree.allAttachments.foreach { case (k, v) =>
+                xtree1.pushAttachment(k, v)
+              }
+              return super.typedUnadapted(xtree1)
+            case _ =>  // not a tree we care about here, so fall through
+          }
+        case _ =>  // this tree has already been typed, so we do nothing here
+      }
+      super.typedUnadapted(initTree, pt)
+    }*/
+
+
+    //override def selectionType(site: Type, name: Name, pos: Position)(implicit ctx: Context): Type = {
       //
       // One issue with viewpoint-adapting TermRefs is that when the type assigner tries
       // to query for the named member of a readonly type, it doesn't succeed.
@@ -1043,7 +1115,7 @@ object DotMod {
       // findMember itself. The compiler shape does not seem to lend itself well to giving
       // special meaning to some classes, as we are doing here with ReadonlyNothing.
       //
-      site match {
+      //site match {
         /*case OrType(site1, site2) =>
           if (site1.underlyingClassSymbol eq defn.ReadonlyNothingClass)
             return selectionType(site2, name, pos)
@@ -1059,11 +1131,11 @@ object DotMod {
             case mt: MethodType if mt.paramTypes.isEmpty && (site.symbol is Stable) => mt.resultType
             case tp1 => tp1
           }, name, pos)*/
-        case _ =>
-      }
+        //case _ =>
+      //}
 
-      super.selectionType(site, name, pos)
-    }
+      //super.selectionType(site, name, pos)
+    //}
 
 
     def convertType(tpe: Type)(implicit ctx: Context): Type = {
@@ -1135,7 +1207,6 @@ object DotMod {
 
       val tpe0 = tpe match {
         case tpe: AnnotatedType => convertAnnotationToType(tpe)
-        case tpe: MethodicType => makePolyTypeWithReceiver(tpe)
         case tpe: TermRef =>
           //viewpointAdaptTermRef(tpe)
           //
@@ -1149,8 +1220,10 @@ object DotMod {
           // If we're selecting a variable local to the current method, then viewpoint adaptation
           // unnecessary because the local frame reference is assumed mutable.
           //
-          if (tpe.symbol.is(Method)) tpe  // todo check formal vs actual receiver mutability
-          else if (tpe.prefix ne NoPrefix) {  // todo is it ok to assume prefix mutability is already taken care of?
+          if (tpe.symbol.is(Method)) {
+            // todo check formal vs actual receiver mutability
+            tpe
+          } else if (tpe.prefix ne NoPrefix) {  // todo is it ok to assume prefix mutability is already taken care of?
             //println("---adapting " + tpe)
             val tpe0 = tpe.viewpointAdaptField(tpe.prefix)
             //println("---to " + tpe0)
@@ -1161,6 +1234,7 @@ object DotMod {
 
         case tpe: ThisType => viewpointAdaptThisType(tpe)
         case tpe: SuperType => viewpointAdaptSuperType(tpe)
+        //case tpe: MethodicType => makePolyTypeWithReceiver(tpe)
         case _ => tpe
       }
 
@@ -1169,7 +1243,91 @@ object DotMod {
       tpe0
     }
 
+    //
+    // Adding type parameters inside the lazy completers!!
+    // (will this work?)
+    //
+
+    //override def assignType(tree0: untpd.TypeApply, fn: Tree, args: List[Tree])(implicit ctx: Context) = {
+    override def typedTypeApply(tree0: untpd.TypeApply, pt: Type)(implicit ctx: Context): Tree = {
+      //
+      // See if we need to add an argument for the environment type to this type application.
+      //
+      // A type argument needs to be added only if the called method is getter-like,
+      //  and exactly one argument is missing.
+      //
+      // see pt.instantiate(argTypes) in super.assignType for how type args get instantiated
+      //
+      var tree1 = tree0
+      val typedArgs = tree0.args mapconserve (typedType(_))
+      val typedFn = typedExpr(tree0.fun, ProtoTypes.PolyProto(typedArgs.tpes, pt))
+
+      //println(s"--- Testing getter-likeness of ${typedFn.symbol} ")
+      if (typedFn.symbol.isGetterLike) {
+        typedFn.tpe.widen match {
+          case pt: PolyType =>
+            //println(s"--- ${typedFn.symbol} is getter-like in application")
+            //
+            // Add the argument only if we are missing exactly one argument
+            // todo Check receiver type... what ought to be done to account for receiver mutability?
+            //
+            if (typedArgs.length == pt.paramNames.length - 1) {
+              //println(s"--- adding type argument in call to ${typedFn.symbol}")
+              val envArg = untpd.TypeTree(defn.MutableAnyType)
+              tree1 = untpd.cpy.TypeApply(tree0)(tree0.fun, envArg :: tree0.args)
+            }
+          case _ =>
+        }
+      }
+
+      /*val tree1 = typedFn.tpe.widen match {
+        case pt: PolyType if pt.termSymbol.isGetterLike =>
+          println(s"--- ${pt.termSymbol} is getter-like in application")
+          //
+          // Add the argument only if we are missing exactly one argument
+          // todo Check receiver type... what ought to be done to account for receiver mutability?
+          //
+          if (typedArgs.length == pt.paramNames.length - 1) {
+            println(s"--- adding type argument in call to ${pt.termSymbol.name}")
+            val envArg = untpd.TypeTree(defn.MutableAnyType)
+            untpd.cpy.TypeApply(tree0)(tree0.fun, envArg :: tree0.args)
+
+            // add a type arg if getter-like. todo only add type arg if argument count mismatch would otherwise occur??? cf. assignType?
+            //if (typedArgs.length <= pt.paramBounds.length)
+            //  typedArgs = typedArgs.zipWithConserve(pt.paramBounds)(adaptTypeArg)
+            //val argTypes = typedArgs.tpes
+            //if (sameLength(argTypes, pt.paramNames) || ctx.phase.prev.relaxedTyping) pt.instantiate(argTypes)
+            //else errorType(d"wrong number of type parameters for ${typedFn.tpe}; expected: ${pt.paramNames.length}", tree0.pos)
+          } else tree0
+        case _ => tree0
+      }*/
+
+      /*//println(s"--- in typedTypeApply ${tree0.fun} ")
+      val tree1 = if (tree0.fun.isGetterLike) {
+        //
+        // Add environment type argument to type applications.
+        // see pt.instantiate(argTypes) in super.assignType for how type args get instantiated
+        //
+        val envParam = untpd.TypeTree(defn.MutableAnyType)
+        untpd.cpy.TypeApply(tree0)(tree0.fun, envParam :: tree0.args)
+      } else tree0*/
+      //super.assignType(tree1, fn, typed(envParam) :: args)
+      // todo override assignType to get a better error message for wrong number of type parameters?
+      super.typedTypeApply(tree1, pt)
+    }
+
     override def adapt(tree0: tpd.Tree, pt: Type, original: untpd.Tree)(implicit ctx: Context): tpd.Tree = {
+
+      //
+      // Add environment type argument to type applications.
+      // todo here, or after super.adapt?
+      //
+      /*val tree01 = tree0 match {
+        case tree0: TypeApply =>
+          val envParam = typedTypeBoundsTree(untpd.TypeBoundsTree(untpd.TypeTree(defn.MutableAnyType), untpd.TypeTree(defn.MutableAnyType)))
+          tpd.cpy.TypeApply(tree0)(tree0.fun, envParam :: tree0.args)
+        case _ => tree0
+      }*/
 
       val tree = super.adapt(tree0, pt, original)
 
@@ -1196,6 +1354,10 @@ object DotMod {
       // type(r) is the prototype
       //
 
+//      tree.tpe match {
+//        case
+//      }
+
       val tpe1 =
         //if (tree.isInstanceOf[Select] || tree.isInstanceOf[Ident])
           convertType(tree.tpe)
@@ -1212,6 +1374,29 @@ object DotMod {
 
       tree1
     }
+
+    /**
+     * This is the method that returns the type of a DefDef symbol during completion.
+     *
+     * If we want to add an extra polymorphic type parameter, this is where we would
+     * do it.
+     * @param ddef
+     * @param sym
+     * @param ctx
+     * @return
+     */
+    override def defDefSig(ddef: untpd.DefDef, sym: Symbol)(implicit ctx: Context): Type = {
+      val ddef1 = if (ddef.isGetterLike) {
+        val bounds = untpd.TypeBoundsTree(untpd.TypeTree(defn.MutableAnyType), untpd.TypeTree(defn.AnyType)) // reduction of: typeParamBounds(name)  todo mutability bounds
+        val envParam = untpd.TypeDef(typeName("EnvRef_" + ddef.name), Nil, bounds).withMods(Modifiers(Param)) // c.f. typeParam in typeParamClause method. todo When doing this for a classdef, check modifiers function for more mods
+
+        untpd.cpy.DefDef(ddef)(ddef.name, envParam :: ddef.tparams, ddef.vparamss, ddef.tpt, ddef.rhs)
+      } else ddef
+
+      super.defDefSig(ddef1, sym)
+    }
+
+    override def newLikeThis: Typer = new DotModTyper
   }
 
   /** This phase runs the regular Scala RefChecks with the DotMod type comparer to enforce necessary
