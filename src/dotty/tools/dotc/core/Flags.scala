@@ -300,7 +300,7 @@ object Flags {
    */
   final val Abstract = commonFlag(23, "abstract")
 
-  /** Method is assumed to be stable */
+  /** Lazy val or method is known or assumed to be stable and realizable */
   final val Stable = termFlag(24, "<stable>")
 
   /** A case parameter accessor */
@@ -606,6 +606,7 @@ object Flags {
   final val AbstractFinal = allOf(Abstract, Final)
   final val AbstractSealed = allOf(Abstract, Sealed)
   final val SyntheticArtifact = allOf(Synthetic, Artifact)
+  final val SyntheticModule = allOf(Synthetic, Module)
   final val SyntheticTermParam = allOf(Synthetic, TermParam)
   final val SyntheticTypeParam = allOf(Synthetic, TypeParam)
   final val SyntheticCase = allOf(Synthetic, Case)

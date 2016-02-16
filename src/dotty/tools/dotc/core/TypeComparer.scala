@@ -124,7 +124,10 @@ class TypeComparer(initctx: Context) extends DotClass with ConstraintHandling {
       pendingSubTypes = new mutable.HashSet[(Type, Type)]
       ctx.log(s"!!! deep subtype recursion involving ${tp1.show} <:< ${tp2.show}, constraint = ${state.constraint.show}")
       ctx.log(s"!!! constraint = ${constraint.show}")
-      assert(!ctx.settings.YnoDeepSubtypes.value) //throw new Error("deep subtype")
+      //if (ctx.settings.YnoDeepSubtypes.value) {
+      //  new Error("deep subtype").printStackTrace()
+      //}
+      assert(!ctx.settings.YnoDeepSubtypes.value)
       if (Config.traceDeepSubTypeRecursions && !this.isInstanceOf[ExplainingTypeComparer])
         ctx.log(TypeComparer.explained(implicit ctx => ctx.typeComparer.isSubType(tp1, tp2)))
     }
@@ -199,7 +202,7 @@ class TypeComparer(initctx: Context) extends DotClass with ConstraintHandling {
       }
       compareWild
     case tp2: LazyRef =>
-      isSubType(tp1, tp2.ref)
+      !tp2.evaluating && isSubType(tp1, tp2.ref)
     case tp2: AnnotatedType =>
       isSubType(tp1, tp2.tpe) // todo: refine?
     case tp2: ThisType =>
@@ -212,7 +215,7 @@ class TypeComparer(initctx: Context) extends DotClass with ConstraintHandling {
             val cls1 = tp1.cls
             cls1.classInfo.selfType.derivesFrom(cls2) &&
             cls2.classInfo.selfType.derivesFrom(cls1)
-          case tp1: TermRef if cls2.is(Module) && cls2.eq(tp1.widen.typeSymbol) =>
+          case tp1: NamedType if cls2.is(Module) && cls2.eq(tp1.widen.typeSymbol) =>
             cls2.isStaticOwner ||
             isSubType(tp1.prefix, cls2.owner.thisType) ||
             secondTry(tp1, tp2)
@@ -299,7 +302,10 @@ class TypeComparer(initctx: Context) extends DotClass with ConstraintHandling {
       }
       compareWild
     case tp1: LazyRef =>
-      isSubType(tp1.ref, tp2)
+      // If `tp1` is in train of being evaluated, don't force it
+      // because that would cause an assertionError. Return false instead.
+      // See i859.scala for an example where we hit this case.
+      !tp1.evaluating && isSubType(tp1.ref, tp2)
     case tp1: AnnotatedType =>
       isSubType(tp1.tpe, tp2)
     case AndType(tp11, tp12) =>
@@ -1059,7 +1065,9 @@ class TypeComparer(initctx: Context) extends DotClass with ConstraintHandling {
     else hkCombine(tp1, tp2, tparams1, tparams2, op)
   }
 
-  /** Try to distribute `&` inside type, detect and handle conflicts */
+  /** Try to distribute `&` inside type, detect and handle conflicts
+   *  @pre !(tp1 <: tp2) && !(tp2 <:< tp1) -- these cases were handled before
+   */
   private def distributeAnd(tp1: Type, tp2: Type): Type = tp1 match {
     // opportunistically merge same-named refinements
     // this does not change anything semantically (i.e. merging or not merging

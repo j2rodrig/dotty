@@ -12,6 +12,7 @@ import scala.reflect.io.AbstractFile
 import Decorators.SymbolIteratorDecorator
 import ast._
 import annotation.tailrec
+import CheckRealizable._
 import typer.Mode
 import util.SimpleMap
 import util.Stats
@@ -69,7 +70,7 @@ object SymDenotations {
     ownerIfExists: Symbol,
     final val name: Name,
     initFlags: FlagSet,
-    initInfo: Type,
+    final val initInfo: Type,
     initPrivateWithin: Symbol = NoSymbol) extends SingleDenotation(symbol) {
 
     //assert(symbol.id != 4940, name)
@@ -519,15 +520,8 @@ object SymDenotations {
       )
 
     /** Is this a denotation of a stable term (or an arbitrary type)? */
-    final def isStable(implicit ctx: Context) = {
-      val isUnstable =
-        (this is UnstableValue) ||
-        ctx.isVolatile(info) && !hasAnnotation(defn.UncheckedStableAnnot)
-      (this is Stable) || isType || {
-        if (isUnstable) false
-        else { setFlag(Stable); true }
-      }
-    }
+    final def isStable(implicit ctx: Context) =
+      isType || is(Stable) || !(is(UnstableValue) || info.isInstanceOf[ExprType])
 
     /** Is this a "real" method? A real method is a method which is:
      *  - not an accessor
@@ -816,14 +810,11 @@ object SymDenotations {
       enclClass(symbol, false)
     }
 
-    final def isEffectivelyFinal(implicit ctx: Context): Boolean = {
-      (this.flags is Flags.PrivateOrFinal) || (!this.owner.isClass) ||
-        ((this.owner.flags is (Flags.ModuleOrFinal)) && (!this.flags.is(Flags.MutableOrLazy))) ||
-        (this.owner.isAnonymousClass)
-    }
+    /** A symbol is effectively final if it cannot be overridden in a subclass */
+    final def isEffectivelyFinal(implicit ctx: Context): Boolean =
+      is(PrivateOrFinal) || !owner.isClass || owner.is(ModuleOrFinal) || owner.isAnonymousClass
 
-    /** The class containing this denotation which has the given effective name.
-     */
+    /** The class containing this denotation which has the given effective name. */
     final def enclosingClassNamed(name: Name)(implicit ctx: Context): Symbol = {
       val cls = enclosingClass
       if (cls.effectiveName == name || !cls.exists) cls else cls.owner.enclosingClassNamed(name)
@@ -1250,8 +1241,8 @@ object SymDenotations {
       if (parentIsYounger) {
         incremental.println(s"parents of $this are invalid; symbol id = ${symbol.id}, copying ...\n")
         invalidateInheritedInfo()
-        firstRunId = ctx.runId
       }
+      firstRunId = ctx.runId
       this
     }
 
@@ -1385,7 +1376,7 @@ object SymDenotations {
       var fp = FingerPrint()
       var e = info.decls.lastEntry
       while (e != null) {
-        fp.include(e.sym.name)
+        fp.include(e.name)
         e = e.prev
       }
       var ps = classParents
@@ -1823,6 +1814,14 @@ object SymDenotations {
     def withDecls(decls: Scope): this.type = { myDecls = decls; this }
     def withSourceModule(sourceModuleFn: Context => Symbol): this.type = { mySourceModuleFn = sourceModuleFn; this }
     def withModuleClass(moduleClassFn: Context => Symbol): this.type = { myModuleClassFn = moduleClassFn; this }
+  }
+
+  /** A subclass of LazyTypes where type parameters can be completed independently of
+   *  the info.
+   */
+  abstract class TypeParamsCompleter extends LazyType {
+    /** The type parameters computed by the completer before completion has finished */
+    def completerTypeParams(sym: Symbol): List[TypeSymbol]
   }
 
   val NoSymbolFn = (ctx: Context) => NoSymbol

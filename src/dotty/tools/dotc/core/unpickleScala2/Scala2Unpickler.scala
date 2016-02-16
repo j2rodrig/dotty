@@ -101,10 +101,12 @@ object Scala2Unpickler {
       case cinfo => (Nil, cinfo)
     }
     val ost =
-      if ((selfInfo eq NoType) && (denot is ModuleClass))
+      if ((selfInfo eq NoType) && (denot is ModuleClass) && denot.sourceModule.exists)
+        // it seems sometimes the source module does not exist for a module class.
+        // An example is `scala.reflect.internal.Trees.Template$. Without the
+        // `denot.sourceModule.exists` provision i859.scala crashes in the backend.
         denot.owner.thisType select denot.sourceModule
       else selfInfo
-
     denot.info = ClassInfo(denot.owner.thisType, denot.classSymbol, Nil, decls, ost) // first rough info to avoid CyclicReferences
     var parentRefs = ctx.normalizeToClassRefs(parents, cls, decls)
     if (parentRefs.isEmpty) parentRefs = defn.ObjectType :: Nil
@@ -186,7 +188,7 @@ class Scala2Unpickler(bytes: Array[Byte], classRoot: ClassDenotation, moduleClas
     val ex = new BadSignature(
       sm"""error reading Scala signature of $classRoot from $source:
           |error occurred at position $readIndex: $msg""")
-    /*if (debug)*/ original.getOrElse(ex).printStackTrace() // !!! DEBUG
+    if (ctx.debug) original.getOrElse(ex).printStackTrace()
     throw ex
   }
 
@@ -423,7 +425,7 @@ class Scala2Unpickler(bytes: Array[Byte], classRoot: ClassDenotation, moduleClas
               owner.info.decls.checkConsistent()
               if (slowSearch(name).exists)
                 System.err.println(i"**** slow search found: ${slowSearch(name)}")
-              new Exception().printStackTrace()
+              if (ctx.debug) Thread.dumpStack()
               ctx.newStubSymbol(owner, name, source)
             }
           }

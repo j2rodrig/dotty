@@ -406,13 +406,16 @@ object Types {
 
     /** The member of this type with the given name  */
     final def member(name: Name)(implicit ctx: Context): Denotation = /*>|>*/ track("member") /*<|<*/ {
-      findMember(name, widenIfUnstable, EmptyFlags)
+      memberExcluding(name, EmptyFlags)
     }
 
     /** The non-private member of this type with the given name. */
     final def nonPrivateMember(name: Name)(implicit ctx: Context): Denotation = track("nonPrivateMember") {
-      findMember(name, widenIfUnstable, Flags.Private)
+      memberExcluding(name, Flags.Private)
     }
+
+    final def memberExcluding(name: Name, excluding: FlagSet)(implicit ctx: Context): Denotation =
+      findMember(name, widenIfUnstable, excluding)
 
     /** Find member of this type with given name and
      *  produce a denotation that contains the type of the member
@@ -459,7 +462,7 @@ object Types {
           val jointInfo =
             if (rinfo.isAlias) rinfo
             else if (pdenot.info.isAlias) pdenot.info
-            else if (ctx.pendingMemberSearches.contains(name)) safeAnd(pdenot.info, rinfo)
+            else if (ctx.pendingMemberSearches.contains(name)) pdenot.info safe_& rinfo
             else
               try pdenot.info & rinfo
               catch {
@@ -470,11 +473,15 @@ object Types {
                   // the special shortcut for Any in derivesFrom was as yet absent. To reproduce,
                   // remove the special treatment of Any in derivesFrom and compile
                   // sets.scala.
-                  safeAnd(pdenot.info, rinfo)
+                  pdenot.info safe_& rinfo
               }
           pdenot.asSingleDenotation.derivedSingleDenotation(pdenot.symbol, jointInfo)
-        } else
-          pdenot & (new JointRefDenotation(NoSymbol, rinfo, Period.allInRun(ctx.runId)), pre)
+        } else {
+          pdenot & (
+            new JointRefDenotation(NoSymbol, rinfo, Period.allInRun(ctx.runId)),
+            pre,
+            safeIntersection = ctx.pendingMemberSearches.contains(name))
+        }
       }
       def goThis(tp: ThisType) = {
         val d = go(tp.underlying)
@@ -501,15 +508,13 @@ object Types {
             go(next)
         }
       }
-      def goAnd(l: Type, r: Type) = go(l) & (go(r), pre)
+      def goAnd(l: Type, r: Type) = {
+        go(l) & (go(r), pre, safeIntersection = ctx.pendingMemberSearches.contains(name))
+      }
       def goOr(l: Type, r: Type) = {
         if (l.typeSymbol eq ctx.base.definitions.ReadonlyNothingClass) go(r)
         else if (r.typeSymbol eq ctx.base.definitions.ReadonlyNothingClass) go(l)
         else go(l) | (go(r), pre)
-      }
-      def safeAnd(tp1: Type, tp2: Type): Type = (tp1, tp2) match {
-        case (TypeBounds(lo1, hi1), TypeBounds(lo2, hi2)) => TypeBounds(lo1 | lo2, AndType(hi1, hi2))
-        case _ => tp1 & tp2
       }
 
       { val recCount = ctx.findMemberCount + 1
@@ -569,6 +574,12 @@ object Types {
     /** The set of abstract type members of this type. */
     final def abstractTypeMembers(implicit ctx: Context): Seq[SingleDenotation] = track("abstractTypeMembers") {
       memberDenots(abstractTypeNameFilter,
+          (name, buf) => buf += member(name).asSingleDenotation)
+    }
+
+    /** The set of abstract type members of this type. */
+    final def nonClassTypeMembers(implicit ctx: Context): Seq[SingleDenotation] = track("nonClassTypeMembers") {
+      memberDenots(nonClassTypeNameFilter,
           (name, buf) => buf += member(name).asSingleDenotation)
     }
 
@@ -707,6 +718,19 @@ object Types {
 
     def & (that: Type)(implicit ctx: Context): Type = track("&") {
       ctx.typeComparer.glb(this, that)
+    }
+
+    /** Safer version of `&`.
+     *
+     *  This version does not simplify the upper bound of the intersection of
+     *  two TypeBounds. The simplification done by `&` requires subtyping checks
+     *  which may end up calling `&` again, in most cases this should be safe
+     *  but because of F-bounded types, this can result in an infinite loop
+     *  (which will be masked unless `-Yno-deep-subtypes` is enabled).
+     */
+    def safe_& (that: Type)(implicit ctx: Context): Type = (this, that) match {
+      case (TypeBounds(lo1, hi1), TypeBounds(lo2, hi2)) => TypeBounds(lo1 | lo2, AndType(hi1, hi2))
+      case _ => this & that
     }
 
     def | (that: Type)(implicit ctx: Context): Type = track("|") {
@@ -1045,6 +1069,14 @@ object Types {
       case _ => Nil
     }
 
+    /** The parameter names of a PolyType or MethodType, Empty list for others */
+    final def paramNamess(implicit ctx: Context): List[List[TermName]] = this match {
+      case mt: MethodType => mt.paramNames :: mt.resultType.paramNamess
+      case pt: PolyType => pt.resultType.paramNamess
+      case _ => Nil
+    }
+
+
     /** The parameter types in the first parameter section of a PolyType or MethodType, Empty list for others */
     final def firstParamTypes(implicit ctx: Context): List[Type] = this match {
       case mt: MethodType => mt.paramTypes
@@ -1207,6 +1239,15 @@ object Types {
      *      class B extends C[B] with D with E
      *
      *  we approximate `A | B` by `C[A | B] with D`
+     *
+     *  As a second measure we also homogenize refinements containing
+     *  type variables. For instance, if `A` is an instantiatable type variable,
+     *  then
+     *
+     *      ArrayBuffer[Int] | ArrayBuffer[A]
+     *
+     *  is approximated by instantiating `A` to `Int` and returning `ArrayBuffer[Int]`
+     *  instead of `ArrayBuffer[_ >: Int | A <: Int & A]`
      */
     def approximateUnion(implicit ctx: Context) = ctx.approximateUnion(this)
 
@@ -1779,8 +1820,9 @@ object Types {
     override def computeHash = unsupported("computeHash")
   }
 
-  final class TermRefWithFixedSym(prefix: Type, name: TermName, val fixedSym: TermSymbol) extends TermRef(prefix, name) with WithFixedSym
-  final class TypeRefWithFixedSym(prefix: Type, name: TypeName, val fixedSym: TypeSymbol) extends TypeRef(prefix, name) with WithFixedSym
+  // Those classes are non final as Linker extends them.
+  class TermRefWithFixedSym(prefix: Type, name: TermName, val fixedSym: TermSymbol) extends TermRef(prefix, name) with WithFixedSym
+  class TypeRefWithFixedSym(prefix: Type, name: TypeName, val fixedSym: TypeSymbol) extends TypeRef(prefix, name) with WithFixedSym
 
   /** Assert current phase does not have erasure semantics */
   private def assertUnerased()(implicit ctx: Context) =
@@ -1851,6 +1893,10 @@ object Types {
         withFixedSym(prefix, name, sym)
       else if (sym.defRunId != NoRunId && sym.isCompleted)
         withSig(prefix, name, sym.signature) withSym (sym, sym.signature)
+        // Linker note:
+        // this is problematic, as withSig method could return a hash-consed refference
+        // that could have symbol already set making withSym trigger a double-binding error
+        // ./tests/run/absoverride.scala demonstates this
       else
         all(prefix, name) withSym (sym, Signature.NotAMethod)
 
@@ -1975,7 +2021,7 @@ object Types {
   case class LazyRef(refFn: () => Type) extends UncachedProxyType with ValueType {
     private var myRef: Type = null
     private var computed = false
-    lazy val ref = {
+    def ref = {
       if (computed) assert(myRef != null)
       else {
         computed = true
@@ -1983,6 +2029,7 @@ object Types {
       }
       myRef
     }
+    def evaluating = computed && myRef == null
     override def underlying(implicit ctx: Context) = ref
     override def toString = s"LazyRef($ref)"
     override def equals(other: Any) = other match {
@@ -2527,11 +2574,11 @@ object Types {
   // ----- Skolem types -----------------------------------------------
 
   /** A skolem type reference with underlying type `binder`. */
-  abstract case class SkolemType(info: Type) extends CachedProxyType with ValueType with SingletonType {
+  abstract case class SkolemType(info: Type) extends UncachedProxyType with ValueType with SingletonType {
     override def underlying(implicit ctx: Context) = info
     def derivedSkolemType(info: Type)(implicit ctx: Context) =
       if (info eq this.info) this else SkolemType(info)
-    override def computeHash: Int = identityHash
+    override def hashCode: Int = identityHash
     override def equals(that: Any) = this eq that.asInstanceOf[AnyRef]
     override def toString = s"Skolem($info)"
   }
@@ -2579,7 +2626,10 @@ object Types {
      *  uninstantiated
      */
     def instanceOpt(implicit ctx: Context): Type =
-      if (inst.exists) inst else ctx.typerState.instType(this)
+      if (inst.exists) inst else {
+        ctx.typerState.ephemeral = true
+        ctx.typerState.instType(this)
+      }
 
     /** Is the variable already instantiated? */
     def isInstantiated(implicit ctx: Context) = instanceOpt.exists
@@ -2847,6 +2897,11 @@ object Types {
       case _ => super.| (that)
     }
 
+    /** The implied bounds, where aliases are mapped to intervals from
+     *  Nothing/Any
+     */
+    def boundsInterval(implicit ctx: Context): TypeBounds = this
+
     /** If this type and that type have the same variance, this variance, otherwise 0 */
     final def commonVariance(that: TypeBounds): Int = (this.variance + that.variance) / 2
 
@@ -2884,6 +2939,11 @@ object Types {
       else if (v < 0) derivedTypeAlias(this.lo & that.lo, v)
       else super.| (that)
     }
+
+    override def boundsInterval(implicit ctx: Context): TypeBounds =
+      if (variance == 0) this
+      else if (variance < 0) TypeBounds.lower(alias)
+      else TypeBounds.upper(alias)
   }
 
   class CachedTypeAlias(alias: Type, variance: Int, hc: Int) extends TypeAlias(alias, variance) {
@@ -3348,6 +3408,15 @@ object Types {
       }
   }
 
+  /** A filter for names of abstract types of a given type */
+  object nonClassTypeNameFilter extends NameFilter {
+    def apply(pre: Type, name: Name)(implicit ctx: Context): Boolean =
+      name.isTypeName && {
+        val mbr = pre.member(name)
+        mbr.symbol.isType && !mbr.symbol.isClass
+      }
+  }
+
   /** A filter for names of deferred term definitions of a given type */
   object abstractTermNameFilter extends NameFilter {
     def apply(pre: Type, name: Name)(implicit ctx: Context): Boolean =
@@ -3386,7 +3455,7 @@ object Types {
   class MissingType(pre: Type, name: Name)(implicit ctx: Context) extends TypeError(
     i"""cannot resolve reference to type $pre.$name
        |the classfile defining the type might be missing from the classpath${otherReason(pre)}""".stripMargin) {
-    printStackTrace()
+    if (ctx.debug) printStackTrace()
   }
 
   private def otherReason(pre: Type)(implicit ctx: Context): String = pre match {

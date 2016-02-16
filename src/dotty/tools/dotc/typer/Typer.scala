@@ -884,7 +884,7 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
           else
             (arg, WildcardType)
         val arg1 = typed(desugaredArg, argPt)
-        adaptTypeArg(arg1, if (tparam.isCompleted) tparam.info else WildcardType)
+        adaptTypeArg(arg1, tparam.info)
       }
       val args1 = args.zipWithConserve(tparams)(typedArg(_, _)).asInstanceOf[List[Tree]]
       // check that arguments conform to bounds is done in phase PostTyper
@@ -921,8 +921,8 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
   def completeAnnotations(mdef: untpd.MemberDef, sym: Symbol)(implicit ctx: Context): Unit = {
     // necessary to force annotation trees to be computed.
     sym.annotations.foreach(_.tree)
-    // necessary in order to mark the typed ahead annotations as definitiely typed:
-    untpd.modsDeco(mdef).mods.annotations.mapconserve(typedAnnotation)
+    // necessary in order to mark the typed ahead annotations as definitely typed:
+    untpd.modsDeco(mdef).mods.annotations.foreach(typedAnnotation)
   }
 
   def typedAnnotation(annot: untpd.Tree)(implicit ctx: Context): Tree = track("typedAnnotation") {
@@ -963,8 +963,7 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
     val TypeDef(name, rhs) = tdef
     checkLowerNotHK(sym, tdef.tparams.map(symbolOfTree), tdef.pos)
     completeAnnotations(tdef, sym)
-    val _ = typedType(rhs) // unused, typecheck only to remove from typedTree
-    assignType(cpy.TypeDef(tdef)(name, TypeTree(sym.info), Nil), sym)
+    assignType(cpy.TypeDef(tdef)(name, typedType(rhs), Nil), sym)
   }
 
   def typedClassDef(cdef: untpd.TypeDef, cls: ClassSymbol)(implicit ctx: Context) = track("typedClassDef") {
@@ -989,6 +988,7 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
     val impl1 = cpy.Template(impl)(constr1, parents1, self1, body1)
       .withType(dummy.nonMemberTermRef)
     checkVariance(impl1)
+    if (!cls.is(AbstractOrTrait) && !ctx.isAfterTyper) checkRealizableBounds(cls.typeRef, cdef.pos)
     assignType(cpy.TypeDef(cdef)(name, impl1, Nil), cls)
 
     // todo later: check that
@@ -1060,6 +1060,7 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
   def typedImport(imp: untpd.Import, sym: Symbol)(implicit ctx: Context): Import = track("typedImport") {
     val expr1 = typedExpr(imp.expr, AnySelectionProto)
     checkStable(expr1.tpe, imp.expr.pos)
+    if (!ctx.isAfterTyper) checkRealizable(expr1.tpe, imp.expr.pos)
     assignType(cpy.Import(imp)(expr1, imp.selectors), sym)
   }
 
@@ -1069,7 +1070,7 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
     val packageContext =
       if (pkg is Package) ctx.fresh.setOwner(pkg.moduleClass).setTree(tree)
       else {
-        ctx.error(d"$pkg is not a package", tree.pos)
+        ctx.error(d"$pkg is already defined, cannot be a package", tree.pos)
         ctx
       }
     val stats1 = typedStats(tree.stats, pkg.moduleClass)(packageContext)
@@ -1346,6 +1347,10 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
 
     def methodStr = err.refStr(methPart(tree).tpe)
 
+    def missingArgs = errorTree(tree,
+      d"""missing arguments for $methodStr
+         |follow this method with `_' if you want to treat it as a partially applied function""".stripMargin)
+
     def adaptOverloaded(ref: TermRef) = {
       val altDenots = ref.denot.alternatives
       typr.println(i"adapt overloaded $ref with alternatives ${altDenots map (_.info)}%, %")
@@ -1463,7 +1468,12 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
           }
       case wtp: MethodType if !pt.isInstanceOf[SingletonType] =>
         val arity =
-          if (defn.isFunctionType(pt)) defn.functionArity(pt)
+          if (defn.isFunctionType(pt))
+            if (!isFullyDefined(pt, ForceDegree.none) && isFullyDefined(wtp, ForceDegree.none))
+              // if method type is fully defined, but expected type is not,
+              // prioritize method parameter types as parameter types of the eta-expanded closure
+              0
+            else defn.functionArity(pt)
           else if (pt eq AnyFunctionProto) wtp.paramTypes.length
           else -1
         if (arity >= 0 && !tree.symbol.isConstructor)
@@ -1473,12 +1483,11 @@ class Typer extends Namer with TypeAssigner with Applications with Implicits wit
         else if (wtp.isImplicit)
           err.typeMismatch(tree, pt)
         else
-          errorTree(tree,
-            d"""missing arguments for $methodStr
-               |follow this method with `_' if you want to treat it as a partially applied function""".stripMargin)
+          missingArgs
       case _ =>
         if (tree.tpe <:< pt) tree
         else if (ctx.mode is Mode.Pattern) tree // no subtype check for pattern
+        else if (wtp.isInstanceOf[MethodType]) missingArgs
         else {
           typr.println(i"adapt to subtype ${tree.tpe} !<:< $pt")
           //typr.println(TypeComparer.explained(implicit ctx => tree.tpe <:< pt))

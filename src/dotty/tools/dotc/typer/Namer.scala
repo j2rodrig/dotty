@@ -478,9 +478,30 @@ class Namer { typer: Typer =>
   }
 
   /** The completer of a symbol defined by a member def or import (except ClassSymbols) */
-  class Completer(val original: Tree)(implicit ctx: Context) extends LazyType {
+  class Completer(val original: Tree)(implicit ctx: Context) extends TypeParamsCompleter {
 
     protected def localContext(owner: Symbol) = ctx.fresh.setOwner(owner).setTree(original)
+
+    private var myTypeParams: List[TypeSymbol] = null
+    private var nestedCtx: Context = null
+
+    def completerTypeParams(sym: Symbol): List[TypeSymbol] = {
+      if (myTypeParams == null) {
+        //println(i"completing type params of $sym in ${sym.owner}")
+        myTypeParams = original match {
+          case tdef: TypeDef =>
+            nestedCtx = localContext(sym).setNewScope
+            locally {
+              implicit val ctx: Context = nestedCtx
+              completeParams(tdef.tparams)
+              tdef.tparams.map(symbolOfTree(_).asType)
+            }
+          case _ =>
+            Nil
+        }
+      }
+      myTypeParams
+    }
 
     private def typeSig(sym: Symbol): Type = original match {
       case original: ValDef =>
@@ -492,7 +513,7 @@ class Namer { typer: Typer =>
         typer1.defDefSig(original, sym)(localContext(sym).setTyper(typer1))
       case original: TypeDef =>
         assert(!original.isClassDef)
-        typeDefSig(original, sym)(localContext(sym).setNewScope)
+        typeDefSig(original, sym, completerTypeParams(sym))(nestedCtx)
       case imp: Import =>
         try {
           val expr1 = typedAheadExpr(imp.expr, AnySelectionProto)
@@ -840,9 +861,7 @@ class Namer { typer: Typer =>
     else valOrDefDefSig(ddef, sym, typeParams, paramSymss, wrapMethType)
   }
 
-  def typeDefSig(tdef: TypeDef, sym: Symbol)(implicit ctx: Context): Type = {
-    completeParams(tdef.tparams)
-    val tparamSyms = tdef.tparams map symbolOfTree
+  def typeDefSig(tdef: TypeDef, sym: Symbol, tparamSyms: List[TypeSymbol])(implicit ctx: Context): Type = {
     val isDerived = tdef.rhs.isInstanceOf[untpd.DerivedTypeTree]
     //val toParameterize = tparamSyms.nonEmpty && !isDerived
     //val needsLambda = sym.allOverriddenSymbols.exists(_ is HigherKinded) && !isDerived
@@ -850,7 +869,9 @@ class Namer { typer: Typer =>
       if (tparamSyms.nonEmpty && !isDerived) tp.LambdaAbstract(tparamSyms)
       //else if (toParameterize) tp.parameterizeWith(tparamSyms)
       else tp
-    sym.info = abstracted(TypeBounds.empty)
+
+    val dummyInfo = abstracted(TypeBounds.empty)
+    sym.info = dummyInfo
       // Temporarily set info of defined type T to ` >: Nothing <: Any.
       // This is done to avoid cyclic reference errors for F-bounds.
       // This is subtle: `sym` has now an empty TypeBounds, but is not automatically
@@ -871,6 +892,19 @@ class Namer { typer: Typer =>
       sym.info = NoCompleter
       sym.info = checkNonCyclic(sym, unsafeInfo, reportErrors = true)
     }
+
+    // Here we pay the price for the cavalier setting info to TypeBounds.empty above.
+    // We need to compensate by invalidating caches in references that might
+    // still contain the TypeBounds.empty. If we do not do this, stdlib factories
+    // fail with a bounds error in PostTyper.
+    def ensureUpToDate(tp: Type, outdated: Type) = tp match {
+      case tref: TypeRef if tref.info == outdated && sym.info != outdated =>
+        tref.uncheckedSetSym(null)
+      case _ =>
+    }
+    ensureUpToDate(sym.typeRef, dummyInfo)
+    ensureUpToDate(sym.typeRef.appliedTo(tparamSyms.map(_.typeRef)), TypeBounds.empty)
+
     etaExpandArgs.apply(sym.info)
   }
 

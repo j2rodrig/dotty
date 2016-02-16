@@ -15,7 +15,7 @@ import scala.reflect.internal.util._
  */
 class ConsoleReporter(
     reader: BufferedReader = Console.in,
-    writer: PrintWriter = new PrintWriter(Console.err, true))(ctx: Context)
+    writer: PrintWriter = new PrintWriter(Console.err, true))
   extends Reporter with UniqueMessagePositions {
 
   /** maximal number of error messages to be printed */
@@ -63,7 +63,7 @@ class ConsoleReporter(
     if (reader != null) {
       val response = reader.read().asInstanceOf[Char].toLower
       if (response == 'a' || response == 's') {
-        (new Exception).printStackTrace()
+        Thread.dumpStack()
         if (response == 'a')
           sys.exit(1)
       }

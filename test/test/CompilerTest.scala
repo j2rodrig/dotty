@@ -33,7 +33,7 @@ import org.junit.Test
   *        object Test { def main(args: Array[String]): Unit = ... }
   *        Classpath jars can be added to partestDeps in the sbt Build.scala.
   */
-abstract class CompilerTest extends DottyTest {
+abstract class CompilerTest {
 
   /** Override with output dir of test so it can be patched. Partest expects
     * classes to be in partest-generated/[kind]/[testname]-[kind].obj/ */
@@ -181,7 +181,7 @@ abstract class CompilerTest extends DottyTest {
   private def compileArgs(args: Array[String], xerrors: Int = 0)(implicit defaultOptions: List[String]): Unit = {
     val allArgs = args ++ defaultOptions
     val processor = if (allArgs.exists(_.startsWith("#"))) Bench else Main
-    val nerrors = processor.process(allArgs, ctx).errorCount
+    val nerrors = processor.process(allArgs).errorCount
     assert(nerrors == xerrors, s"Wrong # of errors. Expected: $xerrors, found: $nerrors")
   }
 
@@ -221,8 +221,8 @@ abstract class CompilerTest extends DottyTest {
       case ExistsSame => // nothing else to do
       case ExistsDifferent =>
         val nextDest = dest.parent / (dest match {
-          case f: SFile => SFile(replaceVersion(f.stripExtension, nr)).addExtension(f.extension)
           case d: Directory => Directory(replaceVersion(d.name, nr))
+          case f => SFile(replaceVersion(f.stripExtension, nr)).addExtension(f.extension)
         })
         computeDestAndCopyFiles(source, nextDest, kind, flags, nerr, nr + 1, partestOutput)
     }

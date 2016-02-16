@@ -3,7 +3,7 @@ package dotc
 package core
 
 import Contexts._, Types._, Symbols._, Names._, Flags._, Scopes._
-import SymDenotations._, Denotations.Denotation
+import SymDenotations._, Denotations.SingleDenotation
 import config.Printers._
 import util.Positions._
 import Decorators._
@@ -35,7 +35,7 @@ trait TypeOps { this: Context => // TODO: Make standalone object.
    *  Instead we produce an annotated type that marks the prefix as unsafe:
    *
    *     (x: (C @ UnsafeNonvariant)#T)C#T
-   
+
    *  We also set a global state flag `unsafeNonvariant` to the current run.
    *  When typing a Select node, typer will check that flag, and if it
    *  points to the current run will scan the result type of the select for
@@ -102,7 +102,7 @@ trait TypeOps { this: Context => // TODO: Make standalone object.
             asSeenFrom(tp.parent, pre, cls, theMap),
             tp.refinedName,
             asSeenFrom(tp.refinedInfo, pre, cls, theMap))
-        case tp: TypeAlias if theMap == null => // if theMap exists, need to do the variance calculation
+        case tp: TypeAlias if tp.variance == 1 => // if variance != 1, need to do the variance calculation
           tp.derivedTypeAlias(asSeenFrom(tp.alias, pre, cls, theMap))
         case _ =>
           (if (theMap != null) theMap else new AsSeenFromMap(pre, cls))
@@ -266,108 +266,78 @@ trait TypeOps { this: Context => // TODO: Make standalone object.
         val accu1 = if (accu exists (_ derivesFrom c)) accu else c :: accu
         if (cs == c.baseClasses) accu1 else dominators(rest, accu1)
     }
+    def approximateOr(tp1: Type, tp2: Type): Type = {
+      def isClassRef(tp: Type): Boolean = tp match {
+        case tp: TypeRef => tp.symbol.isClass
+        case tp: RefinedType => isClassRef(tp.parent)
+        case _ => false
+      }
+      def next(tp: TypeProxy) = tp.underlying match {
+        case TypeBounds(_, hi) => hi
+        case nx => nx
+      }
+      /** If `tp1` and `tp2` are typebounds, try to make one fit into the other
+       *  or to make them equal, by instantiating uninstantiated type variables.
+       */
+      def homogenizedUnion(tp1: Type, tp2: Type): Type = {
+        tp1 match {
+          case tp1: TypeBounds =>
+            tp2 match {
+              case tp2: TypeBounds =>
+                def fitInto(tp1: TypeBounds, tp2: TypeBounds): Unit = {
+                  val nestedCtx = ctx.fresh.setNewTyperState
+                  if (tp2.boundsInterval.contains(tp1.boundsInterval)(nestedCtx))
+                    nestedCtx.typerState.commit()
+                }
+                fitInto(tp1, tp2)
+                fitInto(tp2, tp1)
+              case _ =>
+            }
+          case _ =>
+        }
+        tp1 | tp2
+      }
+
+      tp1 match {
+        case tp1: RefinedType =>
+          tp2 match {
+            case tp2: RefinedType if tp1.refinedName == tp2.refinedName =>
+              return tp1.derivedRefinedType(
+                approximateUnion(OrType(tp1.parent, tp2.parent)),
+                tp1.refinedName,
+                homogenizedUnion(tp1.refinedInfo, tp2.refinedInfo).substRefinedThis(tp2, RefinedThis(tp1)))
+                //.ensuring { x => println(i"approx or $tp1 | $tp2 = $x\n constr = ${ctx.typerState.constraint}"); true } // DEBUG
+            case _ =>
+          }
+        case _ =>
+      }
+      tp1 match {
+        case tp1: TypeProxy if !isClassRef(tp1) =>
+          approximateUnion(next(tp1) | tp2)
+        case _ =>
+          tp2 match {
+            case tp2: TypeProxy if !isClassRef(tp2) =>
+              approximateUnion(tp1 | next(tp2))
+            case _ =>
+              val commonBaseClasses = tp.mapReduceOr(_.baseClasses)(intersect)
+              val doms = dominators(commonBaseClasses, Nil)
+              def baseTp(cls: ClassSymbol): Type =
+                if (tp1.typeParams.nonEmpty) tp.baseTypeRef(cls)
+                else tp.baseTypeWithArgs(cls)
+              doms.map(baseTp).reduceLeft(AndType.apply)
+          }
+      }
+    }
     if (ctx.featureEnabled(defn.LanguageModuleClass, nme.keepUnions)) tp
     else tp match {
       case tp: OrType =>
-        val commonBaseClasses = tp.mapReduceOr(_.baseClasses)(intersect)
-        val doms = dominators(commonBaseClasses, Nil)
-        doms.map(tp.baseTypeWithArgs).reduceLeft(AndType.apply)
+        approximateOr(tp.tp1, tp.tp2)
       case tp @ AndType(tp1, tp2) =>
         tp derived_& (approximateUnion(tp1), approximateUnion(tp2))
       case tp: RefinedType =>
         tp.derivedRefinedType(approximateUnion(tp.parent), tp.refinedName, tp.refinedInfo)
       case _ =>
         tp
-    }
-  }
-
-  /** A type is volatile if its DNF contains an alternative of the form
-   *  {P1, ..., Pn}, {N1, ..., Nk}, where the Pi are parent typerefs and the
-   *  Nj are refinement names, and one the 4 following conditions is met:
-   *
-   *  1. At least two of the parents Pi are abstract types.
-   *  2. One of the parents Pi is an abstract type, and one other type Pj,
-   *     j != i has an abstract member which has the same name as an
-   *     abstract member of the whole type.
-   *  3. One of the parents Pi is an abstract type, and one of the refinement
-   *     names Nj refers to an abstract member of the whole type.
-   *  4. One of the parents Pi is an an alias type with a volatile alias
-   *     or an abstract type with a volatile upper bound.
-   *
-   *  Lazy values are not allowed to have volatile type, as otherwise
-   *  unsoundness can result.
-   */
-  final def isVolatile(tp: Type): Boolean = {
-
-    /** Pre-filter to avoid expensive DNF computation
-     *  If needsChecking returns false it is guaranteed that
-     *  DNF does not contain intersections, or abstract types with upper
-     *  bounds that themselves need checking.
-     */
-    def needsChecking(tp: Type, isPart: Boolean): Boolean = tp match {
-      case tp: TypeRef =>
-        tp.info match {
-          case TypeAlias(alias) =>
-            needsChecking(alias, isPart)
-          case TypeBounds(lo, hi) =>
-            isPart || tp.controlled(isVolatile(hi))
-          case _ => false
-        }
-      case tp: RefinedType =>
-        needsChecking(tp.parent, true)
-      case tp: TypeProxy =>
-        needsChecking(tp.underlying, isPart)
-      case tp: AndType =>
-        true
-      case tp: OrType =>
-        isPart || needsChecking(tp.tp1, isPart) && needsChecking(tp.tp2, isPart)
-      case _ =>
-        false
-    }
-
-    needsChecking(tp, false) && {
-      DNF(tp) forall { case (parents, refinedNames) =>
-        val absParents = parents filter (_.symbol is Deferred)
-        absParents.nonEmpty && {
-          absParents.lengthCompare(2) >= 0 || {
-            val ap = absParents.head
-            ((parents exists (p =>
-              (p ne ap)
-              || p.memberNames(abstractTypeNameFilter, tp).nonEmpty
-              || p.memberNames(abstractTermNameFilter, tp).nonEmpty))
-            || (refinedNames & tp.memberNames(abstractTypeNameFilter, tp)).nonEmpty
-            || (refinedNames & tp.memberNames(abstractTermNameFilter, tp)).nonEmpty
-            || isVolatile(ap))
-          }
-        }
-      }
-    }
-  }
-
-  /** The disjunctive normal form of this type.
-   *  This collects a set of alternatives, each alternative consisting
-   *  of a set of typerefs and a set of refinement names. Both sets are represented
-   *  as lists, to obtain a deterministic order. Collected are
-   *  all type refs reachable by following aliases and type proxies, and
-   *  collecting the elements of conjunctions (&) and disjunctions (|).
-   *  The set of refinement names in each alternative
-   *  are the set of names in refinement types encountered during the collection.
-   */
-  final def DNF(tp: Type): List[(List[TypeRef], Set[Name])] = ctx.traceIndented(s"DNF($this)", checks) {
-    tp.dealias match {
-      case tp: TypeRef =>
-        (tp :: Nil, Set[Name]()) :: Nil
-      case RefinedType(parent, name) =>
-        for ((ps, rs) <- DNF(parent)) yield (ps, rs + name)
-      case tp: TypeProxy =>
-        DNF(tp.underlying)
-      case AndType(l, r) =>
-        for ((lps, lrs) <- DNF(l); (rps, rrs) <- DNF(r))
-          yield (lps | rps, lrs | rrs)
-      case OrType(l, r) =>
-        DNF(l) | DNF(r)
-      case tp =>
-        TypeOps.emptyDNF
     }
   }
 
@@ -584,10 +554,8 @@ trait TypeOps { this: Context => // TODO: Make standalone object.
     if (scala2Mode) migrationWarning(msg, pos)
     scala2Mode
   }
-
 }
 
 object TypeOps {
-  val emptyDNF = (Nil, Set[Name]()) :: Nil
   @sharable var track = false // !!!DEBUG
 }

@@ -6,7 +6,9 @@ import scala.reflect.io.Path
 
 object DottyBuild extends Build {
 
-  val travisMemLimit = List("-Xmx1g", "-Xss2m")
+  // Currently, this cannot be increased without hitting the maximum amount of memory
+  // available on the Jenkins VMs
+  val travisMemLimit = List("-Xmx1100m")
 
   val JENKINS_BUILD = "dotty.jenkins.build"
 
@@ -34,6 +36,14 @@ object DottyBuild extends Build {
     unmanagedSourceDirectories in Compile := Seq((scalaSource in Compile).value),
     unmanagedSourceDirectories in Test := Seq((scalaSource in Test).value),
 
+    // Generate compiler.properties, used by sbt
+    resourceGenerators in Compile += Def.task {
+      val file = (resourceManaged in Compile).value / "compiler.properties"
+      val contents = s"version.number=${version.value}"
+      IO.write(file, contents)
+      Seq(file)
+    }.taskValue,
+
     // include sources in eclipse (downloads source code for all dependencies)
     //http://stackoverflow.com/questions/10472840/how-to-attach-sources-to-sbt-managed-dependencies-in-scala-ide#answer-11683728
     com.typesafe.sbteclipse.plugin.EclipsePlugin.EclipseKeys.withSource := true,
@@ -47,12 +57,12 @@ object DottyBuild extends Build {
                       "org.scala-lang" % "scala-library" % scalaVersion.value % "test"),
     libraryDependencies ++= partestDeps.value,
     libraryDependencies ++= Seq("org.scala-lang.modules" %% "scala-xml" % "1.0.1",
-                                "org.scala-lang.modules" %% "scala-partest" % "1.0.5" % "test",
+                                "org.scala-lang.modules" %% "scala-partest" % "1.0.11" % "test",
                                 "com.novocode" % "junit-interface" % "0.11" % "test",
                                 "jline" % "jline" % "2.12"),
 
     // scalac options
-    scalacOptions in Global ++= Seq("-feature", "-deprecation", "-language:_"),
+    scalacOptions in Global ++= Seq("-feature", "-deprecation", "-language:existentials,higherKinds,implicitConversions"),
 
     javacOptions ++= Seq("-Xlint:unchecked", "-Xlint:deprecation"),
 
@@ -119,7 +129,8 @@ object DottyBuild extends Build {
       ("-DpartestParentID=" + pid) :: tuning ::: agentOptions ::: travis_build ::: fullpath
     }
   ) ++ addCommandAlias("partest", ";test:package;package;test:runMain dotc.build;lockPartestFile;test:test;runPartestRunner") ++
-       addCommandAlias("partest-only", ";test:package;package;test:runMain dotc.build;lockPartestFile;test:test-only dotc.tests;runPartestRunner")
+       addCommandAlias("partest-only",             ";test:package;package;test:runMain dotc.build;lockPartestFile;test:test-only dotc.tests;runPartestRunner") ++
+       addCommandAlias("partest-only-no-bootstrap", ";test:package;package;                        lockPartestFile;test:test-only dotc.tests;runPartestRunner")
 
   lazy val dotty = Project(id = "dotty", base = file("."), settings = defaults)
 
@@ -136,7 +147,7 @@ object DottyBuild extends Build {
     testFrameworks += new TestFramework("org.scalameter.ScalaMeterFramework"),
 
     // scalac options
-    scalacOptions in Global ++= Seq("-feature", "-deprecation", "-language:_"),
+    scalacOptions in Global ++= Seq("-feature", "-deprecation", "-language:existentials,higherKinds,implicitConversions"),
 
     javacOptions ++= Seq("-Xlint:unchecked", "-Xlint:deprecation"),
 
