@@ -26,12 +26,28 @@ trait ViewpointAdaptation1 {
   x1.x1.x1 = x  // ERROR: assignability
   x1.x1.x1 = x1 // ERROR: assignability
 
-  @getter def m: T
+  @polyread def m: T = {
+    var y: T = ???
+    var y1: T @polyread = ???
+    var y2: T @readonly = ???
+
+    y = y
+    y = y1   // ERROR
+    y = y2   // ERROR
+    y1 = y
+    y1 = y1
+    y1 = y2  // ERROR
+    y2 = y
+    y2 = y1
+    y2 = y2
+
+    x
+  }
   m                // OK: environment mutability is inferred
   m[MutableAny]    // OK: environment mutability is explicit
   m[T]             // ERROR: T does not conform to mutability bounds
 
-  @getter def n[P]: T
+  @polyread def n[P]: T
   n
   n[T]             // OK: environment mutability is inferred
   n[MutableAny,T]  // OK: environment mutability is explicit

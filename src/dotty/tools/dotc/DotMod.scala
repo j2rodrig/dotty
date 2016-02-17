@@ -574,20 +574,60 @@ object DotMod {
 
 */
 
+  /**
+    * Given the name of a getter, returns the name of its environment-reference type parameter.
+    */
+  def envRefTypeName(ownerName: Name): TypeName = typeName("EnvRef_" + ownerName)
 
-  /** Remove top-level mutability annotations from the given type. */
+  /**
+    * Returns true if the given symbol is a recognized mutability annotation symbol.
+    */
+  def isMutabilityAnnot(sym: Symbol)(implicit ctx: Context): Boolean =
+    (sym eq defn.ReadonlyAnnot) ||
+      (sym eq defn.MutableAnnot) ||
+      (sym eq defn.RoThisAnnot) ||
+      (sym eq defn.PolyReadAnnot) ||
+      (sym eq defn.UncheckedMutabilityAnnot) ||
+      (sym eq defn.MutabilityOfAnnot)
+
+  /**
+    * Removes top-level mutability annotations from the given type.
+    * Annotations that are not mutability annotations are preserved.
+    */
   def stripAnnots(tp: Type)(implicit ctx: Context): Type = tp match {
     case tp: AnnotatedType =>
-      val sym = tp.annot.symbol
-      if ((sym eq defn.ReadonlyAnnot) || (sym eq defn.MutableAnnot) || (sym eq defn.RoThisAnnot)) stripAnnots(tp.tpe)
+      if (isMutabilityAnnot(tp.annot.symbol)) stripAnnots(tp.tpe)
       else tp.derivedAnnotatedType(stripAnnots(tp.tpe), tp.annot)
     case _ => tp
+  }
+
+  /**
+    * Finds the name of the environment-reference type of the innermost enclosing
+    * getter method or class.
+ *
+    * @param ctx the context to look in
+    * @return the name of the environment-reference type, or None if not found
+    */
+  def findNearestEnclosingPolyreadType(ctx: Context): Option[Name] = {
+    implicit val ctx0 = ctx
+    if (ctx.tree.isGetterLike) Some(envRefTypeName(ctx.tree.name))
+    else if (ctx.outer eq NoContext) None
+    else findNearestEnclosingPolyreadType(ctx.outer)
   }
 
   /**
    * Convert T @readonly to T | ReadonlyNothing
    * Convert T @mutable to T & MutableAny
    */
+  /**
+    * Converts annotated types to "real" types.
+    *
+    * Performs the following kinds of conversions (where T is an arbitrary type):
+    *   T @readonly   -->    T | ReadonlyNothing
+    *   T @mutable    -->    T & MutableAny
+    *   T @polyread   -->    (T | ReadonlyNothing) & EnvRef_X
+    *      (where X is the name of an enclosing getter)
+    */
   def convertAnnotationToType(tp: AnnotatedType)(implicit ctx: Context): Type = {
     val sym = tp.annot.symbol
     if (sym eq defn.ReadonlyAnnot)
@@ -596,6 +636,23 @@ object DotMod {
       AndType(stripAnnots(tp), defn.MutableAnyType)
     // todo alternative to @rothis: use @mutabilityOf(this)?
     // else if (sym eq defn.RoThisAnnot)  // todo find the correct polymorphic receiver parameter
+    else if (sym eq defn.PolyReadAnnot)
+      findNearestEnclosingPolyreadType(ctx) match {
+        case Some(tpnm) =>
+          val readonlyTp = OrType(stripAnnots(tp), defn.ReadonlyNothingType)
+          val envRefTpTree = ctx.typer.typed(
+            untpd.TypeTree(
+              untpd.Ident(tpnm).withPos(tp.annot.tree.pos)
+            ).withPos(tp.annot.tree.pos)
+          )
+          AndType(readonlyTp, envRefTpTree.tpe)
+        case None =>
+          errorType("Cannot find enclosing getter", tp.annot.tree.pos)
+      }
+    else if (sym eq defn.GetterMetaAnnot)
+      errorType(s"@getter is not allowed as a type annotation", tp.annot.tree.pos)
+    else if (isMutabilityAnnot(sym))
+      errorType(s"Internal compiler error: Unhandled mutability annotation @${sym.name}", tp.annot.tree.pos)
     else tp
   }
 
@@ -915,6 +972,7 @@ object DotMod {
 
   /**
    * A TypeComparer that also compares mutability.
+ *
    * @param initCtx the context the comparer operates within
    */
   class DotModTypeComparer(initCtx: Context) extends TypeComparer(initCtx) {
@@ -1138,7 +1196,7 @@ object DotMod {
     //}
 
 
-    def convertType(tpe: Type)(implicit ctx: Context): Type = {
+    def convertType(tpe: Type, tree: Tree)(implicit ctx: Context): Type = {
 
       if (!alreadyStarted) {
         if (false) {
@@ -1360,7 +1418,7 @@ object DotMod {
 
       val tpe1 =
         //if (tree.isInstanceOf[Select] || tree.isInstanceOf[Ident])
-          convertType(tree.tpe)
+          convertType(tree.tpe, tree)
         //else tree.tpe
 
       val tree1 =
@@ -1380,6 +1438,7 @@ object DotMod {
      *
      * If we want to add an extra polymorphic type parameter, this is where we would
      * do it.
+ *
      * @param ddef
      * @param sym
      * @param ctx
@@ -1388,7 +1447,7 @@ object DotMod {
     override def defDefSig(ddef: untpd.DefDef, sym: Symbol)(implicit ctx: Context): Type = {
       val ddef1 = if (ddef.isGetterLike) {
         val bounds = untpd.TypeBoundsTree(untpd.TypeTree(defn.MutableAnyType), untpd.TypeTree(defn.AnyType)) // reduction of: typeParamBounds(name)  todo mutability bounds
-        val envParam = untpd.TypeDef(typeName("EnvRef_" + ddef.name), Nil, bounds).withMods(Modifiers(Param)) // c.f. typeParam in typeParamClause method. todo When doing this for a classdef, check modifiers function for more mods
+        val envParam = untpd.TypeDef(envRefTypeName(ddef.name), Nil, bounds).withMods(Modifiers(Param)) // c.f. typeParam in typeParamClause method. todo When doing this for a classdef, check modifiers function for more mods
 
         untpd.cpy.DefDef(ddef)(ddef.name, envParam :: ddef.tparams, ddef.vparamss, ddef.tpt, ddef.rhs)
       } else ddef
