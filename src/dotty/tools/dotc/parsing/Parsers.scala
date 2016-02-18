@@ -1744,7 +1744,26 @@ object Parsers {
       } else {
         val mods1 = addFlag(mods, Method)
         val name = ident()
-        val tparams = typeParamClauseOpt(ParamOwner.Def)
+        var tparams = typeParamClauseOpt(ParamOwner.Def)
+
+        // Add an envirornment type param if needed
+        def isGetterLike: Boolean = {
+          mods.annotations.exists {
+            case Apply(Select(New(Ident(annotName)), _), _) =>
+              (annotName.toString == "polyread") || (annotName.toString == "getter")
+            case _ =>
+              false
+          }
+        }
+        if (isGetterLike) {
+          val envParamName = typeName("EnvRef_" + name)
+          val bounds = TypeBoundsTree(
+            Select(Ident(termName("dotty")), typeName("MutableAny")),
+            EmptyTree)
+          val envParam = TypeDef(envParamName, Nil, bounds).withMods(Modifiers(Param)) // c.f. typeParam in typeParamClause method. todo When doing this for a classdef, check modifiers function for more mods
+          tparams = envParam :: tparams
+        }
+
         val vparamss = paramClauses(name)
         var tpt = fromWithinReturnType(typedOpt())
         val rhs =

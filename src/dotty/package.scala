@@ -13,8 +13,8 @@ package object dotty {
   trait MutableAny       // to be understood as a supertype of all Mutable types
   trait ReadonlyNothing  // to be understood as a supertype of Nothing, and a subtype of all Readonly types
 
-  trait readonly extends scala.annotation.StaticAnnotation
-  trait polyread extends scala.annotation.StaticAnnotation
-  trait rothis extends scala.annotation.StaticAnnotation
-  trait mutable extends scala.annotation.StaticAnnotation
+  final class readonly extends scala.annotation.StaticAnnotation
+  final class polyread extends scala.annotation.StaticAnnotation
+  final class rothis extends scala.annotation.StaticAnnotation
+  final class mutable extends scala.annotation.StaticAnnotation
 }

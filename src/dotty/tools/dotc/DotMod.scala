@@ -604,7 +604,7 @@ object DotMod {
   /**
     * Finds the name of the environment-reference type of the innermost enclosing
     * getter method or class.
- *
+    *
     * @param ctx the context to look in
     * @return the name of the environment-reference type, or None if not found
     */
@@ -637,6 +637,7 @@ object DotMod {
     // todo alternative to @rothis: use @mutabilityOf(this)?
     // else if (sym eq defn.RoThisAnnot)  // todo find the correct polymorphic receiver parameter
     else if (sym eq defn.PolyReadAnnot)
+      // TODO IF REACHING THE ENV TYPE CROSSES A READONLY BOUNDARY, THE RETURNED TYPE SHOULD BE READONLY
       findNearestEnclosingPolyreadType(ctx) match {
         case Some(tpnm) =>
           val readonlyTp = OrType(stripAnnots(tp), defn.ReadonlyNothingType)
@@ -972,8 +973,8 @@ object DotMod {
 
   /**
    * A TypeComparer that also compares mutability.
- *
-   * @param initCtx the context the comparer operates within
+    *
+    * @param initCtx the context the comparer operates within
    */
   class DotModTypeComparer(initCtx: Context) extends TypeComparer(initCtx) {
 
@@ -1108,6 +1109,22 @@ object DotMod {
 
     var alreadyStarted = false
 
+    /*override def typedDefDef(ddef: untpd.DefDef, sym: Symbol)(implicit ctx: Context) = {
+      val ddef1 = if (ddef.isGetterLike) {
+        val envParamName = envRefTypeName(ddef.name)
+        val bounds = untpd.TypeBoundsTree(untpd.TypeTree(defn.MutableAnyType), untpd.TypeTree(defn.AnyType)).withPos(ddef.pos) // reduction of: typeParamBounds(name)  todo mutability bounds
+        val envParam = untpd.TypeDef(envParamName, Nil, bounds).withMods(Modifiers(Param)).withPos(ddef.pos) // c.f. typeParam in typeParamClause method. todo When doing this for a classdef, check modifiers function for more mods
+
+        val envSym = ctx.newSymbol(sym, envParam.name, Param, typed(bounds).tpe)
+        envParam.putAttachment(SymOfTree, envSym)
+        ctx.scope.openForMutations.enter(envSym)
+
+        untpd.cpy.DefDef(ddef)(ddef.name, envParam :: ddef.tparams, ddef.vparamss, ddef.tpt, ddef.rhs)
+      } else ddef
+      super.typedDefDef(ddef1, sym)
+    }*/
+
+
     //
     // We override typedUnadapted to find untyped DefDefs. Then we add a type parameter named
     // "EnvRef_m" to the type parameter list, where m is the name of the method. We put _m in
@@ -1121,11 +1138,15 @@ object DotMod {
       xtree.getAttachment(TypedAhead) match {
         case None =>
           xtree match {
-            case xtree: untpd.DefDef =>
+            case xtree: untpd.TypeDef =>
+              if (xtree.name.toString == "X" || xtree.name.toString == "EnvRef_n") {
+                true
+              }
+            case xtree: untpd.DefDef if xtree.isGetterLike =>
               //
               // For every DefDef tree, we add a type parameter.
               //
-              val paramBound = untpd.TypeBoundsTree(untpd.TypeTree(defn.MutableAnyType), EmptyTree)
+              /*val paramBound = untpd.TypeBoundsTree(untpd.TypeTree(defn.MutableAnyType), EmptyTree)
               val envParam = untpd.TypeDef(typeName("EnvRef_" + xtree.name), paramBound)
               envParam.withMods(untpd.Modifiers(Param|Synthetic))
               enterSymbol(createSymbol(envParam))
@@ -1137,8 +1158,30 @@ object DotMod {
               //
               xtree.allAttachments.foreach { case (k, v) =>
                 xtree1.pushAttachment(k, v)
+              }*/
+
+              val envParamName = envRefTypeName(xtree.name)
+              val bounds = untpd.TypeBoundsTree(untpd.TypeTree(defn.MutableAnyType), untpd.TypeTree(defn.AnyType)).withPos(xtree.pos) // reduction of: typeParamBounds(name)  todo mutability bounds
+              val envParam = untpd.TypeDef(envParamName, Nil, bounds).withMods(Modifiers(Param)).withPos(xtree.pos) // c.f. typeParam in typeParamClause method. todo When doing this for a classdef, check modifiers function for more mods
+              //index(envParam)
+              //enterSymbol(createSymbol(envParam))
+              //recordSym(ctx.newSymbol(xtree.attachment(SymOfTree), envParam.name, Param, typed(bounds).tpe), envParam)
+              val envSym = ctx.newSymbol(xtree.attachment(SymOfTree), envParam.name, Param, typed(bounds).tpe)
+              //envParam.pushAttachment(SymOfTree, envSym)
+
+              val xtree1 = untpd.cpy.DefDef(xtree)(xtree.name, envParam :: xtree.tparams, xtree.vparamss, xtree.tpt, xtree.rhs)
+              //
+              // Copy all attachments to new tree.
+              //
+              xtree.allAttachments.foreach { case (k, v) =>
+                xtree1.putAttachment(k, v)
               }
-              return super.typedUnadapted(xtree1)
+
+              xtree1.tparams.head.putAttachment(SymOfTree, envSym)
+
+              val att = xtree1.tparams.head.attachment(SymOfTree)
+
+              return super.typedUnadapted(xtree1, pt)
             case _ =>  // not a tree we care about here, so fall through
           }
         case _ =>  // this tree has already been typed, so we do nothing here
@@ -1374,6 +1417,13 @@ object DotMod {
       super.typedTypeApply(tree1, pt)
     }
 
+    /*override def typed(tree: untpd.Tree, pt: Type = WildcardType)(implicit ctx: Context): Tree = {
+      val tree1 = tree match {
+        case _ => tree
+      }
+      super.typed(tree1, pt)
+    }*/
+
     override def adapt(tree0: tpd.Tree, pt: Type, original: untpd.Tree)(implicit ctx: Context): tpd.Tree = {
 
       //
@@ -1438,24 +1488,63 @@ object DotMod {
      *
      * If we want to add an extra polymorphic type parameter, this is where we would
      * do it.
- *
-     * @param ddef
+      *
+      * NOTE: Actually, we can't just add a type parameter here.
+      *   The DefDef tree is not modified here, so the tree pickler never sees the new parameter,
+      *   causing uses of the type parameter to be interpreted as forward references by the pickler.
+      *   It seems I will have to modify the DefDef tree directly.
+      *
+      * @param ddef
      * @param sym
      * @param ctx
      * @return
      */
-    override def defDefSig(ddef: untpd.DefDef, sym: Symbol)(implicit ctx: Context): Type = {
-      val ddef1 = if (ddef.isGetterLike) {
-        val bounds = untpd.TypeBoundsTree(untpd.TypeTree(defn.MutableAnyType), untpd.TypeTree(defn.AnyType)) // reduction of: typeParamBounds(name)  todo mutability bounds
-        val envParam = untpd.TypeDef(envRefTypeName(ddef.name), Nil, bounds).withMods(Modifiers(Param)) // c.f. typeParam in typeParamClause method. todo When doing this for a classdef, check modifiers function for more mods
+    /*override def defDefSig(ddef: untpd.DefDef, sym: Symbol)(implicit ctx: Context): Type = {
+      if (ddef.isGetterLike) {
 
-        untpd.cpy.DefDef(ddef)(ddef.name, envParam :: ddef.tparams, ddef.vparamss, ddef.tpt, ddef.rhs)
-      } else ddef
+        //  FROM ClassfileParser#parseMember
+        //val member = ctx.newSymbol(
+        //  getOwner(jflags), name, sflags, memberCompleter, coord = start)
+        //getScope(jflags).enter(member)
 
-      super.defDefSig(ddef1, sym)
+        //  FROM Definitions#newTypeField
+        //scope.enter(newSymbol(cls, name, flags, TypeBounds.empty))
+
+        //   FROM Typer#typedBind
+        //val flags = if (tree.isType) BindDefinedType else EmptyFlags
+        //val sym = ctx.newSymbol(ctx.owner, tree.name, flags, body1.tpe, coord = tree.pos)
+
+        // see Symbols#newTypeParams
+        // used in tpd.polyDefDef
+        // used by tpd.DefDef
+
+
+        val envParamName = envRefTypeName(ddef.name)
+        val bounds = untpd.TypeBoundsTree(untpd.TypeTree(defn.MutableAnyType), untpd.TypeTree(defn.AnyType)).withPos(ddef.pos) // reduction of: typeParamBounds(name)  todo mutability bounds
+        val envParam = untpd.TypeDef(envParamName, Nil, bounds).withMods(Modifiers(Param)).withPos(ddef.pos) // c.f. typeParam in typeParamClause method. todo When doing this for a classdef, check modifiers function for more mods
+
+        //val flags = EmptyFlags
+        //recordSym(ctx.newSymbol(ctx.owner, envParam.name, flags, typed(bounds).tpe), envParam)
+
+        //enterSymbol(createSymbol(envParam))
+
+        val ddef1 = untpd.cpy.DefDef(ddef)(ddef.name, envParam :: ddef.tparams, ddef.vparamss, ddef.tpt, ddef.rhs)
+        val defsig = super.defDefSig(ddef1, sym)
+
+        originalTyper.enterSymbol(defsig.typeParamNamed(envParamName))
+
+        defsig
+      }
+      else super.defDefSig(ddef, sym)
+    }*/
+
+    var originalTyper: Typer = null
+
+    override def newLikeThis: Typer = {
+      val typer1 = new DotModTyper
+      typer1.originalTyper = this
+      typer1
     }
-
-    override def newLikeThis: Typer = new DotModTyper
   }
 
   /** This phase runs the regular Scala RefChecks with the DotMod type comparer to enforce necessary

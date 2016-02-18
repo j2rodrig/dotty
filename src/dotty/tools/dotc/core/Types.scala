@@ -142,7 +142,7 @@ object Types {
 
     /** Is this type an instance of a non-bottom subclass of the given class `cls`? */
     final def derivesFrom(cls: Symbol)(implicit ctx: Context): Boolean = {
-      def loop(tp: Type) = tp match {
+      def loop(tp: Type) = tp.withoutMutability match {
         case tp: TypeRef =>
           val sym = tp.symbol
           if (sym.isClass) sym.derivesFrom(cls) else tp.underlying.derivesFrom(cls)
