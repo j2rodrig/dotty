@@ -1404,9 +1404,7 @@ object DotMod {
 
             // Get the receiver's mutability
             val envType = methPart(typedFn).tpe.asInstanceOf[TermRef].prefix
-              //methPart(typedFn).tpe match {
-              //  case funRef: TermRef => AndType(funRef.prefix, defn.ReadonlyNothingType)
-              //}
+            //println(s"---call to ${typedFn.symbol} with receiver type $envType")
 
             //println(s"--- ${typedFn.symbol} is getter-like in application")
             //
@@ -1416,10 +1414,14 @@ object DotMod {
             if (typedArgs.length == pt.paramNames.length - 1) {
 
               // Set environment arg to receiver's mutability
-              val envArg = untpd.TypeTree(AndType(envType, defn.ReadonlyNothingType))
+              val envArg = untpd.TypeTree(
+                if (envType eq NoPrefix) defn.MutableAnyType
+                else AndType(envType, defn.ReadonlyNothingType)
+              )
               //println(s"--- adding type argument in call to ${typedFn.symbol}")
               tree1 = untpd.cpy.TypeApply(tree0)(tree0.fun, envArg :: tree0.args)
-            } else {
+            }
+            else if (envType ne NoPrefix) {
               // Check that the receiver mutability matches the first type parameter
               //println(s"--- Checking $envType vs. ${typedArgs.head.tpe}")
               //println(s"--- ${envType <:< typedArgs.head.tpe}")
