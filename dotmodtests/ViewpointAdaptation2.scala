@@ -17,10 +17,14 @@ trait ViewpointAdaptation2 {
   val z2: T = x.m[Any]     // OK
   val z3: T = x1.m[Any]   // ERROR
 
-  val z4: T = x.m[Any,Any]     // OK
+  val z4: TR = x.m[Any,Any]     // OK
   val z5: T = x1.m[MutableAny,Any]   // ERROR: receiver does not match environment mutability
 
   @polyread def n() = {
-    val z10: T@polyread = x1.m[Any,Any] // ERROR
+    val z10: T@polyread = x1.m[Any] // ERROR
+
+    @polyread def o[X]() = { }
+    o[Any]()   // OK
+    o[MutableAny,Any]()   // OK
   }
 }
