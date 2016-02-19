@@ -609,7 +609,7 @@ object DotMod {
     * @return the name of the environment-reference type, or None if not found
     */
   def findNearestEnclosingPolyreadType(ctx: Context): Option[Name] = {
-    implicit val ctx0 = ctx
+    implicit val ctx0: Context = ctx
     if (ctx.tree.isGetterLike) Some(envRefTypeName(ctx.tree.name))
     else if (ctx.outer eq NoContext) None
     else findNearestEnclosingPolyreadType(ctx.outer)
@@ -650,8 +650,11 @@ object DotMod {
         case None =>
           errorType("Cannot find enclosing getter", tp.annot.tree.pos)
       }
-    else if (sym eq defn.GetterMetaAnnot)
-      errorType(s"@getter is not allowed as a type annotation", tp.annot.tree.pos)
+    else if (sym eq defn.GetterMetaAnnot) tp  // ignore @getter where bound to types
+      // todo @(inline @getter) is found on some ValDefs -- do we want to check for this?
+      // todo see tests/pos/rbtree.scala
+      // todo see scala-scala/src/library/scala/collection/immutable/RedBlackTree.scala
+      //errorType(s"@getter is not allowed as a type annotation", tp.annot.tree.pos)
     else if (isMutabilityAnnot(sym))
       errorType(s"Internal compiler error: Unhandled mutability annotation @${sym.name}", tp.annot.tree.pos)
     else tp
@@ -1088,6 +1091,21 @@ object DotMod {
       super.isSubType(tp1, tp2)
     }
 
+    override def glb(tp1: Type, tp2: Type): Type = {
+      if (tp1 eq tp2) tp1
+      else if (!tp1.exists) tp2
+      else if (!tp2.exists) tp1
+      else super.glb(tp1, tp2)
+    }
+
+    override def lub(tp1: Type, tp2: Type): Type = {
+      if (tp1 eq tp2) tp1
+      else if (!tp1.exists) tp1
+      else if (!tp2.exists) tp2
+      //else if ((tp1 isRef defn.MutableAnyClass) && (tp2 isRef defn.ReadonlyNothingClass))
+      else super.lub(tp1, tp2)
+    }
+
     /** The greatest lower bound of two types */
     /*override def glb(tp1: Type, tp2: Type): Type = {
       if (tp2 isRef defn.ReadonlyNothingClass) {
@@ -1243,6 +1261,25 @@ object DotMod {
 
       if (!alreadyStarted) {
         if (false) {
+          val t0 = OrType(tpe, defn.ReadonlyNothingType)
+          val t1 = AndType(t0, defn.ReadonlyNothingType)
+          println(s"($t1 <:< MutableAny == " + (t1 <:< defn.MutableAnyType))
+
+          var _nxt = 0
+          def nxt() = { _nxt += 1; _nxt.toString + " " }
+
+          println( nxt() + defn.MutableAnyClass.baseTypeRefOf(defn.ReadonlyNothingType, true) )
+          println( nxt() + defn.MutableAnyClass.baseTypeRefOf(defn.ReadonlyNothingType, false) )
+          println( nxt() + defn.MutableAnyClass.baseTypeRefOf(tpe, true) )
+          println( nxt() + defn.MutableAnyClass.baseTypeRefOf(tpe, false) )
+          println( nxt() + defn.MutableAnyClass.baseTypeRefOf(t0, true) )
+          println( nxt() + defn.MutableAnyClass.baseTypeRefOf(t0, false) )
+          println( nxt() + defn.MutableAnyClass.baseTypeRefOf(t1, true) )
+          println( nxt() + defn.MutableAnyClass.baseTypeRefOf(t1, false) )
+
+
+          /*println(s"($t0 <:< MutableAny == " + (t0 <:< defn.MutableAnyType))
+          println()
           println("Nothing <:< ReadonlyNothing == " + (defn.NothingType <:< defn.ReadonlyNothingType))
           println("Nothing <:< MutableAny == " + (defn.NothingType <:< defn.ReadonlyNothingType))
           println("ReadonlyNothing <:< Nothing == " + (defn.ReadonlyNothingType <:< defn.NothingType))
@@ -1292,6 +1329,7 @@ object DotMod {
           println("(MutableAny & ReadonlyNothing) <:< Any == " +
             (AndType(defn.MutableAnyType, defn.ReadonlyNothingType) <:< defn.AnyType))
           println()
+          */
         }
         alreadyStarted = true
       }
@@ -1344,10 +1382,6 @@ object DotMod {
       tpe0
     }
 
-    //
-    // Adding type parameters inside the lazy completers!!
-    // (will this work?)
-    //
 
     //override def assignType(tree0: untpd.TypeApply, fn: Tree, args: List[Tree])(implicit ctx: Context) = {
     override def typedTypeApply(tree0: untpd.TypeApply, pt: Type)(implicit ctx: Context): Tree = {
@@ -1367,15 +1401,34 @@ object DotMod {
       if (typedFn.symbol.isGetterLike) {
         typedFn.tpe.widen match {
           case pt: PolyType =>
+
+            // Get the receiver's mutability
+            val envType = methPart(typedFn).tpe.asInstanceOf[TermRef].prefix
+              //methPart(typedFn).tpe match {
+              //  case funRef: TermRef => AndType(funRef.prefix, defn.ReadonlyNothingType)
+              //}
+
             //println(s"--- ${typedFn.symbol} is getter-like in application")
             //
             // Add the argument only if we are missing exactly one argument
             // todo Check receiver type... what ought to be done to account for receiver mutability?
             //
             if (typedArgs.length == pt.paramNames.length - 1) {
+
+              // Set environment arg to receiver's mutability
+              val envArg = untpd.TypeTree(AndType(envType, defn.ReadonlyNothingType))
               //println(s"--- adding type argument in call to ${typedFn.symbol}")
-              val envArg = untpd.TypeTree(defn.MutableAnyType)
               tree1 = untpd.cpy.TypeApply(tree0)(tree0.fun, envArg :: tree0.args)
+            } else {
+              // Check that the receiver mutability matches the first type parameter
+              //println(s"--- Checking $envType vs. ${typedArgs.head.tpe}")
+              //println(s"--- ${envType <:< typedArgs.head.tpe}")
+              if (!(envType <:< typedArgs.head.tpe)) {
+                 val msg = d"""Receiver mutability mismatch:
+                    | found   : $envType
+                    | required: ${typedArgs.head.tpe}""".stripMargin
+                return errorTree(tree0, msg)
+              }
             }
           case _ =>
         }
