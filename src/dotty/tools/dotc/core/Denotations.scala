@@ -338,6 +338,8 @@ object Denotations {
       }
 
       if (this eq that) this
+      else if (this eq SymDenotations.AnyDenotation) this
+      else if (that eq SymDenotations.AnyDenotation) that
       else if (!this.exists) that
       else if (!that.exists) this
       else that match {
@@ -390,6 +392,8 @@ object Denotations {
         else NoDenotation
 
       if (this eq that) this
+      else if (this eq SymDenotations.AnyDenotation) that
+      else if (that eq SymDenotations.AnyDenotation) this
       else if (!this.exists) this
       else if (!that.exists) that
       else this match {

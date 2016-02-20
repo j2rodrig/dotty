@@ -429,7 +429,8 @@ object Types {
         case tp: ThisType =>
           goThis(tp)
         case tp: TypeRef =>
-          tp.denot.findMember(name, pre, excluded)
+          if (tp.denot.symbol.name.toString == "ReadonlyNothing") AnyDenotation
+          else tp.denot.findMember(name, pre, excluded)
         case tp: TermRef =>
           go (tp.underlying match {
             case mt: MethodType
@@ -512,9 +513,7 @@ object Types {
         go(l) & (go(r), pre, safeIntersection = ctx.pendingMemberSearches.contains(name))
       }
       def goOr(l: Type, r: Type) = {
-        if (l.typeSymbol eq defn.ReadonlyNothingClass) go(r)
-        else if (r.typeSymbol eq defn.ReadonlyNothingClass) go(l)
-        else go(l) | (go(r), pre)
+        go(l) | (go(r), pre)
       }
 
       { val recCount = ctx.findMemberCount + 1

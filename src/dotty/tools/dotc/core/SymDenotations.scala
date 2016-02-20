@@ -1775,6 +1775,7 @@ object SymDenotations {
     validFor = Period.allInRun(NoRunId) // will be brought forward automatically
   }
 
+  @sharable val AnyDenotation = new NoDenotation   // matches any denotation
   @sharable val NoDenotation = new NoDenotation
   @sharable val NotDefinedHereDenotation = new NoDenotation
 
