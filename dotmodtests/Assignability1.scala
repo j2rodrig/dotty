@@ -41,6 +41,14 @@ trait Assignability1 {
       y.x = y   // ERROR: assignability
       y.x = y1   // ERROR: assignability and mutability
 
+      @polyread def e3 = {
+        y = y   // ERROR: assignability
+        y.x = y   // ERROR: assignability
+        y.x = y1   // ERROR: assignability and mutability
+
+        y1
+      }
+
       y1
     }
     y1

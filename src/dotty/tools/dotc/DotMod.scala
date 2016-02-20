@@ -605,6 +605,7 @@ object DotMod {
     * Returns the type corresponding to the given type name.
     * Does this by creating a new tree with the given name, then typing it.
     * Also takes a position because the typer expects trees to have positions.
+    *
     * @param tpnm
     * @param pos
     * @param ctx
@@ -716,10 +717,21 @@ object DotMod {
       // simulate access through an environment-reference field.
       //
       if (currCtx.tree.isGetterLike) {
-        val envRefType = namedTypeFromTree(envRefTypeName(currCtx.tree.name), pos)
-        //println(s"---   adapting with $envRefType")
+        //
+        // Create a type with the given name in the context where the name is created.
+        // Using the context where the name was created prevents problems with name collisions,
+        //  which would happen if two nested getter methods have the same name.
+        //
+        val envRefType = namedTypeFromTree(envRefTypeName(currCtx.tree.name), pos)(currCtx)
+        //
+        // Do a union of all getter-method environment-reference types.
+        // Since we know that every environment reference type already has a lower
+        //  bound of MutableAny, we can skip the usual intersection with ReadonlyNothing
+        //  (as happens in general viewpoint adaptation).
+        //
         typ =
-          if ((typ eq defn.MutableAnyType) || (typ eq envRefType)) envRefType
+          if (typ eq defn.MutableAnyType) envRefType
+          else if (envRefType <:< typ) typ   // skip adding to the union if already in the union
           else OrType(typ, envRefType)
       }
       //
@@ -1625,7 +1637,9 @@ object DotMod {
         else {
           val tree1 = tree.withType(tpe1)
           if ((ctx.mode is Mode.Pattern) || tpe1 <:< pt) tree1
-          else err.typeMismatch(tree1, pt)
+          else {
+            err.typeMismatch(tree1, pt)
+          }
         }
 
       tree1

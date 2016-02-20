@@ -39,7 +39,7 @@ class tests extends CompilerTest {
 
   val testsDir      = "./dotmodtests/"
 
-  @Test def assignability1() = compileFile(testsDir, "Assignability1", xerrors = 8)  // 11 errors when environment ref adaption is completed
+  @Test def assignability1() = compileFile(testsDir, "Assignability1", xerrors = 20)
   @Test def mutability1() = compileFile(testsDir, "Mutability1", xerrors = 18)
   @Test def object1() = compileFile(testsDir, "Object1", xerrors = 0)
   @Test def subtyping1() = compileFile(testsDir, "Subtyping1", xerrors = 1)
