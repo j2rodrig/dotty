@@ -512,8 +512,8 @@ object Types {
         go(l) & (go(r), pre, safeIntersection = ctx.pendingMemberSearches.contains(name))
       }
       def goOr(l: Type, r: Type) = {
-        if (l.typeSymbol eq ctx.base.definitions.ReadonlyNothingClass) go(r)
-        else if (r.typeSymbol eq ctx.base.definitions.ReadonlyNothingClass) go(l)
+        if (l.typeSymbol eq defn.ReadonlyNothingClass) go(r)
+        else if (r.typeSymbol eq defn.ReadonlyNothingClass) go(l)
         else go(l) | (go(r), pre)
       }
 

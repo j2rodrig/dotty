@@ -602,6 +602,24 @@ object DotMod {
   }
 
   /**
+    * Returns the type corresponding to the given type name.
+    * Does this by creating a new tree with the given name, then typing it.
+    * Also takes a position because the typer expects trees to have positions.
+    * @param tpnm
+    * @param pos
+    * @param ctx
+    * @return
+    */
+  def namedTypeFromTree(tpnm: Name, pos: Position)(implicit ctx: Context): Type = {
+    val tpTree = ctx.typer.typed(
+      untpd.TypeTree(
+        untpd.Ident(tpnm).withPos(pos)
+      ).withPos(pos)
+    )
+    tpTree.tpe
+  }
+
+  /**
     * Finds the name of the environment-reference type of the innermost enclosing
     * getter method or class.
     *
@@ -615,10 +633,6 @@ object DotMod {
     else findNearestEnclosingPolyreadType(ctx.outer)
   }
 
-  /**
-   * Convert T @readonly to T | ReadonlyNothing
-   * Convert T @mutable to T & MutableAny
-   */
   /**
     * Converts annotated types to "real" types.
     *
@@ -641,12 +655,8 @@ object DotMod {
       findNearestEnclosingPolyreadType(ctx) match {
         case Some(tpnm) =>
           val readonlyTp = OrType(stripAnnots(tp), defn.ReadonlyNothingType)
-          val envRefTpTree = ctx.typer.typed(
-            untpd.TypeTree(
-              untpd.Ident(tpnm).withPos(tp.annot.tree.pos)
-            ).withPos(tp.annot.tree.pos)
-          )
-          AndType(readonlyTp, envRefTpTree.tpe)
+          val envRefTp = namedTypeFromTree(tpnm, tp.annot.tree.pos)
+          AndType(readonlyTp, envRefTp)
         case None =>
           errorType("Cannot find enclosing getter", tp.annot.tree.pos)
       }
@@ -658,6 +668,66 @@ object DotMod {
     else if (isMutabilityAnnot(sym))
       errorType(s"Internal compiler error: Unhandled mutability annotation @${sym.name}", tp.annot.tree.pos)
     else tp
+  }
+
+  /**
+    * Finds the innermost context that is a common owner of the given symbol
+    * and the current context. Note that we return a context rather than a
+    * symbol because the context owner may not have been completed yet.
+    *
+    * @param sym
+    * @param ctx
+    * @return
+    */
+  def findCommonOwnerContext(sym: Symbol)(implicit ctx: Context): Context = {
+
+    assert(sym.exists)
+
+    def findContextIfSymIsOwner(myCtx: Context): Context = {
+      if (sym eq myCtx.owner) myCtx
+      else if (myCtx.owner eq NoSymbol) NoContext
+      else findContextIfSymIsOwner(myCtx.outer)
+    }
+
+    val ownerCtx = findContextIfSymIsOwner(ctx)
+    if (ownerCtx ne NoContext) ownerCtx
+    else findCommonOwnerContext(sym.owner)
+  }
+
+  /**
+    * Computes the mutability of the accessor path from the current location
+    * to the environment containing the given symbol.
+    *
+    * @param sym
+    * @param ctx
+    * @return
+    */
+  def accessorChainToSymbol(sym: Symbol, pos: Position)(implicit ctx: Context): Type = {
+
+    //println(s"---accessor chain to $sym")
+
+    var typ: Type = defn.MutableAnyType
+    val ownerCtx = findCommonOwnerContext(sym)
+    //println(s"---  found common owner ${ownerCtx.owner}")
+    var currCtx = ctx
+    while (currCtx ne ownerCtx) {
+      //
+      // If the common owner is getter-like, then do a viewpoint adaptation to
+      // simulate access through an environment-reference field.
+      //
+      if (currCtx.tree.isGetterLike) {
+        val envRefType = namedTypeFromTree(envRefTypeName(currCtx.tree.name), pos)
+        //println(s"---   adapting with $envRefType")
+        typ =
+          if ((typ eq defn.MutableAnyType) || (typ eq envRefType)) envRefType
+          else OrType(typ, envRefType)
+      }
+      //
+      // todo deal with @readonly methods
+      //
+      currCtx = currCtx.outer
+    }
+    typ
   }
 
   /*def viewpointAdaptTermRef(tp: TermRef)(implicit ctx: Context): Type = {
@@ -894,7 +964,11 @@ object DotMod {
       assert(prefix.exists)
       assert(prefix ne NoPrefix)
       assert(!tp.dealias.stripAnnots.isInstanceOf[MethodicType])
-      if (prefix <:< defn.MutableAnyType || defn.ReadonlyNothingType <:< tp) tp  // adaptation does not change tp here
+      // todo An idea for pressure-testing: Disable the following line so all field selection types get wrapped in And/OrTypes...
+      if (prefix <:< defn.MutableAnyType || defn.ReadonlyNothingType <:< tp) {
+        //if ((prefix ne defn.MutableAnyType) || !(defn.ReadonlyNothingType <:< tp)) println(s"!!! no-effect viewpoint adaption on $prefix |> $tp")
+        tp  // adaptation does not change tp here
+      }
       else {
         OrType(AndType(prefix, defn.ReadonlyNothingType), tp)
 
@@ -1016,11 +1090,23 @@ object DotMod {
       //
 
 
-      // todo Approach 3
+      // todo Approach 4:
       //
+      /*tp2.dealias.stripAnnots match {
+        case tp2d: TypeRef => if (tp2d.symbol eq defn.MutableAnyClass) tp1.widenDealias.stripAnnots match {
+            case tp1d: TypeRef =>
+              val sym1 = tp1d.symbol
+              return !(sym1 is Param) && !((sym1 eq defn.AnyClass) || (sym1 eq defn.ReadonlyNothingClass))
+            case _ =>
+          }
+        case _ =>
+      }*/
+
+      // todo Approach 3:
+      // This seems to work.
+      // However, is it really necessary to do this now that we've modified baseTypeRefOf?
       //
-      //
-      tp2.dealias.stripAnnots match {
+      /*tp2.dealias.stripAnnots match {
         case tp2d: TypeRef => if (tp2d.symbol eq defn.MutableAnyClass) tp1.widenDealias.stripAnnots match {
             case tp1d: TypeRef =>
               val sym1 = tp1d.symbol
@@ -1028,7 +1114,7 @@ object DotMod {
             case _ =>
           }
         case _ =>
-      }
+      }*/
 
       // todo Approach 2: is widening really what we want to do with tp2? Widening here may be unnecessarily expensive, since it is done on every call to isSubType.
       //tp2.widenDealias.stripAnnots match {
@@ -1091,7 +1177,7 @@ object DotMod {
       super.isSubType(tp1, tp2)
     }
 
-    override def glb(tp1: Type, tp2: Type): Type = {
+    /*override def glb(tp1: Type, tp2: Type): Type = {
       if (tp1 eq tp2) tp1
       else if (!tp1.exists) tp2
       else if (!tp2.exists) tp1
@@ -1104,7 +1190,7 @@ object DotMod {
       else if (!tp2.exists) tp2
       //else if ((tp1 isRef defn.MutableAnyClass) && (tp2 isRef defn.ReadonlyNothingClass))
       else super.lub(tp1, tp2)
-    }
+    }*/
 
     /** The greatest lower bound of two types */
     /*override def glb(tp1: Type, tp2: Type): Type = {
@@ -1117,10 +1203,12 @@ object DotMod {
     override def copyIn(ctx: Context): TypeComparer = new DotModTypeComparer(ctx)
   }
 
-  def isAssignable(tp: TermRef)(implicit ctx: Context): Boolean = {
+  def isAssignable(tp: TermRef, pos: Position)(implicit ctx: Context): Boolean = {
     //println(s"---checking mutability of ${tp.prefix} , == ${tp.prefix <:< defn.MutableAnyType}")
-    (tp.prefix eq NoPrefix) || (tp.prefix <:< defn.MutableAnyType)
-    // todo see if prefix reaches into outer environment
+    val prefix =
+      if (tp.prefix eq NoPrefix) accessorChainToSymbol(tp.symbol, pos)
+      else tp.prefix
+    prefix <:< defn.MutableAnyType
   }
 
   class DotModTyper extends Typer {
@@ -1360,16 +1448,21 @@ object DotMod {
           // unnecessary because the local frame reference is assumed mutable.
           //
           if (tpe.symbol.is(Method)) {
-            // todo check formal vs actual receiver mutability
             tpe
-          } else if (tpe.prefix ne NoPrefix) {  // todo is it ok to assume prefix mutability is already taken care of?
+          } else if (tpe.prefix eq NoPrefix) {
+            val prefix = accessorChainToSymbol(tpe.symbol, tree.pos) // find the mutability of the outer accessor chain to this symbol's environment
+            if (prefix <:< defn.MutableAnyType && (prefix ne defn.MutableAnyType)) assert(false, s"!!! bad test of $prefix")
+            val tpe0 = tpe.viewpointAdaptField(prefix)
+            tpe0
+          } else {
+            // todo is it ok to assume prefix mutability is already taken care of by the time we get here?
             //println("---adapting " + tpe)
             val tpe0 = tpe.viewpointAdaptField(tpe.prefix)
+            //println(s"s---adapt ${tpe.symbol} in ${ctx.owner} to $tpe0")
             //println("---to " + tpe0)
             //println()
             tpe0
           }
-          else tpe  // no viewpoint adaptation needed
 
         case tpe: ThisType => viewpointAdaptThisType(tpe)
         case tpe: SuperType => viewpointAdaptSuperType(tpe)
@@ -1502,7 +1595,7 @@ object DotMod {
       tree match {
         case tree: Assign =>
           val termRef = tree.lhs.tpe.underlyingTermRef.asInstanceOf[TermRef]
-          if (!isAssignable(termRef))
+          if (!isAssignable(termRef, tree.pos))
             return errorTree(tree, s"${termRef.symbol.name} is not assignable here")
         case _ =>
       }

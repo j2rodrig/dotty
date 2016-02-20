@@ -30,11 +30,13 @@ trait Assignability1 {
     var y: T = this
     var y1: TR = this
 
-    // @getter def y[V >: MutableAny <: Any]: (T|ReadonlyNothing)&V
+    y.x = y  // OK
 
-    @getter def e2 /* [V2 >: MutableAny <: Any](z1: (E1|ReadonlyNothing)&V2) */ = {  // z2:E2 =>
+    @polyread def e2 /* [V2 >: MutableAny <: Any](z1: (E1|ReadonlyNothing)&V2) */ = {  // z2:E2 =>
 
-      // z1.y[V2] = z1.y[V2]
+      val z: T = y   // ERROR
+      val z1: T @polyread = y  // OK
+
       y = y   // ERROR: assignability
       y.x = y   // ERROR: assignability
       y.x = y1   // ERROR: assignability and mutability
