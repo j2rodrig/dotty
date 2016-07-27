@@ -109,7 +109,7 @@ class Compiler {
     rootScope.enter(ctx.definitions.RootPackage)(bootstrap)
     val start = bootstrap.fresh
       .setOwner(defn.RootClass)
-      .setTyper(new Typer)
+      .setTyper(new DotMod.DotModTyper)
       .setMode(Mode.ImplicitsEnabled)
       .setTyperState(new MutableTyperState(ctx.typerState, ctx.typerState.reporter, isCommittable = true))
     ctx.definitions.init(start) // set context of definitions to start

@@ -46,6 +46,7 @@ class tests extends CompilerTest {
   val negDir        = testsDir + "neg/"
   val runDir        = testsDir + "run/"
   val newDir        = testsDir + "new/"
+  val dotmodDir     = testsDir + "dotmod/"
 
   val sourceDir = "./src/"
   val dottyDir  = sourceDir + "dotty/"
@@ -53,6 +54,9 @@ class tests extends CompilerTest {
   val dotcDir   = toolsDir + "dotc/"
   val coreDir   = dotcDir + "core/"
   val typerDir  = dotcDir + "typer/"
+
+  @Test def dotmod_empty = compileFile(dotmodDir, "empty", twice)
+  @Test def dotmod_viewpoint1 = compileFile(dotmodDir, "viewpoint1", twice)
 
   @Test def pickle_pickleOK = compileDir(testsDir, "pickling", testPickling)
 // This directory doesn't exist anymore

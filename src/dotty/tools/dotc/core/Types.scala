@@ -83,6 +83,8 @@ object Types {
       nextId
     }
 
+    private var shadowBases: Map[Name, Type] = null
+
     /** Is this type different from NoType? */
     def exists: Boolean = true
 
@@ -102,7 +104,8 @@ object Types {
 
     /** Is this type a (possibly refined or applied or aliased) type reference
      *  to the given type symbol?
-     *  @sym  The symbol to compare to. It must be a class symbol or abstract type.
+      *
+      *  @sym  The symbol to compare to. It must be a class symbol or abstract type.
      *        It makes no sense for it to be an alias type because isRef would always
      *        return false in that case.
      */
@@ -417,6 +420,43 @@ object Types {
     final def memberExcluding(name: Name, excluding: FlagSet)(implicit ctx: Context): Denotation =
       findMember(name, widenIfUnstable, excluding)
 
+    final def findShadowMember(name: Name, pre: Type)(implicit ctx: Context): Type = {
+      // This method is currently ugly, but it will do the trick until I find out what the larger need is.
+      if ((shadowMembers ne null) && shadowMembers.contains(name)) {
+        var info = shadowMembers(name)
+        // Do substitution in case the returned info contains This.
+        if (! (ctx.erasedTypes || (pre eq NoPrefix)) )
+          this match {
+            case tp: ClassInfo => info = info.asSeenFrom(pre, tp.cls)
+            case tp: RefinedType => info = info.substRefinedThis(tp, pre)
+            case _ =>
+          }
+        info
+      } else this match {
+        //case tp: AndOrType =>
+        //  val info1 = findShadowMember(name, tp.tp1)
+        //  if (info1 ne NoType) info1 else findShadowMember(name, tp.tp2)
+        //case tp: TypeBounds => findShadowMember(name, tp.boundsInterval.hi)
+        //case tp: TypeProxy => findShadowMember(name, tp.underlying)
+        case _ => NoType
+      }
+    }
+
+    final def setShadowMember(name: Name, info: Type): Unit = {
+      if (shadowMembers eq null)
+        shadowMembers = Map((name, info))
+      else
+        shadowMembers += ((name, info))
+    }
+
+    final def copyShadowMembers(from: Type): this.type = {
+      if (shadowMembers eq null)
+        shadowMembers = from.shadowMembers
+      else
+        from.shadowMembers.foreach(e => shadowMembers += e)
+      this
+    }
+
     /** Find member of this type with given name and
      *  produce a denotation that contains the type of the member
      *  as seen from given prefix `pre`. Exclude all members that have
@@ -536,7 +576,8 @@ object Types {
     /** The set of names of members of this type that pass the given name filter
      *  when seen as members of `pre`. More precisely, these are all
      *  of members `name` such that `keepOnly(pre, name)` is `true`.
-     *  @note: OK to use a Set[Name] here because Name hashcodes are replayable,
+      *
+      *  @note: OK to use a Set[Name] here because Name hashcodes are replayable,
      *         hence the Set will always give the same names in the same order.
      */
     final def memberNames(keepOnly: NameFilter, pre: Type = this)(implicit ctx: Context): Set[Name] = this match {
@@ -845,7 +886,8 @@ object Types {
 
     /** If this is a (possibly aliased, annotated, and/or parameterized) reference to
      *  a class, the class type ref, otherwise NoType.
-     *  @param  refinementOK   If `true` we also skip non-parameter refinements.
+      *
+      *  @param  refinementOK   If `true` we also skip non-parameter refinements.
      */
     def underlyingClassRef(refinementOK: Boolean)(implicit ctx: Context): Type = dealias match {
       case tp: TypeRef =>
@@ -1155,7 +1197,8 @@ object Types {
 // ----- misc -----------------------------------------------------------
 
     /** Turn type into a function type.
-     *  @pre this is a non-dependent method type.
+      *
+      *  @pre this is a non-dependent method type.
      *  @param drop  The number of trailing parameters that should be dropped
      *               when forming the function type.
      */
@@ -1929,7 +1972,8 @@ object Types {
   // --- Other SingletonTypes: ThisType/SuperType/ConstantType ---------------------------
 
   /** The type cls.this
-   *  @param tref    A type ref which indicates the class `cls`.
+    *
+    *  @param tref    A type ref which indicates the class `cls`.
    *  Note: we do not pass a class symbol directly, because symbols
    *  do not survive runs whereas typerefs do.
    */
@@ -1956,7 +2000,7 @@ object Types {
     override def underlying(implicit ctx: Context) = supertpe
     def derivedSuperType(thistpe: Type, supertpe: Type)(implicit ctx: Context) =
       if ((thistpe eq this.thistpe) && (supertpe eq this.supertpe)) this
-      else SuperType(thistpe, supertpe)
+      else SuperType(thistpe, supertpe).copyShadowMembers(this)
     override def computeHash = doHash(thistpe, supertpe)
   }
 
@@ -2008,7 +2052,8 @@ object Types {
   // --- Refined Type ---------------------------------------------------------
 
   /** A refined type parent { refinement }
-   *  @param refinedName  The name of the refinement declaration
+    *
+    *  @param refinedName  The name of the refinement declaration
    *  @param infoFn: A function that produces the info of the refinement declaration,
    *                 given the refined type itself.
    */
@@ -2044,7 +2089,7 @@ object Types {
 
     def derivedRefinedType(parent: Type, refinedName: Name, refinedInfo: Type)(implicit ctx: Context): RefinedType =
       if ((parent eq this.parent) && (refinedName eq this.refinedName) && (refinedInfo eq this.refinedInfo)) this
-      else RefinedType(parent, refinedName, rt => refinedInfo.substRefinedThis(this, RefinedThis(rt)))
+      else RefinedType(parent, refinedName, rt => refinedInfo.substRefinedThis(this, RefinedThis(rt))).copyShadowMembers(this)
 
     /** Add this refinement to `parent`, provided If `refinedName` is a member of `parent`. */
     def wrapIfMember(parent: Type)(implicit ctx: Context): Type =
@@ -2104,11 +2149,11 @@ object Types {
 
     def derivedAndType(tp1: Type, tp2: Type)(implicit ctx: Context): Type =
       if ((tp1 eq this.tp1) && (tp2 eq this.tp2)) this
-      else AndType.make(tp1, tp2)
+      else AndType.make(tp1, tp2).copyShadowMembers(this)
 
     def derived_& (tp1: Type, tp2: Type)(implicit ctx: Context): Type =
       if ((tp1 eq this.tp1) && (tp2 eq this.tp2)) this
-      else tp1 & tp2
+      else (tp1 & tp2).copyShadowMembers(this)
 
     def derivedAndOrType(tp1: Type, tp2: Type)(implicit ctx: Context): Type =
       derivedAndType(tp1, tp2)
@@ -2137,7 +2182,7 @@ object Types {
 
     def derivedOrType(tp1: Type, tp2: Type)(implicit ctx: Context): Type =
       if ((tp1 eq this.tp1) && (tp2 eq this.tp2)) this
-      else OrType.make(tp1, tp2)
+      else OrType.make(tp1, tp2).copyShadowMembers(this)
 
     def derivedAndOrType(tp1: Type, tp2: Type)(implicit ctx: Context): Type =
       derivedOrType(tp1, tp2)
@@ -2269,9 +2314,9 @@ object Types {
       if ((paramNames eq this.paramNames) && (paramTypes eq this.paramTypes) && (resType eq this.resType)) this
       else {
         val resTypeFn = (x: MethodType) => resType.subst(this, x)
-        if (isJava) JavaMethodType(paramNames, paramTypes)(resTypeFn)
-        else if (isImplicit) ImplicitMethodType(paramNames, paramTypes)(resTypeFn)
-        else MethodType(paramNames, paramTypes)(resTypeFn)
+        if (isJava) JavaMethodType(paramNames, paramTypes)(resTypeFn).copyShadowMembers(this)
+        else if (isImplicit) ImplicitMethodType(paramNames, paramTypes)(resTypeFn).copyShadowMembers(this)
+        else MethodType(paramNames, paramTypes)(resTypeFn).copyShadowMembers(this)
       }
 
     def instantiate(argTypes: => List[Type])(implicit ctx: Context): Type =
@@ -2369,7 +2414,7 @@ object Types {
     override def underlying(implicit ctx: Context): Type = resType
     protected def computeSignature(implicit ctx: Context): Signature = resultSignature
     def derivedExprType(resType: Type)(implicit ctx: Context) =
-      if (resType eq this.resType) this else ExprType(resType)
+      if (resType eq this.resType) this else ExprType(resType).copyShadowMembers(this)
     override def computeHash = doHash(resType)
   }
 
@@ -2412,7 +2457,7 @@ object Types {
     def duplicate(paramNames: List[TypeName] = this.paramNames, paramBounds: List[TypeBounds] = this.paramBounds, resType: Type)(implicit ctx: Context) =
       PolyType(paramNames)(
           x => paramBounds mapConserve (_.subst(this, x).bounds),
-          x => resType.subst(this, x))
+          x => resType.subst(this, x)).copyShadowMembers(this)
 
     // need to override hashCode and equals to be object identity
     // because paramNames by itself is not discriminatory enough
@@ -2543,7 +2588,7 @@ object Types {
   abstract case class SkolemType(info: Type) extends UncachedProxyType with ValueType with SingletonType {
     override def underlying(implicit ctx: Context) = info
     def derivedSkolemType(info: Type)(implicit ctx: Context) =
-      if (info eq this.info) this else SkolemType(info)
+      if (info eq this.info) this else SkolemType(info).copyShadowMembers(this)
     override def hashCode: Int = identityHash
     override def equals(that: Any) = this eq that.asInstanceOf[AnyRef]
     override def toString = s"Skolem($info)"
@@ -2695,7 +2740,8 @@ object Types {
   // ------ ClassInfo, Type Bounds ------------------------------------------------------------
 
   /** Roughly: the info of a class during a period.
-   *  @param prefix       The prefix on which parents, decls, and selfType need to be rebased.
+    *
+    *  @param prefix       The prefix on which parents, decls, and selfType need to be rebased.
    *  @param cls          The class symbol.
    *  @param classParents The parent types of this class.
    *                      These are all normalized to be TypeRefs by moving any refinements
@@ -2792,11 +2838,11 @@ object Types {
 
     def derivedClassInfo(prefix: Type)(implicit ctx: Context) =
       if (prefix eq this.prefix) this
-      else ClassInfo(prefix, cls, classParents, decls, selfInfo)
+      else ClassInfo(prefix, cls, classParents, decls, selfInfo).copyShadowMembers(this)
 
     def derivedClassInfo(prefix: Type = this.prefix, classParents: List[TypeRef] = classParents, decls: Scope = this.decls, selfInfo: DotClass = this.selfInfo)(implicit ctx: Context) =
       if ((prefix eq this.prefix) && (classParents eq this.classParents) && (decls eq this.decls) && (selfInfo eq this.selfInfo)) this
-      else ClassInfo(prefix, cls, classParents, decls, selfInfo)
+      else ClassInfo(prefix, cls, classParents, decls, selfInfo).copyShadowMembers(this)
 
     override def computeHash = doHash(cls, prefix)
 
@@ -2824,7 +2870,7 @@ object Types {
     /** The non-alias type bounds type with given bounds */
     def derivedTypeBounds(lo: Type, hi: Type)(implicit ctx: Context) =
       if ((lo eq this.lo) && (hi eq this.hi) && (variance == 0)) this
-      else TypeBounds(lo, hi)
+      else TypeBounds(lo, hi).copyShadowMembers(this)
 
     /** If this is an alias, a derived alias with the new variance,
      *  Otherwise the type itself.
@@ -2890,7 +2936,7 @@ object Types {
     /** pre: this is a type alias */
     def derivedTypeAlias(alias: Type, variance: Int = this.variance)(implicit ctx: Context) =
       if ((alias eq this.alias) && (variance == this.variance)) this
-      else TypeAlias(alias, variance)
+      else TypeAlias(alias, variance).copyShadowMembers(this)
 
     override def & (that: TypeBounds)(implicit ctx: Context): TypeBounds = {
       val v = this commonVariance that
@@ -2940,7 +2986,7 @@ object Types {
     override def underlying(implicit ctx: Context): Type = tpe
     def derivedAnnotatedType(tpe: Type, annot: Annotation) =
       if ((tpe eq this.tpe) && (annot eq this.annot)) this
-      else AnnotatedType(tpe, annot)
+      else AnnotatedType(tpe, annot).copyShadowMembers(this)
 
     override def stripTypeVar(implicit ctx: Context): Type =
       derivedAnnotatedType(tpe.stripTypeVar, annot)
@@ -2958,7 +3004,7 @@ object Types {
   abstract case class JavaArrayType(elemType: Type) extends CachedGroundType with ValueType {
     override def computeHash = doHash(elemType)
     def derivedJavaArrayType(elemtp: Type)(implicit ctx: Context) =
-      if (elemtp eq this.elemType) this else JavaArrayType(elemtp)
+      if (elemtp eq this.elemType) this else JavaArrayType(elemtp).copyShadowMembers(this)
   }
   final class CachedJavaArrayType(elemType: Type) extends JavaArrayType(elemType)
   object JavaArrayType {
@@ -2986,7 +3032,7 @@ object Types {
   /** Wildcard type, possibly with bounds */
   abstract case class WildcardType(optBounds: Type) extends CachedGroundType with TermType {
     def derivedWildcardType(optBounds: Type)(implicit ctx: Context) =
-      if (optBounds eq this.optBounds) this else WildcardType(optBounds.asInstanceOf[TypeBounds])
+      if (optBounds eq this.optBounds) this else WildcardType(optBounds.asInstanceOf[TypeBounds]).copyShadowMembers(this)
     override def computeHash = doHash(optBounds)
   }
 
