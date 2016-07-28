@@ -39,6 +39,8 @@ object Types {
 
   @sharable private var nextId = 0
 
+  case class ShadowInfo(base: RefinedType, defaultCompareBase: RefinedType, visibleInMemberNames: Boolean)
+
   /** The class of types.
    *  The principal subclasses and sub-objects are as follows:
    *
@@ -83,7 +85,28 @@ object Types {
       nextId
     }
 
-    private var shadowBases: Map[Name, Type] = null
+    /*
+      Shadow bases are types that are (sometimes) understood as bases of the current type,
+      but for whatever reason, we don't want to literally make them base types.
+      The intention behind shadow bases is to store auxiliary compile-time information about types
+      inside the Type object itself.
+      Possible reasons for using shadow bases instead of regular bases may include:
+       - storing information on a type without resorting to using AndTypes or RefinedTypes,
+         since these are not always expected by many parts of the compiler;
+       - creating bases and members that are not visible to certain parts of the compiler;
+       - exerting greater control over how shadow bases and members are propagated and used.
+
+      The members of shadow bases are visible to findMember. findMember understands shadow
+        members as overriding underlying shadow members. If one or more shadow bases
+        contains members with the given name, then findMember returns immediately without
+        further examination of the type.
+
+      Shadow bases are interpreted by the type comparer as intersection types.
+
+      Shadow bases are copied wherever derived types are formed.
+     */
+    private var shadowBases: List[ShadowInfo] = Nil
+    def getShadowBases = shadowBases
 
     /** Is this type different from NoType? */
     def exists: Boolean = true
@@ -420,40 +443,20 @@ object Types {
     final def memberExcluding(name: Name, excluding: FlagSet)(implicit ctx: Context): Denotation =
       findMember(name, widenIfUnstable, excluding)
 
-    final def findShadowMember(name: Name, pre: Type)(implicit ctx: Context): Type = {
-      // This method is currently ugly, but it will do the trick until I find out what the larger need is.
-      if ((shadowMembers ne null) && shadowMembers.contains(name)) {
-        var info = shadowMembers(name)
-        // Do substitution in case the returned info contains This.
-        if (! (ctx.erasedTypes || (pre eq NoPrefix)) )
-          this match {
-            case tp: ClassInfo => info = info.asSeenFrom(pre, tp.cls)
-            case tp: RefinedType => info = info.substRefinedThis(tp, pre)
-            case _ =>
-          }
-        info
-      } else this match {
-        //case tp: AndOrType =>
-        //  val info1 = findShadowMember(name, tp.tp1)
-        //  if (info1 ne NoType) info1 else findShadowMember(name, tp.tp2)
-        //case tp: TypeBounds => findShadowMember(name, tp.boundsInterval.hi)
-        //case tp: TypeProxy => findShadowMember(name, tp.underlying)
-        case _ => NoType
-      }
+    final def addShadowMember(name: Name, infoFn: => Type, defaultCompareInfo: Type, visibleInMemberNames: Boolean = false)(implicit ctx: Context): Unit = {
+      val newBase = RefinedType(defn.ObjectType, name, _ => infoFn)
+      val defaultCompareBase = RefinedType(defn.ObjectType, name, defaultCompareInfo)
+      shadowBases ::= ShadowInfo(newBase, defaultCompareBase, visibleInMemberNames)
     }
 
-    final def setShadowMember(name: Name, info: Type): Unit = {
-      if (shadowMembers eq null)
-        shadowMembers = Map((name, info))
-      else
-        shadowMembers += ((name, info))
+    /** Ensures a uniquely-named shadow member by first removing all shadow bases with same-named members. */
+    final def addUniqueShadowMember(name: Name, infoFn: => Type, defaultCompareInfo: Type, visibleInMemberNames: Boolean = false)(implicit ctx: Context): Unit = {
+      shadowBases = shadowBases.filter(info => !info.base.findMember(name, NoPrefix, EmptyFlags).exists)
+      addShadowMember(name, infoFn, defaultCompareInfo, visibleInMemberNames)
     }
 
     final def copyShadowMembers(from: Type): this.type = {
-      if (shadowMembers eq null)
-        shadowMembers = from.shadowMembers
-      else
-        from.shadowMembers.foreach(e => shadowMembers += e)
+      shadowBases :::= from.shadowBases
       this
     }
 
@@ -463,35 +466,47 @@ object Types {
      *  flags in `excluded` from consideration.
      */
     final def findMember(name: Name, pre: Type, excluded: FlagSet)(implicit ctx: Context): Denotation = {
-      @tailrec def go(tp: Type): Denotation = tp match {
-        case tp: RefinedType =>
-          if (name eq tp.refinedName) goRefined(tp) else go(tp.parent)
-        case tp: ThisType =>
-          goThis(tp)
-        case tp: TypeRef =>
-          tp.denot.findMember(name, pre, excluded)
-        case tp: TermRef =>
-          go (tp.underlying match {
-            case mt: MethodType
-            if mt.paramTypes.isEmpty && (tp.symbol is Stable) => mt.resultType
-            case tp1 => tp1
-          })
-        case tp: PolyParam =>
-          goParam(tp)
-        case tp: TypeProxy =>
-          go(tp.underlying)
-        case tp: ClassInfo =>
-          tp.cls.findMember(name, pre, excluded)
-        case AndType(l, r) =>
-          goAnd(l, r)
-        case OrType(l, r) =>
-          goOr(l, r)
-        case tp: JavaArrayType =>
-          defn.ObjectType.findMember(name, pre, excluded)
-        case ErrorType =>
-          ctx.newErrorSymbol(pre.classSymbol orElse defn.RootClass, name)
-        case _ =>
-          NoDenotation
+      @tailrec def go(tp: Type): Denotation = {
+        // Check for the named member inside shadow bases. Excludes members of Object, since Object is the default shadow base parent type.
+        // Since most types won't have shadow bases, there shouldn't be much impact on performance.
+        if (tp.shadowBases.nonEmpty && !defn.ObjectType.member(name).exists) {
+          var result: Denotation = NoDenotation
+          tp.shadowBases.foreach { info =>
+            result = goDenotationAnd(result, info.base)
+          }
+          if (result.exists)
+            return result
+        }
+        tp match {
+          case tp: RefinedType =>
+            if (name eq tp.refinedName) goRefined(tp) else go(tp.parent)
+          case tp: ThisType =>
+            goThis(tp)
+          case tp: TypeRef =>
+            tp.denot.findMember(name, pre, excluded)
+          case tp: TermRef =>
+            go(tp.underlying match {
+              case mt: MethodType
+                if mt.paramTypes.isEmpty && (tp.symbol is Stable) => mt.resultType
+              case tp1 => tp1
+            })
+          case tp: PolyParam =>
+            goParam(tp)
+          case tp: TypeProxy =>
+            go(tp.underlying)
+          case tp: ClassInfo =>
+            tp.cls.findMember(name, pre, excluded)
+          case AndType(l, r) =>
+            goAnd(l, r)
+          case OrType(l, r) =>
+            goOr(l, r)
+          case tp: JavaArrayType =>
+            defn.ObjectType.findMember(name, pre, excluded)
+          case ErrorType =>
+            ctx.newErrorSymbol(pre.classSymbol orElse defn.RootClass, name)
+          case _ =>
+            NoDenotation
+        }
       }
       def goRefined(tp: RefinedType) = {
         val pdenot = go(tp.parent)
@@ -548,8 +563,9 @@ object Types {
             go(next)
         }
       }
-      def goAnd(l: Type, r: Type) = {
-        go(l) & (go(r), pre, safeIntersection = ctx.pendingMemberSearches.contains(name))
+      def goAnd(l: Type, r: Type) = goDenotationAnd(go(l), r)
+      def goDenotationAnd(l: Denotation, r: Type) = {
+        l & (go(r), pre, safeIntersection = ctx.pendingMemberSearches.contains(name))
       }
       def goOr(l: Type, r: Type) = go(l) | (go(r), pre)
 
@@ -580,20 +596,26 @@ object Types {
       *  @note: OK to use a Set[Name] here because Name hashcodes are replayable,
      *         hence the Set will always give the same names in the same order.
      */
-    final def memberNames(keepOnly: NameFilter, pre: Type = this)(implicit ctx: Context): Set[Name] = this match {
-      case tp: ClassInfo =>
-        tp.cls.memberNames(keepOnly) filter (keepOnly(pre, _))
-      case tp: RefinedType =>
-        val ns = tp.parent.memberNames(keepOnly, pre)
-        if (keepOnly(pre, tp.refinedName)) ns + tp.refinedName else ns
-      case tp: TypeProxy =>
-        tp.underlying.memberNames(keepOnly, pre)
-      case tp: AndType =>
-        tp.tp1.memberNames(keepOnly, pre) | tp.tp2.memberNames(keepOnly, pre)
-      case tp: OrType =>
-        tp.tp1.memberNames(keepOnly, pre) & tp.tp2.memberNames(keepOnly, pre)
-      case _ =>
-        Set()
+    final def memberNames(keepOnly: NameFilter, pre: Type = this)(implicit ctx: Context): Set[Name] = {
+      var names: Set[Name] = this match {
+        case tp: ClassInfo =>
+          tp.cls.memberNames(keepOnly) filter (keepOnly(pre, _))
+        case tp: RefinedType =>
+          val ns = tp.parent.memberNames(keepOnly, pre)
+          if (keepOnly(pre, tp.refinedName)) ns + tp.refinedName else ns
+        case tp: TypeProxy =>
+          tp.underlying.memberNames(keepOnly, pre)
+        case tp: AndType =>
+          tp.tp1.memberNames(keepOnly, pre) | tp.tp2.memberNames(keepOnly, pre)
+        case tp: OrType =>
+          tp.tp1.memberNames(keepOnly, pre) & tp.tp2.memberNames(keepOnly, pre)
+        case _ =>
+          Set()
+      }
+      if (shadowBases.nonEmpty) {
+        shadowBases.foreach(info => if (info.visibleInMemberNames) names ++= info.base.memberNames(keepOnly, pre))
+      }
+      names
     }
 
     def memberDenots(keepOnly: NameFilter, f: (Name, mutable.Buffer[SingleDenotation]) => Unit)(implicit ctx: Context): Seq[SingleDenotation] = {

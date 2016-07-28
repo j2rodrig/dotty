@@ -89,6 +89,21 @@ class TypeComparer(initctx: Context) extends DotClass with ConstraintHandling {
         assert(isSatisfiable, constraint.show)
   }
 
+  protected def shadowMembersCompatible(tp1: Type, tp2: Type): Boolean =
+    // Check all shadow members of tp2. For now, we don't bother with the shadow bases' parents.
+    if (tp2.getShadowBases.nonEmpty)
+      tp2.getShadowBases.forall { shadow2 =>
+        val name2 = shadow2.base.refinedName
+        if (tp1.member(name2).exists)
+          isSubType(tp1, shadow2.base)  // if the member exists in tp1, match member normally
+        else if (shadow2.defaultCompareBase.refinedInfo eq defn.NothingType)
+          true  // shortcut for default type. For some reason, the below doesn't work...
+        else
+          isSubType(shadow2.defaultCompareBase, shadow2.base)    // if not, match with default base member
+      }
+    else
+      true
+
   protected def isSubType(tp1: Type, tp2: Type): Boolean = ctx.traceIndented(s"isSubType ${traceInfo(tp1, tp2)}", subtyping) /*<|<*/ {
     if (tp2 eq NoType) false
     else if (tp1 eq tp2) true
@@ -97,9 +112,9 @@ class TypeComparer(initctx: Context) extends DotClass with ConstraintHandling {
       val savedSuccessCount = successCount
       try {
         recCount = recCount + 1
-        val result =
-          if (recCount < Config.LogPendingSubTypesThreshold) firstTry(tp1, tp2)
-          else monitoredIsSubType(tp1, tp2)
+        val result = shadowMembersCompatible(tp1, tp2) &&
+          (if (recCount < Config.LogPendingSubTypesThreshold) firstTry(tp1, tp2)
+          else monitoredIsSubType(tp1, tp2))
         recCount = recCount - 1
         if (!result) constraint = saved
         else if (recCount == 0 && needsGc) {
@@ -703,7 +718,8 @@ class TypeComparer(initctx: Context) extends DotClass with ConstraintHandling {
    *   - they refine the same names,
    *   - the refinement in `tp1` is an alias type, and
    *   - neither refinement refers back to the refined type via a refined this.
-   *  @return  The parent type of `tp2` after skipping the matching refinements.
+    *
+    *  @return  The parent type of `tp2` after skipping the matching refinements.
    */
   private def skipMatching(tp1: Type, tp2: RefinedType): Type = tp1 match {
     case tp1 @ RefinedType(parent1, name1)
@@ -720,7 +736,8 @@ class TypeComparer(initctx: Context) extends DotClass with ConstraintHandling {
 
   /** Are refinements in `tp1` pairwise subtypes of the refinements of `tp2`
    *  up to parent type `limit`?
-   *  @pre `tp1` has the necessary number of refinements, they are type aliases,
+    *
+    *  @pre `tp1` has the necessary number of refinements, they are type aliases,
    *       and their names match the corresponding refinements in `tp2`.
    *       Further, no refinement refers back to the refined type via a refined this.
    *  The precondition is established by `skipMatching`.
@@ -919,7 +936,8 @@ class TypeComparer(initctx: Context) extends DotClass with ConstraintHandling {
     ((defn.AnyType: Type) /: tps)(glb)
 
   /** The least upper bound of two types
-   *  @note  We do not admit singleton types in or-types as lubs.
+    *
+    *  @note  We do not admit singleton types in or-types as lubs.
    */
   def lub(tp1: Type, tp2: Type): Type = /*>|>*/ ctx.traceIndented(s"lub(${tp1.show}, ${tp2.show})", subtyping, show = true) /*<|<*/ {
     if (tp1 eq tp2) tp1
@@ -1054,7 +1072,8 @@ class TypeComparer(initctx: Context) extends DotClass with ConstraintHandling {
   }
 
   /** Try to distribute `&` inside type, detect and handle conflicts
-   *  @pre !(tp1 <: tp2) && !(tp2 <:< tp1) -- these cases were handled before
+    *
+    *  @pre !(tp1 <: tp2) && !(tp2 <:< tp1) -- these cases were handled before
    */
   private def distributeAnd(tp1: Type, tp2: Type): Type = tp1 match {
     // opportunistically merge same-named refinements

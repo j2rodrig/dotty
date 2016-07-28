@@ -71,6 +71,7 @@ object DotMod {
     */
   class DotModTypeComparer(initCtx: Context) extends TypeComparer(initCtx) {
 
+    /*
     def subMutability(info1: Type, info2: Type): Boolean = {
       // if no shadow member exists, assume MutabilityMember is Nothing (mutable)
       if (info1 eq NoType) true
@@ -85,6 +86,7 @@ object DotMod {
         subMutability(info1, info2)
       }
     }
+    */
 
     override def copyIn(ctx: Context): TypeComparer = new DotModTypeComparer(ctx)
   }
@@ -101,6 +103,85 @@ object DotMod {
     // if the underlying type already contains that type member. Overrides are OK--I think I can
     // live with overrides.
 
+    /*
+      ATTEMPT 3 partial failure - Putting shadow member checking directly inside the type comparer
+       is causing the statement "val c: C @readonly = new C" to interpret the RHS type as Object.
+      This is probably due to the constraint solver being unable to find a type T where
+       C <: T <: C @readonly. (But this doesn't make sense to me--it should be able to select
+       either C or C @readonly and be OK.)
+
+      One possible course of action here is to see where the constraint solver checks subtypes
+       and try to figure out why it does this.
+
+      A second course of action is to create a secondary type comparer in the DotMod extension
+       and invoke it only when checking certain kinds of trees (e.g., assignment).
+
+      Let's try both.
+
+      New information: The statement above fails even if the custom addition to the type comparer
+      is disabled. Perhaps the AnnotatedType itself is causing a problem?
+      New information: Stripping the annotations doesn't change the result. Perhaps there is
+      something wrong with findMember? (which is the only other place where significant changes have been made?)
+      New information: Disabling the shadow-member early-exit in findMember makes the error disappear.
+      New information: The shadow-member early exit is taken if the requested member is from Object
+        (e.g., method <init>), since Object is the refinement parent of the shadow bases.
+        Now trying to filter these requests so we don't get members of Object.
+
+      SUCCESS: Filtering out members of Object in findMember's shadow-member logic seems to work.
+        Now making annotation stripping optional.
+    */
+
+    /**
+      * If tpe is an annotated type, finds the meaning of RI annotations.
+      * If there is a meaningful RI annotation, sets the first non-annotation underlying type's
+      * shadow member.
+      *
+      * Returns a version of the type that has shadow members, but is stripped of all RI annotations.
+      */
+    def toShadows(tpe: Type, shadowInfo: Type)(implicit ctx: Context): Type = tpe match {
+      case tpe: AnnotatedType =>
+        if (tpe.annot.symbol eq defn.ReadonlyAnnot)
+          toShadows(tpe.underlying, TypeBounds(defn.NothingType, defn.AnyType))
+        else
+          tpe.derivedAnnotatedType(toShadows(tpe.underlying, shadowInfo), tpe.annot)  // leave non-RI annotations in place
+      case _ =>
+        if (shadowInfo.exists)
+          tpe.addShadowMember(MutabilityMember, shadowInfo, defn.NothingType, visibleInMemberNames = false)
+        tpe
+    }
+
+    def adaptType(tpe: Type)(implicit ctx: Context): Type = tpe match {
+
+      case tpe: AnnotatedType =>
+        val tpe1 = toShadows(tpe, NoType)
+        tpe   // change to tpe1 to strip annotations
+
+      case tpe: TermRef =>
+        val pre = tpe.widenIfUnstable
+        val origMemberDenot = tpe.findMember(MutabilityMember, pre, EmptyFlags)
+        val newMemberDenot = origMemberDenot & (tpe.prefix.findMember(MutabilityMember, pre, EmptyFlags), pre)
+        if (newMemberDenot.exists && (newMemberDenot ne origMemberDenot)) {
+          tpe.addUniqueShadowMember(MutabilityMember, newMemberDenot.info, defn.NothingType)
+        }
+        tpe
+
+      case _ =>
+        tpe
+    }
+
+    override def adapt(tree0: tpd.Tree, pt: Type, original: untpd.Tree)(implicit ctx: Context): tpd.Tree = {
+      // Find out what type the default typer thinks this tree has.
+      val tree = super.adapt(tree0, pt, original)
+      val tpe = tree.tpe
+
+      //if (tree.isInstanceOf[tpd.Apply]) println(s"Apply type = $tpe")
+
+      // Do our stuff to the type.
+      val tpe1 = adaptType(tpe)
+
+      // Return a tree with the new type.
+      if (tpe ne tpe1) tree.withType(tpe1) else tree
+    }
 
 
     /*
