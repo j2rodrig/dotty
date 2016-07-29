@@ -104,6 +104,42 @@ object DotMod {
     // live with overrides.
 
     /*
+      ATTEMPT 3b partial failure - Passing the assignment "val e: C = d" where d is C @readonly.
+
+      It is possible that I got the shadow-member check in the type comparer wrong...
+
+      For tp1 <: tp2, if the shadow member exists only in tp2, then t1 is assumed to have the member == Nothing, which should always succeed.
+      This is implemented.
+      If the shadow member exists only in tp1, then t2 is assumed to have the member == Nothing, which should fail unless t1's member is also Nothing.
+      This is not implemented.
+
+      New information: The type comparer is updated to fix this problem, but there is no change in output.
+
+      There is possibly something wrong with the representation of readonly:
+      The current implementation uses isSubType to compare RefinedType bases, but maybe this won't give the correct
+      result if we want two readonly types to compare equal... possibly, shadow member types should be manipulated
+      directly rather than encased inside RefinedTypes.
+
+      What we're after here must have the following relations:
+        Readonly <: Readonly
+        Untyped <: Readonly
+        Untyped <: Untyped
+      This is really only a single bit.
+
+      As for polymorphism, we want to compare with an arbitrary type, but only wrt to readonlyness.
+      Thus, type members.
+      So we're back to comparing shadow types directly, rather than as refined members.
+      (The problem with using RefinedTypes to hold these members is that I am skeptical that:
+        Object { M <: Any }  <:  Object { M <: Any }
+        ).
+      So, findMember should still return the requested member early-exit (to get the shadowing effect),
+      but I should do the following:
+        - return the refinedInfo directly, rather than doing a findMember on the shadow base.
+        - make the refinedInfo for Readonly have the property Readonly <: Readonly.
+        - choose Nothing as the default refinedInfo. (to get Untyped <: Readonly and Untyped <: Untyped)
+     */
+
+    /*
       ATTEMPT 3 partial failure - Putting shadow member checking directly inside the type comparer
        is causing the statement "val c: C @readonly = new C" to interpret the RHS type as Object.
       This is probably due to the constraint solver being unable to find a type T where
@@ -180,7 +216,22 @@ object DotMod {
       val tpe1 = adaptType(tpe)
 
       // Return a tree with the new type.
-      if (tpe ne tpe1) tree.withType(tpe1) else tree
+      val tree1 =
+        if (tpe ne tpe1)
+          tree.withType(tpe1)
+        else
+          tree
+
+      // Do we really need a subtype check here?
+      val dontCheck = (tpe eq tpe1) || !tpe1.exists || pt.isInstanceOf[ProtoType] || (pt eq WildcardType)
+      if (!dontCheck) {
+        if (tpe1 <:< pt)
+          tree1
+        else
+          err.typeMismatch(tree1, pt)
+      }
+      else
+        tree1
     }
 
 

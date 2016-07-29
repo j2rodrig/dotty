@@ -89,20 +89,29 @@ class TypeComparer(initctx: Context) extends DotClass with ConstraintHandling {
         assert(isSatisfiable, constraint.show)
   }
 
-  protected def shadowMembersCompatible(tp1: Type, tp2: Type): Boolean =
+  protected def shadowMembersCompatible(tp1: Type, tp2: Type): Boolean = {
+    var ok: Boolean = true
     // Check all shadow members of tp2. For now, we don't bother with the shadow bases' parents.
     if (tp2.getShadowBases.nonEmpty)
-      tp2.getShadowBases.forall { shadow2 =>
+      ok &= tp2.getShadowBases.forall { shadow2 =>
         val name2 = shadow2.base.refinedName
         if (tp1.member(name2).exists)
-          isSubType(tp1, shadow2.base)  // if the member exists in tp1, match member normally
+          isSubType(tp1, shadow2.base) // if the member exists in tp1, match member normally
         else if (shadow2.defaultCompareBase.refinedInfo eq defn.NothingType)
-          true  // shortcut for default type. For some reason, the below doesn't work...
+          true // shortcut for default type. For some reason, the below doesn't work...
         else
-          isSubType(shadow2.defaultCompareBase, shadow2.base)    // if not, match with default base member
+          isSubType(shadow2.defaultCompareBase, shadow2.base) // if not, match with default base member
       }
-    else
-      true
+    // Check all shadow members of tp1 that are not in tp2.
+    if (tp1.getShadowBases.nonEmpty)
+      ok &= tp1.getShadowBases.forall { shadow1 =>
+        val name1 = shadow1.base.refinedName
+        // If name1 exists in tp2, assume we've already checked it above.
+        // We assume that the missing member in tp2 has type Nothing. Return true only if shadow1's member is Nothing.
+        !tp2.member(name1).exists || (shadow1.base.refinedInfo ne defn.NothingType)
+      }
+    ok
+  }
 
   protected def isSubType(tp1: Type, tp2: Type): Boolean = ctx.traceIndented(s"isSubType ${traceInfo(tp1, tp2)}", subtyping) /*<|<*/ {
     if (tp2 eq NoType) false
