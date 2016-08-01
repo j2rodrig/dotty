@@ -443,16 +443,18 @@ object Types {
     final def memberExcluding(name: Name, excluding: FlagSet)(implicit ctx: Context): Denotation =
       findMember(name, widenIfUnstable, excluding)
 
-    final def addShadowMember(name: Name, infoFn: => Type, defaultCompareInfo: Type, visibleInMemberNames: Boolean = false)(implicit ctx: Context): Unit = {
+    final def addShadowMember(name: Name, infoFn: => Type, visibleInMemberNames: Boolean = false)(implicit ctx: Context): this.type = {
       val newBase = RefinedType(defn.ObjectType, name, _ => infoFn)
-      val defaultCompareBase = RefinedType(defn.ObjectType, name, defaultCompareInfo)
+      val defaultCompareBase = RefinedType(defn.ObjectType, name, defn.NothingType)
       shadowBases ::= ShadowInfo(newBase, defaultCompareBase, visibleInMemberNames)
+      this
     }
 
     /** Ensures a uniquely-named shadow member by first removing all shadow bases with same-named members. */
-    final def addUniqueShadowMember(name: Name, infoFn: => Type, defaultCompareInfo: Type, visibleInMemberNames: Boolean = false)(implicit ctx: Context): Unit = {
-      shadowBases = shadowBases.filter(info => !info.base.findMember(name, NoPrefix, EmptyFlags).exists)
-      addShadowMember(name, infoFn, defaultCompareInfo, visibleInMemberNames)
+    final def addUniqueShadowMember(name: Name, infoFn: => Type, visibleInMemberNames: Boolean = false)(implicit ctx: Context): this.type = {
+      shadowBases = shadowBases.filter(info => info.base.refinedName != name)
+      addShadowMember(name, infoFn, visibleInMemberNames)
+      this
     }
 
     final def copyShadowMembers(from: Type): this.type = {
@@ -1706,7 +1708,7 @@ object Types {
     /** Create a NamedType of the same kind as this type, but with a new prefix.
      */
     def newLikeThis(prefix: Type)(implicit ctx: Context): NamedType =
-      NamedType(prefix, name)
+      NamedType(prefix, name).copyShadowMembers(this)
 
     /** Create a NamedType of the same kind as this type, but with a "inherited name".
      *  This is necessary to in situations like the following:
@@ -1732,7 +1734,7 @@ object Types {
      *  the public name.
      */
     final def shadowed(implicit ctx: Context): NamedType =
-      NamedType(prefix, name.shadowedName)
+      NamedType(prefix, name.shadowedName).copyShadowMembers(this)
 
     override def equals(that: Any) = that match {
       case that: NamedType =>
@@ -1769,7 +1771,7 @@ object Types {
     override def isOverloaded(implicit ctx: Context) = denot.isOverloaded
 
     private def rewrap(sd: SingleDenotation)(implicit ctx: Context) =
-      TermRef.withSigAndDenot(prefix, name, sd.signature, sd)
+      TermRef.withSigAndDenot(prefix, name, sd.signature, sd).copyShadowMembers(this)
 
     def alternatives(implicit ctx: Context): List[TermRef] =
       denot.alternatives map rewrap
@@ -1795,7 +1797,7 @@ object Types {
     }
 
     override def newLikeThis(prefix: Type)(implicit ctx: Context): TermRef = {
-      val candidate = TermRef.withSig(prefix, name, sig)
+      val candidate = TermRef.withSig(prefix, name, sig).copyShadowMembers(this)
       if (symbol.exists && !candidate.symbol.exists) { // recompute from previous symbol
         val ownSym = symbol
         val newd = asMemberOf(prefix)
@@ -1830,7 +1832,7 @@ object Types {
       unsupported("withSym")
 
     override def newLikeThis(prefix: Type)(implicit ctx: Context): NamedType =
-      NamedType.withFixedSym(prefix, fixedSym)
+      NamedType.withFixedSym(prefix, fixedSym).copyShadowMembers(this)
 
     override def equals(that: Any) = that match {
       case that: WithFixedSym => this.prefix == that.prefix && (this.fixedSym eq that.fixedSym)
@@ -1884,6 +1886,11 @@ object Types {
      */
     def all(prefix: Type, name: TermName)(implicit ctx: Context): TermRef = {
       ctx.uniqueNamedTypes.enterIfNew(prefix, name).asInstanceOf[TermRef]
+    }
+
+    /** Create term ref with given prefix and name, but don't actually put it into the hash table */
+    def createWithoutCaching(prefix: Type, name: TermName)(implicit ctx: Context): TermRef = {
+      new CachedTermRef(prefix, name, NotCached)
     }
 
     /** Create term ref referring to given symbol, taking the signature
@@ -1960,6 +1967,11 @@ object Types {
     def apply(prefix: Type, name: TypeName)(implicit ctx: Context): TypeRef = {
       if (Config.checkProjections) checkProjection(prefix, name)
       ctx.uniqueNamedTypes.enterIfNew(prefix, name).asInstanceOf[TypeRef]
+    }
+
+    /** Create type ref with given prefix and name, but don't actually put it into the hash table */
+    def createWithoutCaching(prefix: Type, name: TypeName)(implicit ctx: Context): TypeRef = {
+      new CachedTypeRef(prefix, name, NotCached)
     }
 
     /** Create type ref to given symbol */

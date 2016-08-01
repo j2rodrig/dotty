@@ -89,6 +89,22 @@ class TypeComparer(initctx: Context) extends DotClass with ConstraintHandling {
         assert(isSatisfiable, constraint.show)
   }
 
+  protected def shadowMembersCompatible(tp1: Type, tp2: Type): Boolean =
+    (tp1.getShadowBases.isEmpty && tp2.getShadowBases.isEmpty) || {
+      var names: Set[Name] = Set()
+      tp1.getShadowBases.foreach { shadow1 => names += shadow1.base.refinedName }
+      tp2.getShadowBases.foreach { shadow2 => names += shadow2.base.refinedName }
+      names.forall { name =>
+        val denot1 = tp1.member(name)
+        val denot2 = tp2.member(name)
+        val info1 = if (denot1.exists) denot1.info else TypeAlias(NothingType, 1)  // default to Nothing
+        val info2 = if (denot2.exists) denot2.info else TypeAlias(NothingType, 1)
+        val result = firstTry(info1, info2)
+        result
+      }
+    }
+
+  /*
   protected def shadowMembersCompatible(tp1: Type, tp2: Type): Boolean = {
     var ok: Boolean = true
     // Check all shadow members of tp2. For now, we don't bother with the shadow bases' parents.
@@ -112,6 +128,7 @@ class TypeComparer(initctx: Context) extends DotClass with ConstraintHandling {
       }
     ok
   }
+  */
 
   protected def isSubType(tp1: Type, tp2: Type): Boolean = ctx.traceIndented(s"isSubType ${traceInfo(tp1, tp2)}", subtyping) /*<|<*/ {
     if (tp2 eq NoType) false

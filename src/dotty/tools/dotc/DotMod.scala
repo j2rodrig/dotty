@@ -59,6 +59,15 @@ object DotMod {
   }
 
   implicit class TypeDecorator(val tp: Type) extends AnyVal {
+
+    /** Creates a new Type equivalent to tp */
+    def duplicate(implicit ctx: Context): Type = tp match {
+      case tp: TypeRef =>    //tp.newLikeThis(tp.prefix)
+        TypeRef.createWithoutCaching(tp.prefix, tp.name)
+      case tp: TermRef =>
+        TermRef.createWithoutCaching(tp.prefix, tp.name)
+      case _ => tp  // TODO: duplicate other types of types
+    }
   }
 
 
@@ -137,6 +146,39 @@ object DotMod {
         - return the refinedInfo directly, rather than doing a findMember on the shadow base.
         - make the refinedInfo for Readonly have the property Readonly <: Readonly.
         - choose Nothing as the default refinedInfo. (to get Untyped <: Readonly and Untyped <: Untyped)
+
+      New information: In trying to compare defn.NothingTyoe <: TypeBounds(...), isSubType returns false.
+        defn.NothingType is a TypeRef rather than a ClassInfo, which doesn't seem to compare correctly.
+
+      A possibility is to make both halves into covariant TypeBounds.
+
+      SUCCESS: now Untyped <: Readonly returns true as expected.
+      New FAILURE: There's now a failure in ReTyper#typedSelect where "new C" is reported
+        incompatible with its prototype.
+        The specific phase reporting the problem is "Ycheck".
+      One option here is to temporarily disable phases after the typer, and deal with
+        this issue later (if necessary).
+
+      FAILURE: Still not getting an error on "val e: C = d" after disabling Ycheck options.
+        It looks like there is an issue with the fact that I'm not duplicating types before
+        setting their shadow members. Since I have "C @readonly" at a prior line, the TypeRef
+        to C gets a shadow member, so the use of this TypeRef on the next line is interpreted
+        as Readonly. The duplication is probably unnecessary for singleton types (since the
+        singleton type means the same type everywhere), but duplication couldn't hurt.
+
+      (Note: shadow members are now copied in Type#newLikeThis.)
+
+      Still not getting the expected failure. The TypeRef to C is still getting a shadow member added.
+
+      New theory: the call to ctx.uniqueNamedTypes.enterIfNew (which is invoked when I try to duplicate
+      named types) is not returning a new Type object, but rather is returning the old object because
+      the name and prefix are equivalent to the old Type object.
+      One option: Attempt to add a flag that adds the new type regardless of prior cached objects.
+      A second option: Create and add the object directly in duplicate method, using ctx.uniqueNamedTypes.enterIfNew as an example.
+
+      FAILURE: Still no effect. The TermRef referring to d isn't reporting any shadow members.
+      Possibly, changing tree types is not enough. We need to get the shadow types into the symbol info.
+      Possibly: Change types in the symbol completer?
      */
 
     /*
@@ -167,6 +209,9 @@ object DotMod {
         Now making annotation stripping optional.
     */
 
+    def ReadonlyType(implicit ctx: Context) = TypeAlias(defn.ReadonlyAnnotType, 1)
+
+
     /**
       * If tpe is an annotated type, finds the meaning of RI annotations.
       * If there is a meaningful RI annotation, sets the first non-annotation underlying type's
@@ -177,29 +222,49 @@ object DotMod {
     def toShadows(tpe: Type, shadowInfo: Type)(implicit ctx: Context): Type = tpe match {
       case tpe: AnnotatedType =>
         if (tpe.annot.symbol eq defn.ReadonlyAnnot)
-          toShadows(tpe.underlying, TypeBounds(defn.NothingType, defn.AnyType))
+          tpe.derivedAnnotatedType(toShadows(tpe.underlying, ReadonlyType), tpe.annot)  // leave RI annotations in place (for now)
         else
           tpe.derivedAnnotatedType(toShadows(tpe.underlying, shadowInfo), tpe.annot)  // leave non-RI annotations in place
       case _ =>
         if (shadowInfo.exists)
-          tpe.addShadowMember(MutabilityMember, shadowInfo, defn.NothingType, visibleInMemberNames = false)
-        tpe
+          tpe.duplicate.addUniqueShadowMember(MutabilityMember, shadowInfo, visibleInMemberNames = true)
+        else
+          tpe
     }
 
     def adaptType(tpe: Type)(implicit ctx: Context): Type = tpe match {
 
       case tpe: AnnotatedType =>
-        val tpe1 = toShadows(tpe, NoType)
-        tpe   // change to tpe1 to strip annotations
+        toShadows(tpe, NoType)
 
       case tpe: TermRef =>
+        if (tpe.name eq termName("d"))
+          true  // breakpoint
+        val infoPrefix = tpe.prefix.member(MutabilityMember).info
+        val infoTpe = tpe.member(MutabilityMember).info
+        val infoCombined = {
+          if (infoPrefix.exists && infoTpe.exists)  // if prefix and tpe both have the shadow, combine their types with a union
+            OrType(infoPrefix, infoTpe)
+          else if (infoPrefix.exists)
+            infoPrefix
+          else
+            infoTpe
+        }
+        if (infoCombined ne infoTpe)
+          tpe.duplicate.addUniqueShadowMember(MutabilityMember, infoCombined, visibleInMemberNames = true)
+        else
+          tpe
+
+        /*
         val pre = tpe.widenIfUnstable
         val origMemberDenot = tpe.findMember(MutabilityMember, pre, EmptyFlags)
         val newMemberDenot = origMemberDenot & (tpe.prefix.findMember(MutabilityMember, pre, EmptyFlags), pre)
         if (newMemberDenot.exists && (newMemberDenot ne origMemberDenot)) {
-          tpe.addUniqueShadowMember(MutabilityMember, newMemberDenot.info, defn.NothingType)
+          tpe.addUniqueShadowMember(MutabilityMember, newMemberDenot.info, visibleInMemberNames = true)
         }
-        tpe
+        */
+
+        // TODO: What about TypeRefs? Should shadow members be transferred, or is automatic prefix substitution sufficient?
 
       case _ =>
         tpe
