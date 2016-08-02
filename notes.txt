@@ -265,4 +265,19 @@ NOTES
                    ^
      */
 
+	SUCCESS on the Dotty update.
+	SUCCESS on a few of the standard tests.
 
+	PROBLEM: Somehow, we're getting an ErrorType inside the mutability member info.
+		During the neg_autoTupling test.
+	New information: We're getting a type alias to ErrorType when looking up the mutability member
+	  during viewpoint adaptation. Where are these mutability members being generated?
+	  It seems that it is possible for a TermRef prefix to be an ErrorType, which
+	  will return an alias to ErrorType if a type-member query is performed.
+	SUCCESS: neg_autoTupling test is now reporting the correct number of errors.
+
+	PROBLEM: pos_autoTupling is generating 1 error where 0 are expected.
+	SUCCESS: The error was being generated on pattern matching. Solution was to make sure
+	  type compatibility checks do not happen in Pattern mode.
+
+	SUCCESS: Passes all 662 positive Dotty tests.

@@ -59,6 +59,14 @@ class tests extends CompilerTest {
   val dottyReplDir   = dotcDir + "repl/"
   val typerDir  = dotcDir + "typer/"
 
+
+  @Test def pos_autoTupling() = compileFile(posDir, "autoTuplingTest", twice)
+  @Test def dotmod_failed_tests() = {
+    pos_autoTupling()
+    neg_autoTupling
+  }
+
+
   @Test def dotmod_empty = compileFile(dotmodPosDir, "empty", twice)
   @Test def dotmod_viewpoint1 = compileFile(dotmodNegDir, "viewpoint1")
 

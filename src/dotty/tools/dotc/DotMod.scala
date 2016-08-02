@@ -80,15 +80,21 @@ object DotMod {
   class DotModTypeComparer(initCtx: Context) extends TypeComparer(initCtx) {
 
     override def isSubType(tp1: Type, tp2: Type): Boolean = {
-      super.isSubType(tp1, tp2) && {
+      tp1.isError || tp2.isError || (super.isSubType(tp1, tp2) && {
         val name = MutabilityMember
         val denot1 = tp1.member(name)
         val denot2 = tp2.member(name)
         val info1 = if (denot1.exists) denot1.info else TypeAlias(NothingType, 1)  // default to Nothing
         val info2 = if (denot2.exists) denot2.info else TypeAlias(NothingType, 1)
+        if (info1.isError || info2.isError)
+          false // breakpoint
+        if (denot1.exists || denot2.exists)
+          false  // breakpoint
         val result = super.isSubType(info1, info2)
+        if (!result)
+          false  // breakpoint
         result
-      }
+      })
     }
 
     override def copyIn(ctx: Context): TypeComparer = new DotModTypeComparer(ctx)
@@ -143,20 +149,22 @@ object DotMod {
         toShadows(tpe, NoType)
 
       case tpe: TermRef =>
-        val infoPrefix = tpe.prefix.member(MutabilityMember).info
-        val infoTpe = tpe.member(MutabilityMember).info
-        val infoCombined = {
-          if (infoPrefix.exists && infoTpe.exists)  // if prefix and tpe both have the shadow, combine their types with a union
-            OrType(infoPrefix, infoTpe)
-          else if (infoPrefix.exists)
-            infoPrefix
-          else
-            infoTpe
-        }
-        if (infoCombined ne infoTpe)
-          tpe.duplicate.addUniqueShadowMember(MutabilityMember, infoCombined, visibleInMemberNames = true)
-        else
+        if (tpe.prefix.isError)
           tpe
+        else {
+          val denotPrefix = tpe.prefix.member(MutabilityMember)
+          val denotTpe = tpe.member(MutabilityMember)
+          if (denotPrefix.exists) {
+            // we need to change the mutability only if the prefix has a mutability member
+            val infoCombined =
+            if (denotTpe.exists) // if prefix and tpe both have the shadow, combine their types with a union
+              OrType(denotPrefix.info, denotTpe.info)
+            else
+              denotPrefix.info // only the prefix has a shadow
+            tpe.duplicate.addUniqueShadowMember(MutabilityMember, infoCombined, visibleInMemberNames = true)
+          } else
+            tpe
+        }
 
       case _ =>
         tpe
@@ -178,7 +186,7 @@ object DotMod {
           tree
 
       // Check tpe1 against the prototype with our custom type comparer.
-      val dontCheck = !tpe1.exists || pt.isInstanceOf[ProtoType] || (pt eq WildcardType)
+      val dontCheck = ctx.mode.is(Mode.Pattern) || !tpe1.exists || pt.isInstanceOf[ProtoType] || (pt eq WildcardType)
       if (!dontCheck) {
         if (new DotModTypeComparer(ctx).isSubType(tpe1, pt))
           tree1
