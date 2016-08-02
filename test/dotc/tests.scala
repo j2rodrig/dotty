@@ -25,9 +25,8 @@ class tests extends CompilerTest {
   implicit val defaultOptions = noCheckOptions ++ List(
       "-Yno-deep-subtypes", "-Yno-double-bindings",
       "-d", defaultOutputDir) ++ {
-    //if (isRunByJenkins) List("-Ycheck:tailrec,resolveSuper,mixin,restoreScopes,labelDef") // should be Ycheck:all, but #725
-    //else List("-Ycheck:tailrec,resolveSuper,mixin,restoreScopes,labelDef")
-    Nil  // TODO: reenable Ycheck when necessary
+    if (isRunByJenkins) List("-Ycheck:tailrec,resolveSuper,mixin,restoreScopes,labelDef") // should be Ycheck:all, but #725
+    else List("-Ycheck:tailrec,resolveSuper,mixin,restoreScopes,labelDef")
   }
 
 
@@ -57,7 +56,7 @@ class tests extends CompilerTest {
   val typerDir  = dotcDir + "typer/"
 
   @Test def dotmod_empty = compileFile(dotmodDir, "empty", twice)
-  @Test def dotmod_viewpoint1 = compileFile(dotmodDir, "viewpoint1", twice)
+  @Test def dotmod_viewpoint1 = compileFile(dotmodDir, "viewpoint1", xerrors = 1)
 
   @Test def pickle_pickleOK = compileDir(testsDir, "pickling", testPickling)
 // This directory doesn't exist anymore

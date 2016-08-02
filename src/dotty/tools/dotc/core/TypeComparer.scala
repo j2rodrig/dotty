@@ -89,6 +89,7 @@ class TypeComparer(initctx: Context) extends DotClass with ConstraintHandling {
         assert(isSatisfiable, constraint.show)
   }
 
+  /*
   protected def shadowMembersCompatible(tp1: Type, tp2: Type): Boolean =
     (tp1.getShadowBases.isEmpty && tp2.getShadowBases.isEmpty) || {
       var names: Set[Name] = Set()
@@ -103,6 +104,7 @@ class TypeComparer(initctx: Context) extends DotClass with ConstraintHandling {
         result
       }
     }
+    */
 
   /*
   protected def shadowMembersCompatible(tp1: Type, tp2: Type): Boolean = {
@@ -138,7 +140,7 @@ class TypeComparer(initctx: Context) extends DotClass with ConstraintHandling {
       val savedSuccessCount = successCount
       try {
         recCount = recCount + 1
-        val result = shadowMembersCompatible(tp1, tp2) &&
+        val result = //shadowMembersCompatible(tp1, tp2) &&
           (if (recCount < Config.LogPendingSubTypesThreshold) firstTry(tp1, tp2)
           else monitoredIsSubType(tp1, tp2))
         recCount = recCount - 1
@@ -376,6 +378,8 @@ class TypeComparer(initctx: Context) extends DotClass with ConstraintHandling {
       val cls2 = tp2.symbol
       if (cls2.isClass) {
         val base = tp1.baseTypeRef(cls2)
+        //println(s"when comparing $tp1 <: $tp2:\nbase = $base")
+        //if (!shadowMembersCompatible(tp1, tp2)) return false  // needed because any shadow members on tp2 are not otherwise checked
         if (base.exists && (base ne tp1)) return isSubType(base, tp2)
         if (cls2 == defn.SingletonClass && tp1.isStable) return true
       }
