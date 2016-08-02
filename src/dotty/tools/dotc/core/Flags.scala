@@ -436,7 +436,8 @@ object Flags {
 
   /** Flags representing modifiers that can appear in trees */
   final val ModifierFlags =
-    SourceModifierFlags | Module | Param | Synthetic | Package | Local | commonFlags(Mutable)
+    SourceModifierFlags | Module | Param | Synthetic | Package | Local |
+    commonFlags(Mutable)
       // | Trait is subsumed by commonFlags(Lazy) from SourceModifierFlags
 
   assert(ModifierFlags.isTermFlags && ModifierFlags.isTypeFlags)
@@ -447,8 +448,8 @@ object Flags {
   /** Flags guaranteed to be set upon symbol creation */
   final val FromStartFlags =
     AccessFlags | Module | Package | Deferred | Final | MethodOrHKCommon | Param | ParamAccessor | Scala2ExistentialCommon |
-    InSuperCall | Touched | JavaStatic | CovariantOrOuter | ContravariantOrLabel | ExpandedName | AccessorOrSealed |
-    CaseAccessorOrBaseTypeArg | Fresh | Frozen | Erroneous | ImplicitCommon | Permanent |
+    Mutable.toCommonFlags | InSuperCall | Touched | JavaStatic | CovariantOrOuter | ContravariantOrLabel | ExpandedName | AccessorOrSealed |
+    CaseAccessorOrBaseTypeArg | Fresh | Frozen | Erroneous | ImplicitCommon | Permanent | Synthetic |
     LazyOrTrait | SuperAccessorOrScala2x | SelfNameOrImplClass
 
   assert(FromStartFlags.isTermFlags && FromStartFlags.isTypeFlags)
@@ -508,7 +509,7 @@ object Flags {
   /** These flags are pickled */
   final val PickledFlags = flagRange(FirstFlag, FirstNotPickledFlag)
 
-  final val AllFlags = flagRange(FirstFlag, MaxFlag)
+  final val AnyFlags = flagRange(FirstFlag, MaxFlag)
 
   /** An abstract class or a trait */
   final val AbstractOrTrait = Abstract | Trait
@@ -524,6 +525,9 @@ object Flags {
 
   /** Either method or lazy */
   final val MethodOrLazy = Method | Lazy
+
+  /** Either method or lazy or deferred */
+  final val MethodOrLazyOrDeferred = Method | Lazy | Deferred
 
   /** Labeled `private` or `final` */
   final val PrivateOrFinal = Private | Final
@@ -542,6 +546,9 @@ object Flags {
 
   /** A lazy or deferred value */
   final val LazyOrDeferred = Lazy | Deferred
+
+  /** A synthetic or private definition */
+  final val SyntheticOrPrivate = Synthetic | Private
 
   /** A type parameter or type parameter accessor */
   final val TypeParamOrAccessor = TypeParam | TypeParamAccessor
@@ -593,6 +600,9 @@ object Flags {
 
   /** A private parameter accessor */
   final val PrivateParamAccessor = allOf(Private, ParamAccessor)
+
+  /** A type parameter introduced with [type ... ] */
+  final val NamedTypeParam = allOf(TypeParam, ParamAccessor)
 
   /** A local parameter */
   final val ParamAndLocal = allOf(Param, Local)

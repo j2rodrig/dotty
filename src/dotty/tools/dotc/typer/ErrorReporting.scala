@@ -8,8 +8,10 @@ import Trees._
 import Types._, ProtoTypes._, Contexts._, Decorators._, Denotations._, Symbols._
 import Applications._, Implicits._, Flags._
 import util.Positions._
+import reporting.Diagnostic
 import printing.Showable
 import printing.Disambiguation.disambiguated
+import java.util.regex.Matcher.quoteReplacement
 
 object ErrorReporting {
 
@@ -115,6 +117,18 @@ object ErrorReporting {
            | found   : $found
            | required: $expected""".stripMargin + whyNoMatchStr(found, expected)
     }
+
+    /** Format `raw` implicitNotFound argument, replacing all
+     *  occurrences of `${X}` where `X` is in `paramNames` with the
+     *  corresponding shown type in `args`.
+     */
+    def implicitNotFoundString(raw: String, paramNames: List[String], args: List[Type]): String = {
+      def translate(name: String): Option[String] = {
+        val idx = paramNames.indexOf(name)
+        if (idx >= 0) Some(quoteReplacement(args(idx).show)) else None
+      }
+      """\$\{\w*\}""".r.replaceSomeIn(raw, m => translate(m.matched.drop(2).init))
+    }
   }
 
   def err(implicit ctx: Context): Errors = new Errors
@@ -127,7 +141,6 @@ object ErrorReporting {
    *  message composition methods, this is crucial.
    */
   implicit class DiagnosticString(val sc: StringContext) extends AnyVal {
-    import DiagnosticString._
     def d(args: Any*)(implicit ctx: Context): String = {
       def isSensical(arg: Any): Boolean = arg match {
         case l: Seq[_] => l.forall(isSensical(_))
@@ -139,13 +152,8 @@ object ErrorReporting {
       }
 
       val s = new StringInterpolators(sc).i(args : _*)
-      if (args.forall(isSensical(_))) s else nonSensicalStartTag + s + nonSensicalEndTag
+      if (args.forall(isSensical(_))) s
+      else Diagnostic.nonSensicalStartTag + s + Diagnostic.nonSensicalEndTag
     }
   }
-
-  object DiagnosticString {
-    final val nonSensicalStartTag = "<nonsensical>"
-    final val nonSensicalEndTag = "</nonsensical>"
-  }
-
 }

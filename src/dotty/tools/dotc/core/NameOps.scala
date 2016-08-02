@@ -63,6 +63,7 @@ object NameOps {
       (if (name.isTermName) n.toTermName else n.toTypeName).asInstanceOf[N]
 
     def isConstructorName = name == CONSTRUCTOR || name == TRAIT_CONSTRUCTOR
+    def isStaticConstructorName = name == STATIC_CONSTRUCTOR
     def isExceptionResultName = name startsWith EXCEPTION_RESULT_PREFIX
     def isImplClassName = name endsWith IMPL_CLASS_SUFFIX
     def isLocalDummyName = name startsWith LOCALDUMMY_PREFIX
@@ -99,24 +100,6 @@ object NameOps {
       case _ =>
         name.length > 0 && name.last == '=' && name.head != '=' && isOperatorPart(name.head)
     }
-
-    /** Is this the name of a higher-kinded type parameter of a Lambda? */
-    def isHkArgName =
-      name.length > 0 &&
-      name.head == tpnme.hkArgPrefixHead &&
-      name.startsWith(tpnme.hkArgPrefix) && {
-        val digits = name.drop(tpnme.hkArgPrefixLength)
-        digits.length <= 4 && digits.forall(_.isDigit)
-      }
-
-    /** The index of the higher-kinded type parameter with this name.
-     *  Pre: isLambdaArgName.
-     */
-    def hkArgIndex: Int =
-      name.drop(tpnme.hkArgPrefixLength).toString.toInt
-
-    def isLambdaTraitName(implicit ctx: Context): Boolean =
-      name.startsWith(tpnme.hkLambdaPrefix)
 
     /** If the name ends with $nn where nn are
       * all digits, strip the $ and the digits.
@@ -179,7 +162,13 @@ object NameOps {
      *  an encoded name, e.g. super$$plus$eq. See #765.
      */
     def unexpandedName: N = {
-      val idx = name.lastIndexOfSlice(nme.EXPAND_SEPARATOR)
+      var idx = name.lastIndexOfSlice(nme.EXPAND_SEPARATOR)
+
+      // Hack to make super accessors from traits work. They would otherwise fail because of #765
+      // TODO: drop this once we have more robust name handling
+      if (name.slice(idx - FalseSuperLength, idx) == FalseSuper)
+        idx -= FalseSuper.length
+
       if (idx < 0) name else (name drop (idx + nme.EXPAND_SEPARATOR.length)).asInstanceOf[N]
     }
 
@@ -431,4 +420,7 @@ object NameOps {
       name.dropRight(nme.LAZY_LOCAL.length)
     }
   }
+
+  private final val FalseSuper = "$$super".toTermName
+  private val FalseSuperLength = FalseSuper.length
 }

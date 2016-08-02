@@ -21,11 +21,11 @@ import core.Decorators._
 import dotty.tools.dotc.ast.{Trees, tpd, untpd}
 import ast.Trees._
 import scala.collection.mutable.ListBuffer
-import dotty.tools.dotc.core.Flags
+import dotty.tools.dotc.core.{Constants, Flags}
 import ValueClasses._
 import TypeUtils._
 import ExplicitOuter._
-import typer.Mode
+import core.Mode
 
 class Erasure extends Phase with DenotTransformer { thisTransformer =>
 
@@ -41,13 +41,19 @@ class Erasure extends Phase with DenotTransformer { thisTransformer =>
         // Aftre erasure, all former Any members are now Object members
         val ClassInfo(pre, _, ps, decls, selfInfo) = ref.info
         val extendedScope = decls.cloneScope
-        defn.AnyClass.classInfo.decls.foreach(extendedScope.enter)
+        for (decl <- defn.AnyClass.classInfo.decls)
+          if (!decl.isConstructor) extendedScope.enter(decl)
         ref.copySymDenotation(
           info = transformInfo(ref.symbol,
               ClassInfo(pre, defn.ObjectClass, ps, extendedScope, selfInfo))
         )
       }
       else {
+        val oldSymbol = ref.symbol
+        val newSymbol =
+          if ((oldSymbol.owner eq defn.AnyClass) && oldSymbol.isConstructor)
+            defn.ObjectClass.primaryConstructor
+        else oldSymbol
         val oldOwner = ref.owner
         val newOwner = if (oldOwner eq defn.AnyClass) defn.ObjectClass else oldOwner
         val oldInfo = ref.info
@@ -55,10 +61,10 @@ class Erasure extends Phase with DenotTransformer { thisTransformer =>
         val oldFlags = ref.flags
         val newFlags = ref.flags &~ Flags.HasDefaultParams // HasDefaultParams needs to be dropped because overriding might become overloading
         // TODO: define derivedSymDenotation?
-        if ((oldOwner eq newOwner) && (oldInfo eq newInfo) && (oldFlags == newFlags)) ref
+        if ((oldSymbol eq newSymbol) && (oldOwner eq newOwner) && (oldInfo eq newInfo) && (oldFlags == newFlags)) ref
         else {
           assert(!ref.is(Flags.PackageClass), s"trans $ref @ ${ctx.phase} oldOwner = $oldOwner, newOwner = $newOwner, oldInfo = $oldInfo, newInfo = $newInfo ${oldOwner eq newOwner} ${oldInfo eq newInfo}")
-          ref.copySymDenotation(owner = newOwner, initFlags = newFlags, info = newInfo)
+          ref.copySymDenotation(symbol = newSymbol, owner = newOwner, initFlags = newFlags, info = newInfo)
         }
       }
     case ref =>
@@ -153,8 +159,8 @@ object Erasure extends TypeTestsCasts{
 
     final def box(tree: Tree, target: => String = "")(implicit ctx: Context): Tree = ctx.traceIndented(i"boxing ${tree.showSummary}: ${tree.tpe} into $target") {
       tree.tpe.widen match {
-        case ErasedValueType(clazz, _) =>
-          New(clazz.typeRef, cast(tree, underlyingOfValueClass(clazz)) :: Nil) // todo: use adaptToType?
+        case ErasedValueType(tycon, _) =>
+          New(tycon, cast(tree, underlyingOfValueClass(tycon.symbol.asClass)) :: Nil) // todo: use adaptToType?
         case tp =>
           val cls = tp.classSymbol
           if (cls eq defn.UnitClass) constant(tree, ref(defn.BoxedUnit_UNIT))
@@ -173,10 +179,10 @@ object Erasure extends TypeTestsCasts{
 
     def unbox(tree: Tree, pt: Type)(implicit ctx: Context): Tree = ctx.traceIndented(i"unboxing ${tree.showSummary}: ${tree.tpe} as a $pt") {
       pt match {
-        case ErasedValueType(clazz, underlying) =>
+        case ErasedValueType(tycon, underlying) =>
           def unboxedTree(t: Tree) =
-            adaptToType(t, clazz.typeRef)
-            .select(valueClassUnbox(clazz))
+            adaptToType(t, tycon)
+            .select(valueClassUnbox(tycon.symbol.asClass))
             .appliedToNone
 
           // Null unboxing needs to be treated separately since we cannot call a method on null.
@@ -185,7 +191,7 @@ object Erasure extends TypeTestsCasts{
           val tree1 =
             if (tree.tpe isRef defn.NullClass)
               adaptToType(tree, underlying)
-            else if (!(tree.tpe <:< clazz.typeRef)) {
+            else if (!(tree.tpe <:< tycon)) {
               assert(!(tree.tpe.typeSymbol.isPrimitiveValueClass))
               val nullTree = Literal(Constant(null))
               val unboxedNull = adaptToType(nullTree, underlying)
@@ -223,12 +229,12 @@ object Erasure extends TypeTestsCasts{
         if treeElem.widen.isPrimitiveValueType && !ptElem.isPrimitiveValueType =>
           // See SI-2386 for one example of when this might be necessary.
           cast(ref(defn.runtimeMethodRef(nme.toObjectArray)).appliedTo(tree), pt)
-        case (_, ErasedValueType(cls, _)) =>
-          ref(u2evt(cls)).appliedTo(tree)
+        case (_, ErasedValueType(tycon, _)) =>
+          ref(u2evt(tycon.symbol.asClass)).appliedTo(tree)
         case _ =>
           tree.tpe.widen match {
-            case ErasedValueType(cls, _) =>
-              ref(evt2u(cls)).appliedTo(tree)
+            case ErasedValueType(tycon, _) =>
+              ref(evt2u(tycon.symbol.asClass)).appliedTo(tree)
             case _ =>
               if (pt.isPrimitiveValueType)
                 primitiveConversion(tree, pt.classSymbol)
@@ -299,8 +305,9 @@ object Erasure extends TypeTestsCasts{
       assignType(untpd.cpy.Typed(tree)(expr1, tpt1), tpt1)
     }
 
-    override def typedLiteral(tree: untpd.Literal)(implicit ctc: Context): Literal =
+    override def typedLiteral(tree: untpd.Literal)(implicit ctx: Context): Literal =
       if (tree.typeOpt.isRef(defn.UnitClass)) tree.withType(tree.typeOpt)
+      else if (tree.const.tag == Constants.ClazzTag) Literal(Constant(erasure(tree.const.typeValue)))
       else super.typedLiteral(tree)
 
     /** Type check select nodes, applying the following rewritings exhaustively
@@ -467,28 +474,18 @@ object Erasure extends TypeTestsCasts{
         tpt = untpd.TypedSplice(TypeTree(sym.info).withPos(vdef.tpt.pos))), sym)
 
     override def typedDefDef(ddef: untpd.DefDef, sym: Symbol)(implicit ctx: Context) = {
-      var effectiveSym = sym
-      if (sym == defn.newRefArrayMethod) {
-        // newRefArray is treated specially: It's the only source-defined method
-        // that has a polymorphic type after erasure. But treating its (dummy) definition
-        // with a polymorphic type at and after erasure is an awkward special case.
-        // We therefore rewrite the method definition with a new Symbol of type
-        // (length: Int)Object
-        val MethodType(pnames, ptypes) = sym.info.resultType
-        effectiveSym = sym.copy(info = MethodType(pnames, ptypes, defn.ObjectType))
-      }
       val restpe =
-        if (effectiveSym.isConstructor) defn.UnitType
-        else effectiveSym.info.resultType
+        if (sym.isConstructor) defn.UnitType
+        else sym.info.resultType
       val ddef1 = untpd.cpy.DefDef(ddef)(
         tparams = Nil,
-        vparamss = (outer.paramDefs(effectiveSym) ::: ddef.vparamss.flatten) :: Nil,
+        vparamss = (outer.paramDefs(sym) ::: ddef.vparamss.flatten) :: Nil,
         tpt = untpd.TypedSplice(TypeTree(restpe).withPos(ddef.tpt.pos)),
         rhs = ddef.rhs match {
           case id @ Ident(nme.WILDCARD) => untpd.TypedSplice(id.withType(restpe))
           case _ => ddef.rhs
         })
-      super.typedDefDef(ddef1, effectiveSym)
+      super.typedDefDef(ddef1, sym)
     }
 
     /** After erasure, we may have to replace the closure method by a bridge.
@@ -562,43 +559,47 @@ object Erasure extends TypeTestsCasts{
             before match {
               case Nil => emittedBridges.toList
               case (oldMember: untpd.DefDef) :: oldTail =>
-                val oldSymbol = oldMember.symbol(beforeCtx)
-                val newSymbol = member.symbol(ctx)
-                assert(oldSymbol.name(beforeCtx) == newSymbol.name,
-                  s"${oldSymbol.name(beforeCtx)} bridging with ${newSymbol.name}")
-                val newOverridden = oldSymbol.denot.allOverriddenSymbols.toSet // TODO: clarify new <-> old in a comment; symbols are swapped here
-                val oldOverridden = newSymbol.allOverriddenSymbols(beforeCtx).toSet // TODO: can we find a more efficient impl? newOverridden does not have to be a set!
-                def stillInBaseClass(sym: Symbol) = ctx.owner derivesFrom sym.owner
-                val neededBridges = (oldOverridden -- newOverridden).filter(stillInBaseClass)
+                try {
+                  val oldSymbol = oldMember.symbol(beforeCtx)
+                  val newSymbol = member.symbol(ctx)
+                  assert(oldSymbol.name(beforeCtx) == newSymbol.name,
+                    s"${oldSymbol.name(beforeCtx)} bridging with ${newSymbol.name}")
+                  val newOverridden = oldSymbol.denot.allOverriddenSymbols.toSet // TODO: clarify new <-> old in a comment; symbols are swapped here
+                  val oldOverridden = newSymbol.allOverriddenSymbols(beforeCtx).toSet // TODO: can we find a more efficient impl? newOverridden does not have to be a set!
+                  def stillInBaseClass(sym: Symbol) = ctx.owner derivesFrom sym.owner
+                  val neededBridges = (oldOverridden -- newOverridden).filter(stillInBaseClass)
 
-                var minimalSet = Set[Symbol]()
-                // compute minimal set of bridges that are needed:
-                for (bridge <- neededBridges) {
-                  val isRequired = minimalSet.forall(nxtBridge => !(bridge.info =:= nxtBridge.info))
+                  var minimalSet = Set[Symbol]()
+                  // compute minimal set of bridges that are needed:
+                  for (bridge <- neededBridges) {
+                    val isRequired = minimalSet.forall(nxtBridge => !(bridge.info =:= nxtBridge.info))
 
-                  if (isRequired) {
-                    // check for clashes
-                    val clash: Option[Symbol] = oldSymbol.owner.info.decls.lookupAll(bridge.name).find {
-                      sym =>
-                        (sym.name eq bridge.name) && sym.info.widen =:= bridge.info.widen
-                    }.orElse(
+                    if (isRequired) {
+                      // check for clashes
+                      val clash: Option[Symbol] = oldSymbol.owner.info.decls.lookupAll(bridge.name).find {
+                        sym =>
+                          (sym.name eq bridge.name) && sym.info.widen =:= bridge.info.widen
+                      }.orElse(
                         emittedBridges.find(stat => (stat.name == bridge.name) && stat.tpe.widen =:= bridge.info.widen)
-                          .map(_.symbol)
-                      )
-                    clash match {
-                      case Some(cl) =>
-                        ctx.error(i"bridge for method ${newSymbol.showLocated(beforeCtx)} of type ${newSymbol.info(beforeCtx)}\n" +
-                          i"clashes with ${cl.symbol.showLocated(beforeCtx)} of type ${cl.symbol.info(beforeCtx)}\n" +
-                          i"both have same type after erasure: ${bridge.symbol.info}")
-                      case None => minimalSet += bridge
+                          .map(_.symbol))
+                      clash match {
+                        case Some(cl) =>
+                          ctx.error(i"bridge for method ${newSymbol.showLocated(beforeCtx)} of type ${newSymbol.info(beforeCtx)}\n" +
+                            i"clashes with ${cl.symbol.showLocated(beforeCtx)} of type ${cl.symbol.info(beforeCtx)}\n" +
+                            i"both have same type after erasure: ${bridge.symbol.info}")
+                        case None => minimalSet += bridge
+                      }
                     }
                   }
+
+                  val bridgeImplementations = minimalSet.map {
+                    sym => makeBridgeDef(member, sym)(ctx)
+                  }
+                  emittedBridges ++= bridgeImplementations
+                } catch {
+                  case ex: MergeError => ctx.error(ex.getMessage, member.pos)
                 }
 
-                val bridgeImplementations = minimalSet.map {
-                  sym => makeBridgeDef(member, sym)(ctx)
-                }
-                emittedBridges ++= bridgeImplementations
                 traverse(newTail, oldTail, emittedBridges)
               case notADefDef :: oldTail =>
                 traverse(after, oldTail, emittedBridges)
@@ -611,7 +612,7 @@ object Erasure extends TypeTestsCasts{
       traverse(newStats, oldStats)
     }
 
-    private final val NoBridgeFlags = Flags.Accessor | Flags.Deferred | Flags.Lazy
+    private final val NoBridgeFlags = Flags.Accessor | Flags.Deferred | Flags.Lazy | Flags.ParamAccessor
 
     /** Create a bridge DefDef which overrides a parent method.
      *

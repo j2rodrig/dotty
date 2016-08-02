@@ -175,6 +175,8 @@ object JavaParsers {
 
     /** Consume one token of the specified type, or
       * signal an error if it is not there.
+      *
+      * @return The offset at the start of the token to accept
       */
     def accept(token: Int): Int = {
       val offset = in.offset
@@ -511,7 +513,7 @@ object JavaParsers {
                   atPos(offset) {
                     New(Select(scalaDot(nme.runtime), tpnme.AnnotationDefaultATTR), Nil)
                   }
-                mods1 = mods1 withAnnotations annot :: Nil
+                mods1 = mods1 withAddedAnnotation annot
                 skipTo(SEMI)
                 accept(SEMI)
                 unimplementedExpr

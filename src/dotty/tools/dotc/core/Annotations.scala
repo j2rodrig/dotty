@@ -5,7 +5,6 @@ import Symbols._, Types._, util.Positions._, Contexts._, Constants._, ast.tpd._
 import config.ScalaVersion
 import StdNames._
 import dotty.tools.dotc.ast.{tpd, untpd}
-import dotty.tools.dotc.typer.ProtoTypes.FunProtoTyped
 
 object Annotations {
 
@@ -46,6 +45,9 @@ object Annotations {
   object Annotation {
 
     def apply(tree: Tree) = ConcreteAnnotation(tree)
+
+    def apply(cls: ClassSymbol)(implicit ctx: Context): Annotation =
+      apply(cls, Nil)
 
     def apply(cls: ClassSymbol, arg: Tree)(implicit ctx: Context): Annotation =
       apply(cls, arg :: Nil)
@@ -92,6 +94,9 @@ object Annotations {
     def makeChild(sym: Symbol)(implicit ctx: Context) =
       deferred(defn.ChildAnnot,
         implicit ctx => New(defn.ChildAnnotType.appliedTo(sym.owner.thisType.select(sym.name, sym)), Nil))
+
+    def makeSourceFile(path: String)(implicit ctx: Context) =
+      apply(defn.SourceFileAnnot, Literal(Constant(path)))
   }
 
   def ThrowsAnnotation(cls: ClassSymbol)(implicit ctx: Context) = {

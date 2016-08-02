@@ -15,7 +15,6 @@ import util.{Stats, SimpleMap}
 import util.common._
 import Decorators._
 import Uniques._
-import ErrorReporting.{errorType, DiagnosticString}
 import config.Printers._
 import annotation.tailrec
 import collection.mutable
@@ -47,7 +46,7 @@ object Inferencing {
 
   /** Instantiate selected type variables `tvars` in type `tp` */
   def instantiateSelected(tp: Type, tvars: List[Type])(implicit ctx: Context): Unit =
-    new IsFullyDefinedAccumulator(new ForceDegree.Value(tvars.contains)).process(tp)
+    new IsFullyDefinedAccumulator(new ForceDegree.Value(tvars.contains, minimizeAll = true)).process(tp)
 
   /** The accumulator which forces type variables using the policy encoded in `force`
    *  and returns whether the type is fully defined. The direction in which
@@ -87,6 +86,7 @@ object Inferencing {
           }
           else {
             val minimize =
+              force.minimizeAll ||
               variance >= 0 && !(
                 force == ForceDegree.noBottom &&
                 defn.isBottomType(ctx.typeComparer.approximation(tvar.origin, fromBelow = true)))
@@ -175,8 +175,12 @@ object Inferencing {
 
   /** Recursively widen and also follow type declarations and type aliases. */
   def widenForMatchSelector(tp: Type)(implicit ctx: Context): Type = tp.widen match {
-    case tp: TypeRef if !tp.symbol.isClass => widenForMatchSelector(tp.info.bounds.hi)
-    case tp: AnnotatedType => tp.derivedAnnotatedType(widenForMatchSelector(tp.tpe), tp.annot)
+    case tp: TypeRef if !tp.symbol.isClass =>
+      widenForMatchSelector(tp.superType)
+    case tp: HKApply =>
+      widenForMatchSelector(tp.superType)
+    case tp: AnnotatedType =>
+      tp.derivedAnnotatedType(widenForMatchSelector(tp.tpe), tp.annot)
     case tp => tp
   }
 
@@ -294,9 +298,9 @@ object Inferencing {
 
 /** An enumeration controlling the degree of forcing in "is-dully-defined" checks. */
 @sharable object ForceDegree {
-  class Value(val appliesTo: TypeVar => Boolean)
-  val none = new Value(_ => false)
-  val all = new Value(_ => true)
-  val noBottom = new Value(_ => true)
+  class Value(val appliesTo: TypeVar => Boolean, val minimizeAll: Boolean)
+  val none = new Value(_ => false, minimizeAll = false)
+  val all = new Value(_ => true, minimizeAll = false)
+  val noBottom = new Value(_ => true, minimizeAll = false)
 }
 

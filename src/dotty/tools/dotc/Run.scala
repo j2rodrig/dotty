@@ -2,16 +2,24 @@ package dotty.tools
 package dotc
 
 import core._
-import Contexts._, Periods._, Symbols._, Phases._, Decorators._
+import Contexts._
+import Periods._
+import Symbols._
+import Phases._
+import Decorators._
 import dotty.tools.dotc.transform.TreeTransforms.TreeTransformer
 import io.PlainFile
-import util.{SourceFile, NoSource, Stats, SimpleMap}
+import util._
 import reporting.Reporter
 import transform.TreeChecker
+import rewrite.Rewrites
 import java.io.{BufferedWriter, OutputStreamWriter}
+
+import scala.annotation.tailrec
 import scala.reflect.io.VirtualFile
 import scala.util.control.NonFatal
 
+/** A compiler run. Exports various methods to compile source files */
 class Run(comp: Compiler)(implicit ctx: Context) {
 
   assert(comp.phases.last.last.id <= Periods.MaxPossiblePhaseId)
@@ -33,7 +41,7 @@ class Run(comp: Compiler)(implicit ctx: Context) {
     compileSources(sources)
   } catch {
     case NonFatal(ex) =>
-      ctx.println(i"exception occurred while compiling $units%, %")
+      ctx.echo(i"exception occurred while compiling $units%, %")
       throw ex
   }
 
@@ -54,24 +62,50 @@ class Run(comp: Compiler)(implicit ctx: Context) {
     val phases = ctx.squashPhases(ctx.phasePlan,
       ctx.settings.Yskip.value, ctx.settings.YstopBefore.value, ctx.settings.YstopAfter.value, ctx.settings.Ycheck.value)
     ctx.usePhases(phases)
+    var lastPrintedTree: PrintedTree = NoPrintedTree
     for (phase <- ctx.allPhases)
       if (!ctx.reporter.hasErrors) {
-        if (ctx.settings.verbose.value) ctx.println(s"[$phase]")
+        val start = System.currentTimeMillis
         units = phase.runOn(units)
-        def foreachUnit(op: Context => Unit)(implicit ctx: Context): Unit =
-          for (unit <- units) op(ctx.fresh.setPhase(phase.next).setCompilationUnit(unit))
-        if (ctx.settings.Xprint.value.containsPhase(phase))
-          foreachUnit(printTree)
+        if (ctx.settings.Xprint.value.containsPhase(phase)) {
+          for (unit <- units) {
+            lastPrintedTree =
+              printTree(lastPrintedTree)(ctx.fresh.setPhase(phase.next).setCompilationUnit(unit))
+          }
+        }
+        ctx.informTime(s"$phase ", start)
       }
+    if (!ctx.reporter.hasErrors) Rewrites.writeBack()
   }
 
-  private def printTree(ctx: Context) = {
+  private sealed trait PrintedTree
+  private final case class SomePrintedTree(phase: String, tree: String) extends PrintedTree
+  private object NoPrintedTree extends PrintedTree
+
+  private def printTree(last: PrintedTree)(implicit ctx: Context): PrintedTree = {
     val unit = ctx.compilationUnit
     val prevPhase = ctx.phase.prev // can be a mini-phase
     val squashedPhase = ctx.squashed(prevPhase)
+    val treeString = unit.tpdTree.show
 
-    ctx.println(s"result of $unit after ${squashedPhase}:")
-    ctx.println(unit.tpdTree.show(ctx))
+    ctx.echo(s"result of $unit after $squashedPhase:")
+
+    last match {
+      case SomePrintedTree(phase, lastTreeSting) if lastTreeSting != treeString =>
+        val msg =
+          if (!ctx.settings.XprintDiff.value && !ctx.settings.XprintDiffDel.value) treeString
+          else DiffUtil.mkColoredCodeDiff(treeString, lastTreeSting, ctx.settings.XprintDiffDel.value)
+        ctx.echo(msg)
+        SomePrintedTree(squashedPhase.toString, treeString)
+
+      case SomePrintedTree(phase, lastTreeSting) =>
+        ctx.echo("  Unchanged since " + phase)
+        last
+
+      case NoPrintedTree =>
+        ctx.echo(treeString)
+        SomePrintedTree(squashedPhase.toString, treeString)
+    }
   }
 
   def compile(sourceCode: String): Unit = {
@@ -81,6 +115,9 @@ class Run(comp: Compiler)(implicit ctx: Context) {
     writer.close()
     compileSources(List(new SourceFile(virtualFile)))
   }
+
+  /** The context created for this run */
+  def runContext = ctx
 
   /** Print summary; return # of errors encountered */
   def printSummary(): Reporter = {

@@ -1,7 +1,8 @@
 package dotty.tools.dotc
 package transform
 
-import dotty.tools.dotc.typer.Mode
+import dotty.tools.dotc.core.Annotations.Annotation
+import dotty.tools.dotc.core.Phases.NeedsCompanions
 
 import scala.collection.mutable
 import core._
@@ -10,6 +11,8 @@ import Symbols._
 import Decorators._
 import NameOps._
 import StdNames.nme
+import rewrite.Rewrites.patch
+import util.Positions.Position
 import dotty.tools.dotc.transform.TreeTransforms.{TransformerInfo, TreeTransformer, MiniPhaseTransform}
 import dotty.tools.dotc.ast.Trees._
 import dotty.tools.dotc.ast.{untpd, tpd}
@@ -58,19 +61,20 @@ class LazyVals extends MiniPhaseTransform with IdentityDenotTransformer {
     val sym = tree.symbol
     if (!(sym is Flags.Lazy) || sym.owner.is(Flags.Trait) || (sym.isStatic && sym.is(Flags.Module))) tree
     else {
-
       val isField = sym.owner.isClass
-
       if (isField) {
         if (sym.isVolatile ||
-          (sym.is(Flags.Module) && !sym.is(Flags.Synthetic)))
-          // module class is user-defined.
-          // Should be threadsafe, to mimic safety guaranteed by global object
+           (sym.is(Flags.Module)/* || ctx.scala2Mode*/) &&
+            // TODO assume @volatile once LazyVals uses static helper constructs instead of
+            // ones in the companion object.
+           !sym.is(Flags.Synthetic))
+            // module class is user-defined.
+            // Should be threadsafe, to mimic safety guaranteed by global object
           transformMemberDefVolatile(tree)
-        else if (sym.is(Flags.Module)) { // synthetic module
+        else if (sym.is(Flags.Module)) // synthetic module
           transformSyntheticModule(tree)
-        }
-        else transformMemberDefNonVolatile(tree)
+        else
+          transformMemberDefNonVolatile(tree)
       }
       else transformLocalDef(tree)
     }
@@ -85,6 +89,7 @@ class LazyVals extends MiniPhaseTransform with IdentityDenotTransformer {
     appendOffsetDefs.get(cls) match {
       case None => template
       case Some(data) =>
+        data.defs.foreach(_.symbol.addAnnotation(Annotation(defn.ScalaStaticAnnot)))
         cpy.Template(template)(body = addInFront(data.defs, template.body))
     }
 
@@ -331,26 +336,29 @@ class LazyVals extends MiniPhaseTransform with IdentityDenotTransformer {
         val tpe = x.tpe.widen.resultType.widen
         val claz = x.symbol.owner.asClass
         val thizClass = Literal(Constant(claz.info))
-        val companion = claz.companionModule
         val helperModule = ctx.requiredModule("dotty.runtime.LazyVals")
         val getOffset = Select(ref(helperModule), lazyNme.RLazyVals.getOffset)
         var offsetSymbol: TermSymbol = null
         var flag: Tree = EmptyTree
         var ord = 0
 
+        def offsetName(id: Int) = (StdNames.nme.LAZY_FIELD_OFFSET + (if(x.symbol.owner.is(Flags.Module)) "_m_" else "") + id.toString).toTermName
+
         // compute or create appropriate offsetSymol, bitmap and bits used by current ValDef
-        appendOffsetDefs.get(companion.moduleClass) match {
+        appendOffsetDefs.get(claz) match {
           case Some(info) =>
             val flagsPerLong = (64 / dotty.runtime.LazyVals.BITS_PER_LAZY_VAL).toInt
             info.ord += 1
             ord = info.ord % flagsPerLong
             val id = info.ord / flagsPerLong
+            val offsetById = offsetName(id)
             if (ord != 0) { // there are unused bits in already existing flag
-              offsetSymbol = companion.moduleClass.info.decl((StdNames.nme.LAZY_FIELD_OFFSET + id.toString).toTermName)
+              offsetSymbol = claz.info.decl(offsetById)
                 .suchThat(sym => (sym is Flags.Synthetic) && sym.isTerm)
                  .symbol.asTerm
             } else { // need to create a new flag
-              offsetSymbol = ctx.newSymbol(companion.moduleClass, (StdNames.nme.LAZY_FIELD_OFFSET + id.toString).toTermName, Flags.Synthetic, defn.LongType).enteredAfter(this)
+              offsetSymbol = ctx.newSymbol(claz, offsetById, Flags.Synthetic, defn.LongType).enteredAfter(this)
+              offsetSymbol.addAnnotation(Annotation(defn.ScalaStaticAnnot))
               val flagName = (StdNames.nme.BITMAP_PREFIX + id.toString).toTermName
               val flagSymbol = ctx.newSymbol(claz, flagName, containerFlags, defn.LongType).enteredAfter(this)
               flag = ValDef(flagSymbol, Literal(Constants.Constant(0L)))
@@ -359,19 +367,21 @@ class LazyVals extends MiniPhaseTransform with IdentityDenotTransformer {
             }
 
           case None =>
-            offsetSymbol = ctx.newSymbol(companion.moduleClass, (StdNames.nme.LAZY_FIELD_OFFSET + "0").toTermName, Flags.Synthetic, defn.LongType).enteredAfter(this)
+            offsetSymbol = ctx.newSymbol(claz, offsetName(0), Flags.Synthetic, defn.LongType).enteredAfter(this)
+            offsetSymbol.addAnnotation(Annotation(defn.ScalaStaticAnnot))
             val flagName = (StdNames.nme.BITMAP_PREFIX + "0").toTermName
             val flagSymbol = ctx.newSymbol(claz, flagName, containerFlags, defn.LongType).enteredAfter(this)
             flag = ValDef(flagSymbol, Literal(Constants.Constant(0L)))
             val offsetTree = ValDef(offsetSymbol, getOffset.appliedTo(thizClass, Literal(Constant(flagName.toString))))
-            appendOffsetDefs += (companion.moduleClass -> new OffsetInfo(List(offsetTree), ord))
+            appendOffsetDefs += (claz -> new OffsetInfo(List(offsetTree), ord))
         }
 
         val containerName = ctx.freshName(x.name.asTermName.lazyLocalName).toTermName
         val containerSymbol = ctx.newSymbol(claz, containerName, (x.mods &~ containerFlagsMask | containerFlags).flags, tpe, coord = x.symbol.coord).enteredAfter(this)
+
         val containerTree = ValDef(containerSymbol, defaultValue(tpe))
 
-        val offset =  ref(companion).ensureApplied.select(offsetSymbol)
+        val offset =  ref(offsetSymbol)
         val getFlag = Select(ref(helperModule), lazyNme.RLazyVals.get)
         val setFlag = Select(ref(helperModule), lazyNme.RLazyVals.setFlag)
         val wait =    Select(ref(helperModule), lazyNme.RLazyVals.wait4Notification)

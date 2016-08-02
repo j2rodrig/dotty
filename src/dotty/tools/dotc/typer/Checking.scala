@@ -34,30 +34,69 @@ object Checking {
   import tpd._
 
   /** A general checkBounds method that can be used for TypeApply nodes as
-   *  well as for AppliedTypeTree nodes.
+   *  well as for AppliedTypeTree nodes. Also checks that type arguments to
+   *  *-type parameters are fully applied.
    */
-  def checkBounds(args: List[tpd.Tree], boundss: List[TypeBounds], instantiate: (Type, List[Type]) => Type)(implicit ctx: Context) =
+  def checkBounds(args: List[tpd.Tree], boundss: List[TypeBounds], instantiate: (Type, List[Type]) => Type)(implicit ctx: Context) = {
+    (args, boundss).zipped.foreach { (arg, bound) =>
+      if (!bound.isHK && arg.tpe.isHK)
+        ctx.error(d"missing type parameter(s) for $arg", arg.pos)
+    }
     for ((arg, which, bound) <- ctx.boundsViolations(args, boundss, instantiate))
       ctx.error(
           d"Type argument ${arg.tpe} does not conform to $which bound $bound ${err.whyNoMatchStr(arg.tpe, bound)}",
           arg.pos)
+  }
 
   /** Check that type arguments `args` conform to corresponding bounds in `poly`
    *  Note: This does not check the bounds of AppliedTypeTrees. These
    *  are handled by method checkBounds in FirstTransform
    */
-  def checkBounds(args: List[tpd.Tree], poly: PolyType)(implicit ctx: Context): Unit =
+  def checkBounds(args: List[tpd.Tree], poly: GenericType)(implicit ctx: Context): Unit =
     checkBounds(args, poly.paramBounds, _.substParams(poly, _))
 
-  /** Check all AppliedTypeTree nodes in this tree for legal bounds */
+  /** If type is a higher-kinded application with wildcard arguments,
+   *  check that it or one of its supertypes can be reduced to a normal application.
+   *  Unreducible applications correspond to general existentials, and we
+   *  cannot handle those.
+   */
+  def checkWildcardHKApply(tp: Type, pos: Position)(implicit ctx: Context): Unit = tp match {
+    case tp @ HKApply(tycon, args) if args.exists(_.isInstanceOf[TypeBounds]) =>
+      tycon match {
+        case tycon: TypeLambda =>
+          ctx.errorOrMigrationWarning(
+            d"unreducible application of higher-kinded type $tycon to wildcard arguments",
+            pos)
+        case _ =>
+          checkWildcardHKApply(tp.superType, pos)
+      }
+    case _ =>
+  }
+
+  /** Traverse type tree, performing the following checks:
+   *  1. All arguments of applied type trees must conform to their bounds.
+   *  2. Prefixes of type selections and singleton types must be realizable.
+   */
   val typeChecker = new TreeTraverser {
     def traverse(tree: Tree)(implicit ctx: Context) = {
       tree match {
         case AppliedTypeTree(tycon, args) =>
-          val tparams = tycon.tpe.typeSymbol.typeParams
-          val bounds = tparams.map(tparam =>
-            tparam.info.asSeenFrom(tycon.tpe.normalizedPrefix, tparam.owner.owner).bounds)
-          checkBounds(args, bounds, _.substDealias(tparams, _))
+          // If `args` is a list of named arguments, return corresponding type parameters,
+          // otherwise return type parameters unchanged
+          val tparams = tycon.tpe.typeParams
+          def argNamed(tparam: TypeParamInfo) = args.find {
+            case NamedArg(name, _) => name == tparam.paramName
+            case _ => false
+          }.getOrElse(TypeTree(tparam.paramRef))
+          val orderedArgs = if (hasNamedArg(args)) tparams.map(argNamed) else args
+          val bounds = tparams.map(_.paramBoundsAsSeenFrom(tycon.tpe))
+          def instantiate(bound: Type, args: List[Type]) =
+            bound.LambdaAbstract(tparams).appliedTo(args)
+          checkBounds(orderedArgs, bounds, instantiate)
+
+          def checkValidIfHKApply(implicit ctx: Context): Unit =
+            checkWildcardHKApply(tycon.tpe.appliedTo(args.map(_.tpe)), tree.pos)
+          checkValidIfHKApply(ctx.addMode(Mode.AllowLambdaWildcardApply))
         case Select(qual, name) if name.isTypeName =>
           checkRealizable(qual.tpe, qual.pos)
         case SelectFromTypeTree(qual, name) if name.isTypeName =>
@@ -146,16 +185,28 @@ object Checking {
         tp
     }
 
-    def apply(tp: Type) = tp match {
+    private def apply(tp: Type, cycleOK: Boolean, nestedCycleOK: Boolean): Type = {
+      val savedCycleOK = this.cycleOK
+      val savedNestedCycleOK = this.nestedCycleOK
+      this.cycleOK = cycleOK
+      this.nestedCycleOK = nestedCycleOK
+      try apply(tp)
+      finally {
+        this.cycleOK = savedCycleOK
+        this.nestedCycleOK = savedNestedCycleOK
+      }
+    }
+
+    def apply(tp: Type): Type = tp match {
       case tp: TermRef =>
         this(tp.info)
         mapOver(tp)
-      case tp @ RefinedType(parent, name) =>
-        val parent1 = this(parent)
-        val saved = cycleOK
-        cycleOK = nestedCycleOK
-        try tp.derivedRefinedType(parent1, name, this(tp.refinedInfo))
-        finally cycleOK = saved
+      case tp @ RefinedType(parent, name, rinfo) =>
+        tp.derivedRefinedType(this(parent), name, this(rinfo, nestedCycleOK, nestedCycleOK))
+      case tp: RecType =>
+        tp.rebind(this(tp.parent))
+      case tp @ HKApply(tycon, args) =>
+        tp.derivedAppliedType(this(tycon), args.map(this(_, nestedCycleOK, nestedCycleOK)))
       case tp @ TypeRef(pre, name) =>
         try {
           // A prefix is interesting if it might contain (transitively) a reference
@@ -169,22 +220,15 @@ object Checking {
             case SuperType(thistp, _) => isInteresting(thistp)
             case AndType(tp1, tp2) => isInteresting(tp1) || isInteresting(tp2)
             case OrType(tp1, tp2) => isInteresting(tp1) && isInteresting(tp2)
-            case _: RefinedType => true
+            case _: RefinedOrRecType | _: HKApply => true
             case _ => false
           }
-          // If prefix is interesting, check info of typeref recursively, marking the referred symbol
-          // with NoCompleter. This provokes a CyclicReference when the symbol
-          // is hit again. Without this precaution we could stackoverflow here.
           if (isInteresting(pre)) {
-            val info = tp.info
-            val sym = tp.symbol
-            if (sym.infoOrCompleter == SymDenotations.NoCompleter) throw CyclicReference(sym)
-            val symInfo = sym.info
-            if (sym.exists) sym.info = SymDenotations.NoCompleter
-            try checkInfo(info)
-            finally if (sym.exists) sym.info = symInfo
+            val pre1 = this(pre, false, false)
+            checkInfo(tp.info)
+            if (pre1 eq pre) tp else tp.newLikeThis(pre1)
           }
-          tp
+          else tp
         } catch {
           case ex: CyclicReference =>
             ctx.debuglog(i"cycle detected for $tp, $nestedCycleOK, $cycleOK")
@@ -200,9 +244,6 @@ object Checking {
    *  @pre     sym is not yet initialized (i.e. its type is a Completer).
    *  @return  `info` where every legal F-bounded reference is proctected
    *                  by a `LazyRef`, or `ErrorType` if a cycle was detected and reported.
-   *                  Furthermore: Add an #Apply to a fully instantiated type lambda, if none was
-   *                  given before. This is necessary here because sometimes type lambdas are not
-   *                  recognized when they are first formed.
    */
   def checkNonCyclic(sym: Symbol, info: Type, reportErrors: Boolean)(implicit ctx: Context): Type = {
     val checker = new CheckNonCyclicMap(sym, reportErrors)(ctx.addMode(Mode.CheckCyclic))
@@ -312,6 +353,59 @@ object Checking {
     checkNoConflict(Private, Protected)
     checkNoConflict(Abstract, Override)
   }
+
+  /** Check the type signature of the symbol `M` defined by `tree` does not refer
+   *  to a private type or value which is invisible at a point where `M` is still
+   *  visible. As an exception, we allow references to type aliases if the underlying
+   *  type of the alias is not a leak. So type aliases are transparent as far as
+   *  leak testing is concerned.
+   *  @return The `info` of `sym`, with problematic aliases expanded away.
+   *  See i997.scala for tests, i1130.scala for a case where it matters that we
+   *  transform leaky aliases away.
+   */
+  def checkNoPrivateLeaks(sym: Symbol, pos: Position)(implicit ctx: Context): Type = {
+    class NotPrivate extends TypeMap {
+      type Errors = List[(String, Position)]
+      var errors: Errors = Nil
+      def accessBoundary(sym: Symbol): Symbol =
+        if (sym.is(Private)) sym.owner
+        else if (sym.privateWithin.exists) sym.privateWithin
+        else if (sym.is(Package)) sym
+        else accessBoundary(sym.owner)
+      def apply(tp: Type): Type = tp match {
+        case tp: NamedType =>
+          val prevErrors = errors
+          var tp1 =
+            if (tp.symbol.is(Private) &&
+                !accessBoundary(sym).isContainedIn(tp.symbol.owner)) {
+              errors = (d"non-private $sym refers to private ${tp.symbol}\n in its type signature ${sym.info}",
+                        pos) :: errors
+              tp
+            }
+            else mapOver(tp)
+          if ((errors ne prevErrors) && tp.info.isAlias) {
+            // try to dealias to avoid a leak error
+            val savedErrors = errors
+            errors = prevErrors
+            val tp2 = apply(tp.superType)
+            if (errors eq prevErrors) tp1 = tp2
+            else errors = savedErrors
+          }
+          tp1
+        case tp: ClassInfo =>
+          tp.derivedClassInfo(
+            prefix = apply(tp.prefix),
+            classParents = tp.parentsWithArgs.map(p =>
+              apply(p).underlyingClassRef(refinementOK = false).asInstanceOf[TypeRef]))
+        case _ =>
+          mapOver(tp)
+      }
+    }
+    val notPrivate = new NotPrivate
+    val info = notPrivate(sym.info)
+    notPrivate.errors.foreach { case (msg, pos) => ctx.errorOrMigrationWarning(msg, pos) }
+    info
+  }
 }
 
 trait Checking {
@@ -344,16 +438,17 @@ trait Checking {
       ctx.error(i"$tp cannot be instantiated since it${rstatus.msg}", pos)
   }
 
- /**  Check that `tp` is a class type with a stable prefix. Also, if `traitReq` is
-   *  true check that `tp` is a trait.
-   *  Stability checking is disabled in phases after RefChecks.
+ /**  Check that `tp` is a class type.
+  *   Also, if `traitReq` is true, check that `tp` is a trait.
+  *   Also, if `stablePrefixReq` is true and phase is not after RefChecks,
+  *   check that class prefix is stable.
    *  @return  `tp` itself if it is a class or trait ref, ObjectType if not.
    */
-  def checkClassTypeWithStablePrefix(tp: Type, pos: Position, traitReq: Boolean)(implicit ctx: Context): Type =
+  def checkClassType(tp: Type, pos: Position, traitReq: Boolean, stablePrefixReq: Boolean)(implicit ctx: Context): Type =
     tp.underlyingClassRef(refinementOK = false) match {
       case tref: TypeRef =>
-        if (ctx.phase <= ctx.refchecksPhase) checkStable(tref.prefix, pos)
         if (traitReq && !(tref.symbol is Trait)) ctx.error(d"$tref is not a trait", pos)
+        if (stablePrefixReq && ctx.phase <= ctx.refchecksPhase) checkStable(tref.prefix, pos)
         tp
       case _ =>
         ctx.error(d"$tp is not a class type", pos)
@@ -371,12 +466,14 @@ trait Checking {
   }
 
   /** Check that any top-level type arguments in this type are feasible, i.e. that
-   *  their lower bound conforms to their upper cound. If a type argument is
+   *  their lower bound conforms to their upper bound. If a type argument is
    *  infeasible, issue and error and continue with upper bound.
    */
   def checkFeasible(tp: Type, pos: Position, where: => String = "")(implicit ctx: Context): Type = tp match {
     case tp: RefinedType =>
       tp.derivedRefinedType(tp.parent, tp.refinedName, checkFeasible(tp.refinedInfo, pos, where))
+    case tp: RecType =>
+      tp.rebind(tp.parent)
     case tp @ TypeBounds(lo, hi) if !(lo <:< hi) =>
       ctx.error(d"no type exists between low bound $lo and high bound $hi$where", pos)
       TypeAlias(hi)
@@ -438,17 +535,6 @@ trait Checking {
       errorTree(tpt, d"missing type parameter for ${tpt.tpe}")
     }
     else tpt
-
-  def checkLowerNotHK(sym: Symbol, tparams: List[Symbol], pos: Position)(implicit ctx: Context) =
-    if (tparams.nonEmpty)
-      sym.info match {
-        case info: TypeAlias => // ok
-        case TypeBounds(lo, _) =>
-          for (tparam <- tparams)
-            if (tparam.typeRef.occursIn(lo))
-              ctx.error(i"type parameter ${tparam.name} may not occur in lower bound $lo", pos)
-        case _ =>
-      }
 }
 
 trait NoChecking extends Checking {
@@ -456,11 +542,10 @@ trait NoChecking extends Checking {
   override def checkNonCyclic(sym: Symbol, info: TypeBounds, reportErrors: Boolean)(implicit ctx: Context): Type = info
   override def checkValue(tree: Tree, proto: Type)(implicit ctx: Context): tree.type = tree
   override def checkStable(tp: Type, pos: Position)(implicit ctx: Context): Unit = ()
-  override def checkClassTypeWithStablePrefix(tp: Type, pos: Position, traitReq: Boolean)(implicit ctx: Context): Type = tp
+  override def checkClassType(tp: Type, pos: Position, traitReq: Boolean, stablePrefixReq: Boolean)(implicit ctx: Context): Type = tp
   override def checkImplicitParamsNotSingletons(vparamss: List[List[ValDef]])(implicit ctx: Context): Unit = ()
   override def checkFeasible(tp: Type, pos: Position, where: => String = "")(implicit ctx: Context): Type = tp
   override def checkNoDoubleDefs(cls: Symbol)(implicit ctx: Context): Unit = ()
   override def checkParentCall(call: Tree, caller: ClassSymbol)(implicit ctx: Context) = ()
   override def checkSimpleKinded(tpt: Tree)(implicit ctx: Context): Tree = tpt
-  override def checkLowerNotHK(sym: Symbol, tparams: List[Symbol], pos: Position)(implicit ctx: Context) = ()
 }

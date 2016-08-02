@@ -98,8 +98,12 @@ class Mixin extends MiniPhaseTransform with SymTransformer { thisTransform =>
   override def runsAfter: Set[Class[_ <: Phase]] = Set(classOf[Erasure])
 
   override def transformSym(sym: SymDenotation)(implicit ctx: Context): SymDenotation =
-    if (sym.is(Accessor, butNot = Deferred | Lazy) && sym.owner.is(Trait))
-      sym.copySymDenotation(initFlags = sym.flags &~ ParamAccessor | Deferred).ensureNotPrivate
+    if (sym.is(Accessor, butNot = Deferred) && sym.owner.is(Trait)) {
+      val sym1 =
+        if (sym is Lazy) sym
+        else sym.copySymDenotation(initFlags = sym.flags &~ ParamAccessor | Deferred)
+      sym1.ensureNotPrivate
+    }
     else if (sym.isConstructor && sym.owner.is(Trait))
       sym.copySymDenotation(
         name = nme.TRAIT_CONSTRUCTOR,
@@ -108,17 +112,19 @@ class Mixin extends MiniPhaseTransform with SymTransformer { thisTransform =>
       sym
 
   private def initializer(sym: Symbol)(implicit ctx: Context): TermSymbol = {
-    val initName = if(!sym.is(Lazy)) InitializerName(sym.name.asTermName) else sym.name.asTermName
-    sym.owner.info.decl(initName).suchThat(_.is(Lazy) == sym.is(Lazy)).symbol
-      .orElse(
-        ctx.newSymbol(
-          sym.owner,
-          initName,
-          Protected | Synthetic | Method,
-          sym.info,
-          coord = sym.symbol.coord).enteredAfter(thisTransform))
-       .asTerm
-  }
+    if (sym is Lazy) sym
+    else {
+      val initName = InitializerName(sym.name.asTermName)
+      sym.owner.info.decl(initName).symbol
+        .orElse(
+          ctx.newSymbol(
+            sym.owner,
+            initName,
+            Protected | Synthetic | Method,
+            sym.info,
+            coord = sym.symbol.coord).enteredAfter(thisTransform))
+    }
+  }.asTerm
 
   override def transformTemplate(impl: Template)(implicit ctx: Context, info: TransformerInfo) = {
     val cls = impl.symbol.owner.asClass
@@ -134,8 +140,8 @@ class Mixin extends MiniPhaseTransform with SymTransformer { thisTransform =>
           val vsym = stat.symbol
           val isym = initializer(vsym)
           val rhs = Block(
-            initBuf.toList.map(_.changeOwner(impl.symbol, isym)),
-            stat.rhs.changeOwner(vsym, isym).wildcardToDefault)
+            initBuf.toList.map(_.changeOwnerAfter(impl.symbol, isym, thisTransform)),
+            stat.rhs.changeOwnerAfter(vsym, isym, thisTransform).wildcardToDefault)
           initBuf.clear()
           cpy.DefDef(stat)(rhs = EmptyTree) :: DefDef(isym, rhs) :: Nil
         case stat: DefDef if stat.symbol.isSetter =>
@@ -176,8 +182,8 @@ class Mixin extends MiniPhaseTransform with SymTransformer { thisTransform =>
         }
     }
 
-    def wasDeferred(sym: Symbol) =
-      ctx.atPhase(thisTransform) { implicit ctx => sym is Deferred }
+    def was(sym: Symbol, flags: FlagSet) =
+      ctx.atPhase(thisTransform) { implicit ctx => sym is flags }
 
     def traitInits(mixin: ClassSymbol): List[Tree] = {
       var argNum = 0
@@ -196,7 +202,7 @@ class Mixin extends MiniPhaseTransform with SymTransformer { thisTransform =>
           EmptyTree
       }
 
-      for (getter <- mixin.info.decls.filter(getr => getr.isGetter && !wasDeferred(getr)).toList) yield {
+      for (getter <- mixin.info.decls.toList if getter.isGetter && !was(getter, Deferred)) yield {
         val isScala2x = mixin.is(Scala2x)
         def default = Underscore(getter.info.resultType)
         def initial = transformFollowing(superRef(initializer(getter)).appliedToNone)
@@ -214,23 +220,23 @@ class Mixin extends MiniPhaseTransform with SymTransformer { thisTransform =>
 
         if (isCurrent(getter) || getter.is(ExpandedName)) {
           val rhs =
-            if (ctx.atPhase(thisTransform)(implicit ctx => getter.is(ParamAccessor))) nextArgument()
+            if (was(getter, ParamAccessor)) nextArgument()
             else if (isScala2x)
               if (getter.is(Lazy, butNot = Module)) lazyGetterCall
               else if (getter.is(Module))
                 New(getter.info.resultType, List(This(cls)))
               else Underscore(getter.info.resultType)
-            else transformFollowing(superRef(initializer(getter)).appliedToNone)
+            else initial
           // transformFollowing call is needed to make memoize & lazy vals run
           transformFollowing(DefDef(implementation(getter.asTerm), rhs))
         }
-        else if (isScala2x) EmptyTree
+        else if (isScala2x || was(getter, ParamAccessor)) EmptyTree
         else initial
       }
     }
 
     def setters(mixin: ClassSymbol): List[Tree] =
-      for (setter <- mixin.info.decls.filter(setr => setr.isSetter && !wasDeferred(setr)).toList)
+      for (setter <- mixin.info.decls.filter(setr => setr.isSetter && !was(setr, Deferred)).toList)
         yield transformFollowing(DefDef(implementation(setter.asTerm), unitLiteral.withPos(cls.pos)))
 
     cpy.Template(impl)(

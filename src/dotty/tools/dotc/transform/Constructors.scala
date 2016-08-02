@@ -26,7 +26,7 @@ import collection.mutable
  *   - also moves private fields that are accessed only from constructor
  *     into the constructor if possible.
  */
-class Constructors extends MiniPhaseTransform with SymTransformer { thisTransform =>
+class Constructors extends MiniPhaseTransform with IdentityDenotTransformer { thisTransform =>
   import tpd._
 
   override def phaseName: String = "constructors"
@@ -91,24 +91,12 @@ class Constructors extends MiniPhaseTransform with SymTransformer { thisTransfor
    */
   override def checkPostCondition(tree: tpd.Tree)(implicit ctx: Context): Unit = {
     tree match {
-      case tree: ValDef if tree.symbol.exists && tree.symbol.owner.isClass && !tree.symbol.is(Lazy) =>
+      case tree: ValDef if tree.symbol.exists && tree.symbol.owner.isClass && !tree.symbol.is(Lazy) && !tree.symbol.hasAnnotation(defn.ScalaStaticAnnot) =>
         assert(tree.rhs.isEmpty, i"$tree: initializer should be moved to constructors")
       case tree: DefDef if !tree.symbol.is(LazyOrDeferred) =>
         assert(!tree.rhs.isEmpty, i"unimplemented: $tree")
       case _ =>
     }
-  }
-
-  /** Symbols that are owned by either <local dummy> or a class field move into the
-   *  primary constructor.
-   */
-  override def transformSym(sym: SymDenotation)(implicit ctx: Context): SymDenotation = {
-    def ownerBecomesConstructor(owner: Symbol): Boolean =
-      (owner.isLocalDummy || owner.isTerm && !owner.is(MethodOrLazy)) &&
-      owner.owner.isClass
-    if (ownerBecomesConstructor(sym.owner))
-      sym.copySymDenotation(owner = sym.owner.enclosingClass.primaryConstructor)
-    else sym
   }
 
   /** @return true  if after ExplicitOuter, all references from this tree go via an
@@ -193,7 +181,7 @@ class Constructors extends MiniPhaseTransform with SymTransformer { thisTransfor
     def splitStats(stats: List[Tree]): Unit = stats match {
       case stat :: stats1 =>
         stat match {
-          case stat @ ValDef(name, tpt, _) if !stat.symbol.is(Lazy) =>
+          case stat @ ValDef(name, tpt, _) if !stat.symbol.is(Lazy) && !stat.symbol.hasAnnotation(defn.ScalaStaticAnnot) =>
             val sym = stat.symbol
             if (isRetained(sym)) {
               if (!stat.rhs.isEmpty && !isWildcardArg(stat.rhs))
@@ -246,7 +234,7 @@ class Constructors extends MiniPhaseTransform with SymTransformer { thisTransfor
 
     // Drop accessors that are not retained from class scope
     if (dropped.nonEmpty) {
-      val clsInfo = cls.classInfo // TODO investigate: expand clsInfo to cls.info => dotty type error
+      val clsInfo = cls.classInfo
       cls.copy(
         info = clsInfo.derivedClassInfo(
           decls = clsInfo.decls.filteredScope(!dropped.contains(_))))

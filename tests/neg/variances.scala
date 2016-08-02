@@ -5,7 +5,7 @@ class Foo[+A: ClassTag](x: A) {
 
   private[this] val elems: Array[A] = Array(x)
 
-  def f[B](x: Array[B] = elems): Array[B] = x // (1) should give a variance error here or ...
+  def f[B](x: Array[B] = elems): Array[B] = x // error (1) should give a variance error here or ...
 
 }
 
@@ -25,7 +25,7 @@ class Outer[+A](x: A) {
 
   def getElem: A = elem
 
-  class Inner(constrParam: A) {  // (2) should give a variance error here or ...
+  class Inner(constrParam: A) {  // error (2) should give a variance error here or ...
     elem = constrParam
   }
 
@@ -41,4 +41,19 @@ object Test2 extends App {
 }
 
 
+trait HasY { type Y }
+
+// These are neg-tests corresponding to the pos-test Variances.scala
+// where all the variance annotations have been inverted.
+trait Foo1[+X] { def bar[Y <: X](y: Y) = y } // error
+trait Foo2[+X] { def bar(x: HasY { type Y <: X })(y: x.Y) = y } // error
+trait Foo3[-X] { def bar[Y >: X](y: Y) = y } // error
+trait Foo4[-X] { def bar(x: HasY { type Y >: X })(y: x.Y) = y } // error
+
+// These are neg-tests corresponding to the pos-test Variances.scala
+// where all the bounds have been flipped.
+trait Foo5[-X] { def bar[Y >: X](y: Y) = y } // error
+trait Foo6[-X] { def bar(x: HasY { type Y >: X })(y: x.Y) = y } // error
+trait Foo7[+X] { def bar[Y <: X](y: Y) = y } // error
+trait Foo8[+X] { def bar(x: HasY { type Y <: X })(y: x.Y) = y } // error
 

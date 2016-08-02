@@ -6,9 +6,12 @@ import core._
 import ast._
 import Scopes._, Contexts._, Constants._, Types._, Symbols._, Names._, Flags._, Decorators._
 import ErrorReporting._, Annotations._, Denotations._, SymDenotations._, StdNames._, TypeErasure._
+import TypeApplications.AppliedType
 import util.Positions._
 import config.Printers._
+import ast.Trees._
 import NameOps._
+import collection.mutable
 
 trait TypeAssigner {
   import tpd._
@@ -69,7 +72,7 @@ trait TypeAssigner {
                 if (tp1.typeSymbol.exists)
                   return tp1
               }
-              val parentType = info.instantiatedParents.reduceLeft(ctx.typeComparer.andType(_, _))
+              val parentType = info.parentsWithArgs.reduceLeft(ctx.typeComparer.andType(_, _))
               def addRefinement(parent: Type, decl: Symbol) = {
                 val inherited =
                   parentType.findMember(decl.name, info.cls.thisType, Private)
@@ -91,27 +94,21 @@ trait TypeAssigner {
             case _ =>
               mapOver(tp)
           }
-        case tp @ RefinedType(parent, name) if variance > 0 =>
-          // The naive approach here would be to first approximate the parent,
-          // but if the base type of the approximated parent is different from
-          // the current base type, then the current refinement won't be valid
-          // if it's a type parameter refinement.
-          // Therefore we first approximate the base type, then use `baseArgInfos`
-          // to get correct refinements for the approximated base type, then
-          // recursively approximate the resulting type.
-          val base = tp.unrefine
-          if (toAvoid(base)) {
-            val base1 = apply(base)
-            apply(base1.appliedTo(tp.baseArgInfos(base1.typeSymbol)))
+        case tp @ AppliedType(tycon, args) if toAvoid(tycon) =>
+          val base = apply(tycon)
+          var args = tp.baseArgInfos(base.typeSymbol)
+          if (base.typeParams.length != args.length)
+            args = base.typeParams.map(_.paramBounds)
+          base.appliedTo(args)
+        case tp @ RefinedType(parent, name, rinfo) if variance > 0 =>
+          val parent1 = apply(tp.parent)
+          val refinedInfo1 = apply(rinfo)
+          if (toAvoid(refinedInfo1)) {
+            typr.println(s"dropping refinement from $tp")
+            if (name.isTypeName) tp.derivedRefinedType(parent1, name, TypeBounds.empty)
+            else parent1
           } else {
-            val parent1 = apply(tp.parent)
-            val refinedInfo1 = apply(tp.refinedInfo)
-            if (toAvoid(refinedInfo1)) {
-              typr.println(s"dropping refinement from $tp")
-              parent1
-            } else {
-              tp.derivedRefinedType(parent1, name, refinedInfo1)
-            }
+            tp.derivedRefinedType(parent1, name, refinedInfo1)
           }
         case tp: TypeVar if ctx.typerState.constraint.contains(tp) =>
           val lo = ctx.typerState.constraint.fullLowerBound(tp.origin)
@@ -150,7 +147,7 @@ trait TypeAssigner {
    *  which are accessible.
    *
    *  Also performs the following normalizations on the type `tpe`.
-   *  (1) parameter accessors are alwys dereferenced.
+   *  (1) parameter accessors are always dereferenced.
    *  (2) if the owner of the denotation is a package object, it is assured
    *      that the package object shows up as the prefix.
    */
@@ -184,8 +181,11 @@ trait TypeAssigner {
             ErrorType
           }
         }
-        else if (d.symbol is TypeParamAccessor) // always dereference type param accessors
-          ensureAccessible(d.info.bounds.hi, superAccess, pos)
+        else if (d.symbol is TypeParamAccessor)
+          if (d.info.isAlias)
+            ensureAccessible(d.info.bounds.hi, superAccess, pos)
+          else // It's a named parameter, use the non-symbolic representation to pick up inherited versions as well
+            d.symbol.owner.thisType.select(d.symbol.name)
         else
           ctx.makePackageObjPrefixExplicit(tpe withDenot d)
       case _ =>
@@ -199,11 +199,16 @@ trait TypeAssigner {
   def selectionType(site: Type, name: Name, pos: Position)(implicit ctx: Context): Type = {
     val mbr = site.member(name)
     if (reallyExists(mbr)) site.select(name, mbr)
-    else {
+    else if (site.derivesFrom(defn.DynamicClass) && !Dynamic.isDynamicMethod(name)) {
+      TryDynamicCallType
+    } else {
       if (!site.isErroneous) {
         ctx.error(
           if (name == nme.CONSTRUCTOR) d"$site does not have a constructor"
-          else d"$name is not a member of $site", pos)
+          else if (site.derivesFrom(defn.DynamicClass)) {
+            d"$name is not a member of $site\n" +
+            "possible cause: maybe a wrong Dynamic method signature?"
+          } else d"$name is not a member of $site", pos)
       }
       ErrorType
     }
@@ -287,7 +292,7 @@ trait TypeAssigner {
       else if (!mix.isEmpty) findMixinSuper(cls.info)
       else if (inConstrCall || ctx.erasedTypes) cls.info.firstParent
       else {
-        val ps = cls.classInfo.instantiatedParents
+        val ps = cls.classInfo.parentsWithArgs
         if (ps.isEmpty) defn.AnyType else ps.reduceLeft((x: Type, y: Type) => x & y)
       }
     tree.withType(SuperType(cls.thisType, owntype))
@@ -307,9 +312,44 @@ trait TypeAssigner {
   def assignType(tree: untpd.TypeApply, fn: Tree, args: List[Tree])(implicit ctx: Context) = {
     val ownType = fn.tpe.widen match {
       case pt: PolyType =>
-        val argTypes = args.tpes
-        if (sameLength(argTypes, pt.paramNames)|| ctx.phase.prev.relaxedTyping) pt.instantiate(argTypes)
-        else errorType(d"wrong number of type parameters for ${fn.tpe}; expected: ${pt.paramNames.length}", tree.pos)
+        val paramNames = pt.paramNames
+        if (hasNamedArg(args)) {
+          val argMap = new mutable.HashMap[Name, Type]
+          for (NamedArg(name, arg) <- args)
+            if (argMap.contains(name))
+              ctx.error("duplicate name", arg.pos)
+            else if (!paramNames.contains(name))
+              ctx.error(s"undefined parameter name, required: ${paramNames.mkString(" or ")}", arg.pos)
+            else
+              argMap(name) = arg.tpe
+          val gapBuf = new mutable.ListBuffer[Int]
+          def nextPoly = {
+            val idx = gapBuf.length
+            gapBuf += idx
+            PolyParam(pt, idx)
+          }
+          val normArgs = paramNames.map(pname => argMap.getOrElse(pname, nextPoly))
+          val transform = new TypeMap {
+            def apply(t: Type) = t match {
+              case PolyParam(`pt`, idx) => normArgs(idx)
+              case _ => mapOver(t)
+            }
+          }
+          val resultType1 = transform(pt.resultType)
+          if (gapBuf.isEmpty) resultType1
+          else {
+            val gaps = gapBuf.toList
+            pt.derivedPolyType(
+              gaps.map(paramNames.filterNot(argMap.contains)),
+              gaps.map(idx => transform(pt.paramBounds(idx)).bounds),
+              resultType1)
+          }
+        }
+        else {
+          val argTypes = args.tpes
+          if (sameLength(argTypes, paramNames)|| ctx.phase.prev.relaxedTyping) pt.instantiate(argTypes)
+          else errorType(d"wrong number of type parameters for ${fn.tpe}; expected: ${pt.paramNames.length}", tree.pos)
+        }
       case _ =>
         errorType(i"${err.exprStr(fn)} does not take type parameters", tree.pos)
     }
@@ -352,14 +392,12 @@ trait TypeAssigner {
     if (cases.isEmpty) tree.withType(expr.tpe)
     else tree.withType(ctx.typeComparer.lub(expr.tpe :: cases.tpes))
 
-  def assignType(tree: untpd.SeqLiteral, elems: List[Tree])(implicit ctx: Context) = tree match {
-    case tree: JavaSeqLiteral =>
-      tree.withType(defn.ArrayOf(ctx.typeComparer.lub(elems.tpes).widen))
-    case _ =>
-      val ownType =
-        if (ctx.erasedTypes) defn.SeqType
-        else defn.SeqType.appliedTo(ctx.typeComparer.lub(elems.tpes).widen)
-      tree.withType(ownType)
+  def assignType(tree: untpd.SeqLiteral, elems: List[Tree], elemtpt: Tree)(implicit ctx: Context) = {
+    val ownType = tree match {
+      case tree: JavaSeqLiteral => defn.ArrayOf(elemtpt.tpe)
+      case _ => if (ctx.erasedTypes) defn.SeqType else defn.SeqType.appliedTo(elemtpt.tpe)
+    }
+    tree.withType(ownType)
   }
 
   def assignType(tree: untpd.SingletonTypeTree, ref: Tree)(implicit ctx: Context) =
@@ -375,11 +413,28 @@ trait TypeAssigner {
 
   def assignType(tree: untpd.AppliedTypeTree, tycon: Tree, args: List[Tree])(implicit ctx: Context) = {
     val tparams = tycon.tpe.typeParams
+    lazy val ntparams = tycon.tpe.namedTypeParams
+    def refineNamed(tycon: Type, arg: Tree) = arg match {
+      case ast.Trees.NamedArg(name, argtpt) =>
+        // Dotty deviation: importing ast.Trees._ and matching on NamedArg gives a cyclic ref error
+        val tparam = tparams.find(_.paramName == name) match {
+          case Some(tparam) => tparam
+          case none => ntparams.find(_.name == name).getOrElse(NoSymbol)
+        }
+        if (tparam.isTypeParam) RefinedType(tycon, name, argtpt.tpe.toBounds(tparam))
+        else errorType(i"$tycon does not have a parameter or abstract type member named $name", arg.pos)
+      case _ =>
+        errorType(s"named and positional type arguments may not be mixed", arg.pos)
+    }
     val ownType =
-      if (sameLength(tparams, args)) tycon.tpe.appliedTo(args.tpes)
+      if (hasNamedArg(args)) (tycon.tpe /: args)(refineNamed)
+      else if (sameLength(tparams, args)) tycon.tpe.appliedTo(args.tpes)
       else errorType(d"wrong number of type arguments for ${tycon.tpe}, should be ${tparams.length}", tree.pos)
     tree.withType(ownType)
   }
+
+  def assignType(tree: untpd.TypeLambdaTree, tparamDefs: List[TypeDef], body: Tree)(implicit ctx: Context) =
+    tree.withType(TypeLambda.fromSymbols(tparamDefs.map(_.symbol), body.tpe))
 
   def assignType(tree: untpd.ByNameTypeTree, result: Tree)(implicit ctx: Context) =
     tree.withType(ExprType(result.tpe))

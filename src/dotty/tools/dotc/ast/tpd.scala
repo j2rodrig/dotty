@@ -10,7 +10,6 @@ import util.Positions._, Types._, Contexts._, Constants._, Names._, Flags._
 import SymDenotations._, Symbols._, StdNames._, Annotations._, Trees._, Symbols._
 import Denotations._, Decorators._, DenotTransformers._
 import config.Printers._
-import typer.Mode
 import collection.mutable
 import typer.ErrorReporting._
 
@@ -22,7 +21,7 @@ object tpd extends Trees.Instance[Type] with TypedTreeInfo {
   private def ta(implicit ctx: Context) = ctx.typeAssigner
 
   def Modifiers(sym: Symbol)(implicit ctx: Context): Modifiers = Modifiers(
-    sym.flags & ModifierFlags,
+    sym.flags & (if (sym.isType) ModifierFlags | VarianceFlags else ModifierFlags),
     if (sym.privateWithin.exists) sym.privateWithin.asType.name else tpnme.EMPTY,
     sym.annotations map (_.tree))
 
@@ -67,7 +66,7 @@ object tpd extends Trees.Instance[Type] with TypedTreeInfo {
   def Typed(expr: Tree, tpt: Tree)(implicit ctx: Context): Typed =
     ta.assignType(untpd.Typed(expr, tpt), tpt)
 
-  def NamedArg(name: Name, arg: Tree)(implicit ctx: Context) =
+  def NamedArg(name: Name, arg: Tree)(implicit ctx: Context): NamedArg =
     ta.assignType(untpd.NamedArg(name, arg), arg)
 
   def Assign(lhs: Tree, rhs: Tree)(implicit ctx: Context): Assign =
@@ -123,14 +122,11 @@ object tpd extends Trees.Instance[Type] with TypedTreeInfo {
   def Try(block: Tree, cases: List[CaseDef], finalizer: Tree)(implicit ctx: Context): Try =
     ta.assignType(untpd.Try(block, cases, finalizer), block, cases)
 
-  def SeqLiteral(elems: List[Tree])(implicit ctx: Context): SeqLiteral =
-    ta.assignType(untpd.SeqLiteral(elems), elems)
+  def SeqLiteral(elems: List[Tree], elemtpt: Tree)(implicit ctx: Context): SeqLiteral =
+    ta.assignType(untpd.SeqLiteral(elems, elemtpt), elems, elemtpt)
 
-  def SeqLiteral(tpe: Type, elems: List[Tree])(implicit ctx: Context): SeqLiteral =
-    if (tpe derivesFrom defn.SeqClass) SeqLiteral(elems) else JavaSeqLiteral(elems)
-
-  def JavaSeqLiteral(elems: List[Tree])(implicit ctx: Context): SeqLiteral =
-    ta.assignType(new untpd.JavaSeqLiteral(elems), elems)
+  def JavaSeqLiteral(elems: List[Tree], elemtpt: Tree)(implicit ctx: Context): JavaSeqLiteral =
+    ta.assignType(new untpd.JavaSeqLiteral(elems, elemtpt), elems, elemtpt).asInstanceOf[JavaSeqLiteral]
 
   def TypeTree(original: Tree)(implicit ctx: Context): TypeTree =
     TypeTree(original.tpe, original)
@@ -320,7 +316,7 @@ object tpd extends Trees.Instance[Type] with TypedTreeInfo {
       case _ =>
         false
     }
-    try test || tp.symbol.is(JavaStatic)
+    try test || tp.symbol.is(JavaStatic) || tp.symbol.hasAnnotation(defn.ScalaStaticAnnot)
     catch { // See remark in SymDenotations#accessWithin
       case ex: NotDefinedHere => test(ctx.addMode(Mode.FutureDefsOK))
     }
@@ -337,6 +333,8 @@ object tpd extends Trees.Instance[Type] with TypedTreeInfo {
     else if (prefixIsElidable(tp)) Ident(tp)
     else if (tp.symbol.is(Module) && ctx.owner.isContainedIn(tp.symbol.moduleClass))
       followOuterLinks(This(tp.symbol.moduleClass.asClass))
+    else if (tp.symbol hasAnnotation defn.ScalaStaticAnnot)
+      Ident(tp)
     else tp.prefix match {
       case pre: SingletonType => followOuterLinks(singleton(pre)).select(tp)
       case pre => SelectFromTypeTree(TypeTree(pre), tp)
@@ -364,18 +362,16 @@ object tpd extends Trees.Instance[Type] with TypedTreeInfo {
    *  kind for the given element type in `typeArg`. No type arguments or
    *  `length` arguments are given.
    */
-  def newArray(typeArg: Tree, pos: Position)(implicit ctx: Context): Tree = {
-    val elemType = typeArg.tpe
-    val elemClass = elemType.classSymbol
-    def newArr(kind: String) =
-      ref(defn.DottyArraysModule).select(s"new${kind}Array".toTermName).withPos(pos)
-    if (TypeErasure.isUnboundedGeneric(elemType))
-      newArr("Generic").appliedToTypeTrees(typeArg :: Nil)
-    else if (elemClass.isPrimitiveValueClass)
-      newArr(elemClass.name.toString)
-    else
-      newArr("Ref").appliedToTypeTrees(
-        TypeTree(defn.ArrayOf(elemType)).withPos(typeArg.pos) :: Nil)
+  def newArray(elemTpe: Type, returnTpe: Type, pos: Position, dims: JavaSeqLiteral)(implicit ctx: Context): Tree = {
+    val elemClass = elemTpe.classSymbol
+    def newArr =
+      ref(defn.DottyArraysModule).select(defn.newArrayMethod).withPos(pos)
+
+    if (!ctx.erasedTypes) {
+      assert(!TypeErasure.isUnboundedGeneric(elemTpe)) //needs to be done during typer. See Applications.convertNewGenericArray
+      newArr.appliedToTypeTrees(TypeTree(returnTpe) :: Nil).appliedToArgs(clsOf(elemTpe) :: clsOf(returnTpe) :: dims :: Nil).withPos(pos)
+    } else  // after erasure
+      newArr.appliedToArgs(clsOf(elemTpe) :: clsOf(returnTpe) :: dims :: Nil).withPos(pos)
   }
 
   // ------ Creating typed equivalents of trees that exist only in untyped form -------
@@ -562,11 +558,14 @@ object tpd extends Trees.Instance[Type] with TypedTreeInfo {
       }
     }
 
-    override def SeqLiteral(tree: Tree)(elems: List[Tree])(implicit ctx: Context): SeqLiteral = {
-      val tree1 = untpd.cpy.SeqLiteral(tree)(elems)
+    override def SeqLiteral(tree: Tree)(elems: List[Tree], elemtpt: Tree)(implicit ctx: Context): SeqLiteral = {
+      val tree1 = untpd.cpy.SeqLiteral(tree)(elems, elemtpt)
       tree match {
-        case tree: SeqLiteral if sameTypes(elems, tree.elems) => tree1.withTypeUnchecked(tree.tpe)
-        case _ => ta.assignType(tree1, elems)
+        case tree: SeqLiteral
+        if sameTypes(elems, tree.elems) && (elemtpt.tpe eq tree.elemtpt.tpe) =>
+          tree1.withTypeUnchecked(tree.tpe)
+        case _ =>
+          ta.assignType(tree1, elems, elemtpt)
       }
     }
 
@@ -777,27 +776,6 @@ object tpd extends Trees.Instance[Type] with TypedTreeInfo {
       }
       else Assign(tree, rhs)
 
-    /** A tree in place of this tree that represents the class of type `tp`.
-     *  Contains special handling if the class is a primitive value class
-     *  and invokes a `default` method otherwise.
-     */
-    def clsOf(tp: Type, default: => Tree)(implicit ctx: Context): Tree = {
-      def TYPE(module: TermSymbol) =
-        ref(module).select(nme.TYPE_).ensureConforms(tree.tpe).withPos(tree.pos)
-      defn.scalaClassName(tp) match {
-        case tpnme.Boolean => TYPE(defn.BoxedBooleanModule)
-        case tpnme.Byte => TYPE(defn.BoxedByteModule)
-        case tpnme.Short => TYPE(defn.BoxedShortModule)
-        case tpnme.Char => TYPE(defn.BoxedCharModule)
-        case tpnme.Int => TYPE(defn.BoxedIntModule)
-        case tpnme.Long => TYPE(defn.BoxedLongModule)
-        case tpnme.Float => TYPE(defn.BoxedFloatModule)
-        case tpnme.Double => TYPE(defn.BoxedDoubleModule)
-        case tpnme.Unit => TYPE(defn.BoxedUnitModule)
-        case _ => default
-      }
-    }
-
     // --- Higher order traversal methods -------------------------------
 
     /** Apply `f` to each subtree of this tree */
@@ -842,6 +820,26 @@ object tpd extends Trees.Instance[Type] with TypedTreeInfo {
     }
   }
 
+  /** A tree that represents the class of the erasure of type `tp`. */
+  def clsOf(tp: Type)(implicit ctx: Context): Tree = {
+    def TYPE(module: TermSymbol) = ref(module).select(nme.TYPE_)
+    defn.scalaClassName(tp) match {
+      case tpnme.Boolean => TYPE(defn.BoxedBooleanModule)
+      case tpnme.Byte => TYPE(defn.BoxedByteModule)
+      case tpnme.Short => TYPE(defn.BoxedShortModule)
+      case tpnme.Char => TYPE(defn.BoxedCharModule)
+      case tpnme.Int => TYPE(defn.BoxedIntModule)
+      case tpnme.Long => TYPE(defn.BoxedLongModule)
+      case tpnme.Float => TYPE(defn.BoxedFloatModule)
+      case tpnme.Double => TYPE(defn.BoxedDoubleModule)
+      case tpnme.Unit => TYPE(defn.BoxedUnitModule)
+      case _ =>
+        if(ctx.erasedTypes || !tp.derivesFrom(defn.ArrayClass))
+          Literal(Constant(TypeErasure.erasure(tp)))
+        else Literal(Constant(tp))
+    }
+  }
+
   def applyOverloaded(receiver: Tree, method: TermName, args: List[Tree], targs: List[Type], expectedType: Type, isAnnotConstructor: Boolean = false)(implicit ctx: Context): Tree = {
     val typer = ctx.typer
     val proto = new FunProtoTyped(args, expectedType, typer)
@@ -849,12 +847,17 @@ object tpd extends Trees.Instance[Type] with TypedTreeInfo {
     assert(denot.exists, i"no member $receiver . $method, members = ${receiver.tpe.decls}")
     val selected =
       if (denot.isOverloaded) {
-        val allAlts = denot.alternatives.map(_.termRef)
-        val alternatives =
-          ctx.typer.resolveOverloaded(allAlts, proto, Nil)
+        def typeParamCount(tp: Type) = tp.widen match {
+          case tp: PolyType => tp.paramBounds.length
+          case _ => 0
+        }
+        var allAlts = denot.alternatives
+          .map(_.termRef).filter(tr => typeParamCount(tr) == targs.length)
+        if (targs.isEmpty) allAlts = allAlts.filterNot(_.widen.isInstanceOf[PolyType])
+        val alternatives = ctx.typer.resolveOverloaded(allAlts, proto)
         assert(alternatives.size == 1,
           i"${if (alternatives.isEmpty) "no" else "multiple"} overloads available for " +
-          i"$method on ${receiver.tpe.widenDealias} with targs: $targs, args: $args and expectedType: $expectedType." +
+          i"$method on ${receiver.tpe.widenDealias} with targs: $targs%, %; args: $args%, % of types ${args.tpes}%, %; expectedType: $expectedType." +
           i" isAnnotConstructor = $isAnnotConstructor.\n" +
           i"all alternatives: ${allAlts.map(_.symbol.showDcl).mkString(", ")}\n" +
           i"matching alternatives: ${alternatives.map(_.symbol.showDcl).mkString(", ")}.") // this is parsed from bytecode tree. there's nothing user can do about it

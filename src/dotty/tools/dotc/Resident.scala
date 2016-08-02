@@ -6,7 +6,9 @@ import reporting.Reporter
 import java.io.EOFException
 import scala.annotation.tailrec
 
-/** A compiler which stays resident between runs.
+/** A compiler which stays resident between runs. This is more of a PoC than
+ *  something that's expected to be used often
+ *
  *  Usage:
  *
  *  > scala dotty.tools.dotc.Resident <options> <initial files>
@@ -25,12 +27,13 @@ class Resident extends Driver {
 
   object residentCompiler extends Compiler
 
-  override def newCompiler(): Compiler = ???
+  override def newCompiler(implicit ctx: Context): Compiler = ???
 
   override def sourcesRequired = false
 
   private val quit = ":q"
   private val reset = ":reset"
+  private val prompt = "dotc> "
 
   private def getLine() = {
     Console.print(prompt)

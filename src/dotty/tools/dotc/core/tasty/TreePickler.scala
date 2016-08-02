@@ -55,16 +55,31 @@ class TreePickler(pickler: TastyPickler) {
     pickleName(TastyName.Signed(nameIndex(name), params.map(fullNameIndex), fullNameIndex(result)))
   }
 
-  private def pickleName(sym: Symbol)(implicit ctx: Context): Unit =
-    if (sym is Flags.ExpandedName)
-      pickleName(TastyName.Expanded(
-        nameIndex(sym.name.expandedPrefix), nameIndex(sym.name.unexpandedName)))
-    else pickleName(sym.name)
+  private def pickleName(sym: Symbol)(implicit ctx: Context): Unit = {
+    def encodeSuper(name: Name): TastyName.NameRef =
+      if (sym is Flags.SuperAccessor) {
+        val SuperAccessorName(n) = name
+        nameIndex(TastyName.SuperAccessor(nameIndex(n)))
+      }
+      else nameIndex(name)
+    val nameRef =
+      if (sym is Flags.ExpandedName)
+        nameIndex(
+          TastyName.Expanded(
+            nameIndex(sym.name.expandedPrefix),
+            encodeSuper(sym.name.unexpandedName)))
+      else encodeSuper(sym.name)
+    writeNat(nameRef.index)
+  }
 
   private def pickleSymRef(sym: Symbol)(implicit ctx: Context) = symRefs.get(sym) match {
     case Some(label) =>
       if (label != NoAddr) writeRef(label) else pickleForwardSymRef(sym)
     case None =>
+      // See pos/t1957.scala for an example where this can happen.
+      // I believe it's a bug in typer: the type of an implicit argument refers
+      // to a closure parameter outside the closure itself. TODO: track this down, so that we
+      // can eliminate this case.
       ctx.log(i"pickling reference to as yet undefined $sym in ${sym.owner}", sym.pos)
       pickleForwardSymRef(sym)
   }
@@ -143,7 +158,7 @@ class TreePickler(pickler: TastyPickler) {
     case ConstantType(value) =>
       pickleConstant(value)
     case tpe: TypeRef if tpe.info.isAlias && tpe.symbol.is(Flags.AliasPreferred) =>
-      pickleType(tpe.info.bounds.hi)
+      pickleType(tpe.superType)
     case tpe: WithFixedSym =>
       val sym = tpe.symbol
       def pickleRef() =
@@ -196,8 +211,8 @@ class TreePickler(pickler: TastyPickler) {
     case tpe: SuperType =>
       writeByte(SUPERtype)
       withLength { pickleType(tpe.thistpe); pickleType(tpe.supertpe)}
-    case tpe: RefinedThis =>
-      writeByte(REFINEDthis)
+    case tpe: RecThis =>
+      writeByte(RECthis)
       val binderAddr = pickledTypes.get(tpe.binder)
       assert(binderAddr != null, tpe.binder)
       writeRef(binderAddr.asInstanceOf[Addr])
@@ -206,10 +221,13 @@ class TreePickler(pickler: TastyPickler) {
     case tpe: RefinedType =>
       writeByte(REFINEDtype)
       withLength {
-        pickleType(tpe.parent)
         pickleName(tpe.refinedName)
+        pickleType(tpe.parent)
         pickleType(tpe.refinedInfo, richTypes = true)
       }
+    case tpe: RecType =>
+      writeByte(RECtype)
+      pickleType(tpe.parent)
     case tpe: TypeAlias =>
       writeByte(TYPEALIAS)
       withLength {
@@ -232,6 +250,11 @@ class TreePickler(pickler: TastyPickler) {
     case tpe: ExprType =>
       writeByte(BYNAMEtype)
       pickleType(tpe.underlying)
+    case tpe: TypeLambda =>
+      writeByte(LAMBDAtype)
+      val paramNames = tpe.typeParams.map(tparam =>
+        varianceToPrefix(tparam.paramVariance) +: tparam.paramName)
+      pickleMethodic(tpe.resultType, paramNames, tpe.paramBounds)
     case tpe: MethodType if richTypes =>
       writeByte(METHODtype)
       pickleMethodic(tpe.resultType, tpe.paramNames, tpe.paramTypes)
@@ -407,9 +430,9 @@ class TreePickler(pickler: TastyPickler) {
       case Try(block, cases, finalizer) =>
         writeByte(TRY)
         withLength { pickleTree(block); cases.foreach(pickleTree); pickleTreeUnlessEmpty(finalizer) }
-      case SeqLiteral(elems) =>
+      case SeqLiteral(elems, elemtpt) =>
         writeByte(REPEATED)
-        withLength { elems.foreach(pickleTree) }
+        withLength { pickleTree(elemtpt); elems.foreach(pickleTree) }
       case TypeTree(original) =>
         pickleTpt(tree)
       case Bind(name, body) =>

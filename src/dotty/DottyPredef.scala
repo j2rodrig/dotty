@@ -1,37 +1,45 @@
 package dotty
 
-import scala.reflect.ClassTag
 import scala.reflect.runtime.universe.TypeTag
+import scala.reflect.ClassTag
 import scala.Predef.???
+import scala.collection.Seq
 
-abstract class I1 {
-  implicit def classTag[T]: ClassTag[T] = ???
+/** unimplemented implicit for TypeTag */
+object DottyPredef {
   implicit def typeTag[T]: TypeTag[T] = ???
-  implicit val DoubleClassTag: ClassTag[Double]   = ClassTag.Double
-}
-abstract class I2 extends I1 {
-  implicit val FloatClassTag: ClassTag[Double]   = ClassTag.Double
-}
-abstract class I3 extends I2 {
-  implicit val LongClassTag: ClassTag[Long]       = ClassTag.Long
-}
-abstract class I4 extends I3 {
-  implicit val IntClassTag: ClassTag[Int]         = ClassTag.Int
-}
-abstract class I5 extends I4 {
-  implicit val ShortClassTag: ClassTag[Short]     = ClassTag.Short
-}
-abstract class I6 extends I5 {
-  implicit val ByteClassTag: ClassTag[Byte]       = ClassTag.Byte
-  implicit val CharClassTag: ClassTag[Char]       = ClassTag.Char
-  implicit val BooleanClassTag: ClassTag[Boolean] = ClassTag.Boolean
-  implicit val UnitClassTag: ClassTag[Unit]       = ClassTag.Unit
-  implicit val NullClassTag: ClassTag[Null]       = ClassTag.Null
-}
 
-/** implicits for ClassTag and TypeTag. Should be implemented with macros */
-object DottyPredef extends I6 {
+  implicit def arrayTag[T](implicit ctag: ClassTag[T]): ClassTag[Array[T]] =
+    ctag.wrap
 
-  /** ClassTags for final classes */
-  implicit val NothingClassTag: ClassTag[Nothing] = ClassTag.Nothing
+  /** A fall-back implicit to compare values of any types.
+   *  The compiler will restrict implicit instances of `eqAny`. An instance
+   *  `eqAny[T, U]` is _valid_ if `T <: U` or `U <: T` or both `T` and `U` are
+   *  Eq-free. A type `S` is Eq-free if there is no implicit instance of `Eq[S, S]`.
+   *  An implicit search will fail instead of returning an invalid `eqAny` instance.
+   */
+  implicit def eqAny[L, R]: Eq[L, R] = Eq
+
+  implicit def eqNumber   : Eq[Number, Number] = Eq
+  implicit def eqString   : Eq[String, String] = Eq
+
+  // true asymmetry, modeling the (somewhat problematic) nature of equals on Proxies
+  implicit def eqProxy    : Eq[Proxy, Any]     = Eq
+
+  implicit def eqSeq[T, U](implicit eq: Eq[T, U]): Eq[Seq[T], Seq[U]] = Eq
+
+  implicit def eqByteNum  : Eq[Byte, Number]   = Eq
+  implicit def eqNumByte  : Eq[Number, Byte]   = Eq
+  implicit def eqCharNum  : Eq[Char, Number]   = Eq
+  implicit def eqNumChar  : Eq[Number, Char]   = Eq
+  implicit def eqShortNum : Eq[Short, Number]  = Eq
+  implicit def eqNumShort : Eq[Number, Short]  = Eq
+  implicit def eqIntNum   : Eq[Int, Number]    = Eq
+  implicit def eqNumInt   : Eq[Number, Int]    = Eq
+  implicit def eqLongNum  : Eq[Long, Number]   = Eq
+  implicit def eqNumLong  : Eq[Number, Long]   = Eq
+  implicit def eqFloatNum : Eq[Float, Number]  = Eq
+  implicit def eqNumFloat : Eq[Number, Float]  = Eq
+  implicit def eqDoubleNum: Eq[Double, Number] = Eq
+  implicit def eqNumDouble: Eq[Number, Double] = Eq
 }

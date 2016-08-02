@@ -4,6 +4,7 @@ import dotty.tools.dotc.CompilationUnit
 import dotty.tools.dotc.ast.Trees.{ValDef, PackageDef}
 import dotty.tools.dotc.ast.tpd
 import dotty.tools.dotc.core.Phases.Phase
+import dotty.tools.dotc.core.Names.TypeName
 
 import scala.collection.mutable
 import scala.tools.asm.{CustomAttr, ClassVisitor, MethodVisitor, FieldVisitor}
@@ -12,6 +13,9 @@ import scala.tools.nsc.backend.jvm._
 import dotty.tools.dotc
 import dotty.tools.dotc.backend.jvm.DottyPrimitives
 import dotty.tools.dotc.transform.Erasure
+
+import dotty.tools.dotc.interfaces
+import java.util.Optional
 
 import scala.reflect.ClassTag
 import dotty.tools.dotc.core._
@@ -29,6 +33,7 @@ import scala.tools.asm.tree._
 import dotty.tools.dotc.util.{Positions, DotClass}
 import tpd._
 import StdNames._
+import scala.reflect.io.{Directory, PlainDirectory, AbstractFile}
 
 import scala.tools.nsc.backend.jvm.opt.LocalOpt
 
@@ -37,9 +42,18 @@ class GenBCode extends Phase {
   private val entryPoints = new mutable.HashSet[Symbol]()
   def registerEntryPoint(sym: Symbol) = entryPoints += sym
 
+  private val superCallsMap = new mutable.HashMap[Symbol, Set[ClassSymbol]]()
+  def registerSuperCall(sym: Symbol, calls: ClassSymbol) = {
+    val old = superCallsMap.getOrElse(sym, Set.empty)
+    superCallsMap.put(sym, old + calls)
+  }
+
+  def outputDir(implicit ctx: Context): AbstractFile =
+    new PlainDirectory(new Directory(new JFile(ctx.settings.d.value)))
 
   def run(implicit ctx: Context): Unit = {
-    new GenBCodePipeline(entryPoints.toList, new DottyBackendInterface()(ctx))(ctx).run(ctx.compilationUnit.tpdTree)
+    new GenBCodePipeline(entryPoints.toList,
+        new DottyBackendInterface(outputDir, superCallsMap.toMap)(ctx))(ctx).run(ctx.compilationUnit.tpdTree)
     entryPoints.clear()
   }
 }
@@ -48,7 +62,17 @@ class GenBCodePipeline(val entryPoints: List[Symbol], val int: DottyBackendInter
 
   var tree: Tree = _
 
-  val sourceJFile: JFile = ctx.compilationUnit.source.file.file
+  val sourceFile = ctx.compilationUnit.source
+
+  /** Convert a `scala.reflect.io.AbstractFile` into a
+   *  `dotty.tools.dotc.interfaces.AbstractFile`.
+   */
+  private[this] def convertAbstractFile(absfile: scala.reflect.io.AbstractFile): interfaces.AbstractFile =
+    new interfaces.AbstractFile {
+      override def name = absfile.name
+      override def path = absfile.path
+      override def jfile = Optional.ofNullable(absfile.file)
+    }
 
   final class PlainClassBuilder(cunit: CompilationUnit) extends SyncAndTryBuilder(cunit)
 
@@ -304,7 +328,7 @@ class GenBCodePipeline(val entryPoints: List[Symbol], val int: DottyBackendInter
       // Statistics.stopTimer(BackendStats.bcodeTimer, bcodeStart)
 
       if (ctx.compilerCallback != null)
-        ctx.compilerCallback.onSourceCompiled(sourceJFile)
+        ctx.compilerCallback.onSourceCompiled(sourceFile)
 
       /* TODO Bytecode can be verified (now that all classfiles have been written to disk)
        *
@@ -370,10 +394,11 @@ class GenBCodePipeline(val entryPoints: List[Symbol], val int: DottyBackendInter
               else getFileForClassfile(outFolder, jclassName, ".class")
             bytecodeWriter.writeClass(jclassName, jclassName, jclassBytes, outFile)
 
-            val outJFile = outFile.file
             val className = jclassName.replace('/', '.')
             if (ctx.compilerCallback != null)
-              ctx.compilerCallback.onClassGenerated(sourceJFile, outJFile, className)
+              ctx.compilerCallback.onClassGenerated(sourceFile, convertAbstractFile(outFile), className)
+            if (ctx.sbtCallback != null)
+              ctx.sbtCallback.generatedClass(sourceFile.jfile.orElse(null), outFile.file, className)
           }
           catch {
             case e: FileConflictException =>

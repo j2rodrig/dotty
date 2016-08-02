@@ -10,46 +10,11 @@ import collection.mutable
 import config.Settings.Setting
 import config.Printers
 import java.lang.System.currentTimeMillis
-import typer.ErrorReporting.DiagnosticString
-import typer.Mode
+import core.Mode
+import interfaces.Diagnostic.{ERROR, WARNING, INFO}
+import dotty.tools.dotc.core.Symbols.Symbol
 
 object Reporter {
-
-  private val ERROR = 2
-  private val WARNING = 1
-  private val INFO = 0
-
-  class Diagnostic(msgFn: => String, val pos: SourcePosition, val level: Int) extends Exception {
-    import DiagnosticString._
-
-    private var myMsg: String = null
-    private var myIsNonSensical: Boolean = false
-
-    /** The message to report */
-    def msg: String = {
-      if (myMsg == null) {
-        myMsg = msgFn
-        if (myMsg.contains(nonSensicalStartTag)) {
-          myIsNonSensical = true
-          // myMsg might be composed of several d"..." invocations -> nested nonsensical tags possible
-          myMsg = myMsg.replaceAllLiterally(nonSensicalStartTag, "").replaceAllLiterally(nonSensicalEndTag, "")
-        }
-      }
-      myMsg
-    }
-
-    /** Report in current reporter */
-    def report(implicit ctx: Context) = ctx.reporter.report(this)
-
-    def isNonSensical = { msg; myIsNonSensical }
-    def isSuppressed(implicit ctx: Context): Boolean = !ctx.settings.YshowSuppressedErrors.value && isNonSensical
-
-    override def toString = s"$getClass at $pos: $msg"
-    override def getMessage() = msg
-
-    def checkingStr: String = msgFn
-  }
-
   class Error(msgFn: => String, pos: SourcePosition) extends Diagnostic(msgFn, pos, ERROR)
   class Warning(msgFn: => String, pos: SourcePosition) extends Diagnostic(msgFn, pos, WARNING)
   class Info(msgFn: => String, pos: SourcePosition) extends Diagnostic(msgFn, pos, INFO)
@@ -69,6 +34,16 @@ object Reporter {
   class MigrationWarning(msgFn: => String, pos: SourcePosition) extends ConditionalWarning(msgFn, pos) {
     def enablingOption(implicit ctx: Context) = ctx.settings.migration
   }
+
+  /** Convert a SimpleReporter into a real Reporter */
+  def fromSimpleReporter(simple: interfaces.SimpleReporter): Reporter =
+    new Reporter with UniqueMessagePositions with HideNonSensicalMessages {
+      override def doReport(d: Diagnostic)(implicit ctx: Context): Unit = d match {
+        case d: ConditionalWarning if !d.enablingOption.value =>
+        case _ =>
+          simple.report(d)
+      }
+    }
 }
 
 import Reporter._
@@ -77,9 +52,9 @@ trait Reporting { this: Context =>
 
   /** For sending messages that are printed only if -verbose is set */
   def inform(msg: => String, pos: SourcePosition = NoSourcePosition): Unit =
-    if (this.settings.verbose.value) this.println(msg, pos)
+    if (this.settings.verbose.value) this.echo(msg, pos)
 
-  def println(msg: => String, pos: SourcePosition = NoSourcePosition): Unit =
+  def echo(msg: => String, pos: SourcePosition = NoSourcePosition): Unit =
     reporter.report(new Info(msg, pos))
 
   def deprecationWarning(msg: => String, pos: SourcePosition = NoSourcePosition): Unit =
@@ -94,6 +69,29 @@ trait Reporting { this: Context =>
   def featureWarning(msg: => String, pos: SourcePosition = NoSourcePosition): Unit =
     reporter.report(new FeatureWarning(msg, pos))
 
+  def featureWarning(feature: String, featureDescription: String, isScala2Feature: Boolean,
+      featureUseSite: Symbol, required: Boolean, pos: SourcePosition): Unit = {
+    val req = if (required) "needs to" else "should"
+    val prefix = if (isScala2Feature) "scala." else "dotty."
+    val fqname = prefix + "language." + feature
+
+    val explain = {
+      if (reporter.isReportedFeatureUseSite(featureUseSite)) ""
+      else {
+        reporter.reportNewFeatureUseSite(featureUseSite)
+        s"""|
+            |This can be achieved by adding the import clause 'import $fqname'
+            |or by setting the compiler option -language:$feature.
+            |See the Scala docs for value $fqname for a discussion
+            |why the feature $req be explicitly enabled.""".stripMargin
+      }
+    }
+
+    val msg = s"$featureDescription $req be enabled\nby making the implicit value $fqname visible.$explain"
+    if (required) error(msg, pos)
+    else reporter.report(new FeatureWarning(msg, pos))
+  }
+
   def warning(msg: => String, pos: SourcePosition = NoSourcePosition): Unit =
     reporter.report(new Warning(msg, pos))
 
@@ -105,6 +103,9 @@ trait Reporting { this: Context =>
     // println("*** ERROR: " + msg) // !!! DEBUG
     reporter.report(new Error(msg, pos))
   }
+
+  def errorOrMigrationWarning(msg: => String, pos: SourcePosition = NoSourcePosition): Unit =
+    if (ctx.scala2Mode) migrationWarning(msg, pos) else error(msg, pos)
 
   def restrictionError(msg: => String, pos: SourcePosition = NoSourcePosition): Unit =
     error(s"Implementation restriction: $msg", pos)
@@ -118,7 +119,7 @@ trait Reporting { this: Context =>
    */
   def log(msg: => String, pos: SourcePosition = NoSourcePosition): Unit =
     if (this.settings.log.value.containsPhase(phase))
-      this.println(s"[log ${ctx.phasesStack.reverse.mkString(" -> ")}] $msg", pos)
+      echo(s"[log ${ctx.phasesStack.reverse.mkString(" -> ")}] $msg", pos)
 
   def debuglog(msg: => String): Unit =
     if (ctx.debug) log(msg)
@@ -190,14 +191,12 @@ trait Reporting { this: Context =>
  * This interface provides methods to issue information, warning and
  * error messages.
  */
-abstract class Reporter {
+abstract class Reporter extends interfaces.ReporterResult {
 
-  /** Report a diagnostic, unless it is suppressed because it is nonsensical
-   *  @return a diagnostic was reported.
-   */
-  def doReport(d: Diagnostic)(implicit ctx: Context): Boolean
+  /** Report a diagnostic */
+  def doReport(d: Diagnostic)(implicit ctx: Context): Unit
 
- /** Whether very long lines can be truncated.  This exists so important
+  /** Whether very long lines can be truncated.  This exists so important
    *  debugging information (like printing the classpath) is not rendered
    *  invisible due to the max message length.
    */
@@ -223,25 +222,35 @@ abstract class Reporter {
   var warningCount = 0
   def hasErrors = errorCount > 0
   def hasWarnings = warningCount > 0
+  private var errors: List[Error] = Nil
+  def allErrors = errors
 
   /** Have errors been reported by this reporter, or in the
    *  case where this is a StoreReporter, by an outer reporter?
    */
   def errorsReported = hasErrors
 
+  private[this] var reportedFeaturesUseSites = Set[Symbol]()
+  def isReportedFeatureUseSite(featureTrait: Symbol): Boolean = reportedFeaturesUseSites.contains(featureTrait)
+  def reportNewFeatureUseSite(featureTrait: Symbol): Unit = reportedFeaturesUseSites += featureTrait
+
   val unreportedWarnings = new mutable.HashMap[String, Int] {
     override def default(key: String) = 0
   }
 
   def report(d: Diagnostic)(implicit ctx: Context): Unit =
-    if (!isHidden(d) && doReport(d)(ctx.addMode(Mode.Printing)))
+    if (!isHidden(d)) {
+      doReport(d)(ctx.addMode(Mode.Printing))
       d match {
         case d: ConditionalWarning if !d.enablingOption.value => unreportedWarnings(d.enablingOption.name) += 1
         case d: Warning => warningCount += 1
-        case d: Error => errorCount += 1
+        case d: Error =>
+          errors = d :: errors
+          errorCount += 1
         case d: Info => // nothing to do here
         // match error if d is something else
       }
+    }
 
   def incomplete(d: Diagnostic)(implicit ctx: Context): Unit =
     incompleteHandler(d)(ctx)
@@ -262,8 +271,7 @@ abstract class Reporter {
   /** Print the summary of warnings and errors */
   def printSummary(implicit ctx: Context): Unit = {
     val s = summary
-    if (s != "")
-      ctx.println(s)
+    if (s != "") ctx.echo(s)
   }
 
   /** Returns a string meaning "n elements". */

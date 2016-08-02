@@ -11,7 +11,7 @@ import dotty.tools.dotc.ast.{Trees, tpd}
 import scala.collection.{ mutable, immutable }
 import mutable.ListBuffer
 import core._
-import Phases.Phase
+import dotty.tools.dotc.core.Phases.{NeedsCompanions, Phase}
 import Types._, Contexts._, Constants._, Names._, NameOps._, Flags._, DenotTransformers._
 import SymDenotations._, Symbols._, StdNames._, Annotations._, Trees._, Scopes._, Denotations._
 import TypeErasure.{ valueErasure, ErasedValueType }
@@ -66,7 +66,7 @@ class ExtensionMethods extends MiniPhaseTransform with DenotTransformer with Ful
             }
 
             val underlying = valueErasure(underlyingOfValueClass(valueClass))
-            val evt = ErasedValueType(valueClass, underlying)
+            val evt = ErasedValueType(valueClass.typeRef, underlying)
             val u2evtSym = ctx.newSymbol(moduleSym, nme.U2EVT, Synthetic | Method,
               MethodType(List(nme.x_0), List(underlying), evt))
             val evt2uSym = ctx.newSymbol(moduleSym, nme.EVT2U, Synthetic | Method,

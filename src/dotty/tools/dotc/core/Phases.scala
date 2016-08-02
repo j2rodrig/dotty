@@ -4,6 +4,7 @@ package core
 import Periods._
 import Contexts._
 import dotty.tools.backend.jvm.{LabelDefs, GenBCode}
+import dotty.tools.dotc.core.Symbols.ClassSymbol
 import util.DotClass
 import DenotTransformers._
 import Denotations._
@@ -232,8 +233,10 @@ object Phases {
     private val picklerCache = new PhaseCache(classOf[Pickler])
 
     private val refChecksCache = new PhaseCache(classOf[RefChecks])
+    private val elimRepeatedCache = new PhaseCache(classOf[ElimRepeated])
     private val extensionMethodsCache = new PhaseCache(classOf[ExtensionMethods])
     private val erasureCache = new PhaseCache(classOf[Erasure])
+    private val elimErasedValueTypeCache = new PhaseCache(classOf[ElimErasedValueType])
     private val patmatCache = new PhaseCache(classOf[PatternMatcher])
     private val lambdaLiftCache = new PhaseCache(classOf[LambdaLift])
     private val flattenCache = new PhaseCache(classOf[Flatten])
@@ -244,8 +247,10 @@ object Phases {
     def typerPhase = typerCache.phase
     def picklerPhase = picklerCache.phase
     def refchecksPhase = refChecksCache.phase
+    def elimRepeatedPhase = elimRepeatedCache.phase
     def extensionMethodsPhase = extensionMethodsCache.phase
     def erasurePhase = erasureCache.phase
+    def elimErasedValueTypePhase = elimErasedValueTypeCache.phase
     def patmatPhase = patmatCache.phase
     def lambdaLiftPhase = lambdaLiftCache.phase
     def flattenPhase = flattenCache.phase
@@ -286,7 +291,11 @@ object Phases {
      */
     def relaxedTyping: Boolean = false
 
-    /** Overridden by FrontEnd */
+    /** Is this phase the standard typerphase? True for FrontEnd, but
+     *  not for other first phases (such as FromTasty). The predicate
+     *  is tested in some places that perform checks and corrections. It's
+     *  different from isAfterTyper (and cheaper to test).
+     */
     def isTyper = false
 
     def exists: Boolean = true
@@ -346,6 +355,17 @@ object Phases {
 
     override def toString = phaseName
   }
+
+  trait NeedsCompanions {
+    def isCompanionNeeded(cls: ClassSymbol)(implicit ctx: Context): Boolean
+  }
+
+  /** Replace all instances of `oldPhaseClass` in `current` phases
+   *  by the result of `newPhases` applied to the old phase.
+   */
+  def replace(oldPhaseClass: Class[_ <: Phase], newPhases: Phase => List[Phase], current: List[List[Phase]]): List[List[Phase]] =
+    current.map(_.flatMap(phase =>
+      if (oldPhaseClass.isInstance(phase)) newPhases(phase) else phase :: Nil))
 
   /** Dotty deviation: getClass yields Class[_], instead of [Class <: <type of receiver>].
    *  We can get back the old behavior using this decorator. We should also use the same

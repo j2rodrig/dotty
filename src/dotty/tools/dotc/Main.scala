@@ -2,10 +2,8 @@ package dotty.tools
 package dotc
 
 import core.Contexts.Context
-import reporting.Reporter
 
-/* To do:
- */
+/** Main class of the `dotc` batch compiler. */
 object Main extends Driver {
-  override def newCompiler(): Compiler = new Compiler
+  override def newCompiler(implicit ctx: Context): Compiler = new Compiler
 }

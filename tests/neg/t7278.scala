@@ -8,13 +8,13 @@ object Test {
   // should not compile (?)
   // martin says "I'd argue about that"
   // martin retracts his statement: this should not compile
-  type EE[+X <: EC] = X#E
-  type EE2[+X <: EC] = X#E // repeat to get error count to 2
+  type EE[+X <: EC] = X#E // error: X is not a legal path;
+  type EE2[+X <: EC] = X#E // error: X is not a legal path; repeat to get error count to 2
 
   def fail1(): Unit = {
     val b = new B
-    var x1: EE[A] = null
-    var x2: EE[B] = new b.E // error: found: B#E, required: A#E
+    var x1: EE[A] = null // error: Type argument A does not conform to upper bound EC
+    var x2: EE[B] = new b.E // error: Type argument B does not conform to upper bound EC
 //    x1 = x2  // gives a prior type error: B#E, required: A#E, masked to get at the real thing.
   }
 
@@ -27,8 +27,8 @@ object Test {
   }
 */
   def fail3(): Unit = {
-    var x1: EE[C] = 5
-    var x2: EE[C & D] = ""
+    var x1: EE[C] = 5       // error: Type argument C does not conform to upper bound EC
+    var x2: EE[C & D] = ""  // error: Type argument C & D does not conform to upper bound EC
     x1 = x2
   }
 

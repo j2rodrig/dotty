@@ -29,6 +29,9 @@ object Trees {
   /** The total number of created tree nodes, maintained if Stats.enabled */
   @sharable var ntrees = 0
 
+  /** Attachment key for trees with documentation strings attached */
+  val DocComment = new Attachment.Key[String]
+
   /** Modifiers and annotations for definitions
    *  @param flags          The set flags
    *  @param privateWithin  If a private or protected has is followed by a
@@ -50,13 +53,17 @@ object Trees {
     def toTypeFlags: Modifiers[T] = withFlags(flags.toTypeFlags)
     def toTermFlags: Modifiers[T] = withFlags(flags.toTermFlags)
 
-    private def withFlags(flags: FlagSet) =
+    def withFlags(flags: FlagSet) =
       if (this.flags == flags) this
       else copy(flags = flags)
 
+    def withAddedAnnotation[U >: Untyped <: T](annot: Tree[U]): Modifiers[U] =
+      if (annotations.exists(_ eq annot)) this
+      else withAnnotations(annotations :+ annot)
+
     def withAnnotations[U >: Untyped <: T](annots: List[Tree[U]]): Modifiers[U] =
-      if (annots.isEmpty) this
-      else copy(annotations = annotations ++ annots)
+      if (annots eq annotations) this
+      else copy(annotations = annots)
 
     def withPrivateWithin(pw: TypeName) =
       if (pw.isEmpty) this
@@ -317,6 +324,8 @@ object Trees {
     private[ast] def rawMods: Modifiers[T] =
       if (myMods == null) genericEmptyModifiers else myMods
 
+    def rawComment: Option[String] = getAttachment(DocComment)
+
     def withMods(mods: Modifiers[Untyped]): ThisTree[Untyped] = {
       val tree = if (myMods == null || (myMods == mods)) this else clone.asInstanceOf[MemberDef[Untyped]]
       tree.setMods(mods)
@@ -324,6 +333,11 @@ object Trees {
     }
 
     def withFlags(flags: FlagSet): ThisTree[Untyped] = withMods(Modifiers(flags))
+
+    def setComment(comment: Option[String]): ThisTree[Untyped] = {
+      comment.map(putAttachment(DocComment, _))
+      asInstanceOf[ThisTree[Untyped]]
+    }
 
     protected def setMods(mods: Modifiers[T @uncheckedVariance]) = myMods = mods
 
@@ -515,16 +529,18 @@ object Trees {
     type ThisTree[-T >: Untyped] = Try[T]
   }
 
-  /** Seq(elems) */
-  case class SeqLiteral[-T >: Untyped] private[ast] (elems: List[Tree[T]])
+  /** Seq(elems)
+   *  @param  tpt  The element type of the sequence.
+   */
+  case class SeqLiteral[-T >: Untyped] private[ast] (elems: List[Tree[T]], elemtpt: Tree[T])
     extends Tree[T] {
     type ThisTree[-T >: Untyped] = SeqLiteral[T]
   }
 
   /** Array(elems) */
-  class JavaSeqLiteral[T >: Untyped] private[ast] (elems: List[Tree[T]])
-    extends SeqLiteral(elems) {
-    override def toString = s"JavaSeqLiteral($elems)"
+  class JavaSeqLiteral[T >: Untyped] private[ast] (elems: List[Tree[T]], elemtpt: Tree[T])
+    extends SeqLiteral(elems, elemtpt) {
+    override def toString = s"JavaSeqLiteral($elems, $elemtpt)"
   }
 
   /** A type tree that represents an existing or inferred type */
@@ -543,7 +559,10 @@ object Trees {
     type ThisTree[-T >: Untyped] = SingletonTypeTree[T]
   }
 
-  /** qualifier # name */
+  /** qualifier # name
+   *  In Scala, this always refers to a type, but in a Java
+   *  compilation unit this might refer to a term.
+   */
   case class SelectFromTypeTree[-T >: Untyped] private[ast] (qualifier: Tree[T], name: Name)
     extends RefTree[T] {
     type ThisTree[-T >: Untyped] = SelectFromTypeTree[T]
@@ -573,6 +592,12 @@ object Trees {
     extends ProxyTree[T] with TypTree[T] {
     type ThisTree[-T >: Untyped] = AppliedTypeTree[T]
     def forwardTo = tpt
+  }
+
+  /** [typeparams] -> tpt */
+  case class TypeLambdaTree[-T >: Untyped] private[ast] (tparams: List[TypeDef[T]], body: Tree[T])
+    extends TypTree[T] {
+    type ThisTree[-T >: Untyped] = TypeLambdaTree[T]
   }
 
   /** => T */
@@ -832,6 +857,7 @@ object Trees {
     type OrTypeTree = Trees.OrTypeTree[T]
     type RefinedTypeTree = Trees.RefinedTypeTree[T]
     type AppliedTypeTree = Trees.AppliedTypeTree[T]
+    type TypeLambdaTree = Trees.TypeLambdaTree[T]
     type ByNameTypeTree = Trees.ByNameTypeTree[T]
     type TypeBoundsTree = Trees.TypeBoundsTree[T]
     type Bind = Trees.Bind[T]
@@ -974,12 +1000,12 @@ object Trees {
         case tree: Try if (expr eq tree.expr) && (cases eq tree.cases) && (finalizer eq tree.finalizer) => tree
         case _ => finalize(tree, untpd.Try(expr, cases, finalizer))
       }
-      def SeqLiteral(tree: Tree)(elems: List[Tree])(implicit ctx: Context): SeqLiteral = tree match {
+      def SeqLiteral(tree: Tree)(elems: List[Tree], elemtpt: Tree)(implicit ctx: Context): SeqLiteral = tree match {
         case tree: JavaSeqLiteral =>
-          if (elems eq tree.elems) tree
-          else finalize(tree, new JavaSeqLiteral(elems))
-        case tree: SeqLiteral if elems eq tree.elems => tree
-        case _ => finalize(tree, untpd.SeqLiteral(elems))
+          if ((elems eq tree.elems) && (elemtpt eq tree.elemtpt)) tree
+          else finalize(tree, new JavaSeqLiteral(elems, elemtpt))
+        case tree: SeqLiteral if (elems eq tree.elems) && (elemtpt eq tree.elemtpt) => tree
+        case _ => finalize(tree, untpd.SeqLiteral(elems, elemtpt))
       }
       def TypeTree(tree: Tree)(original: Tree): TypeTree = tree match {
         case tree: TypeTree if original eq tree.original => tree
@@ -1008,6 +1034,10 @@ object Trees {
       def AppliedTypeTree(tree: Tree)(tpt: Tree, args: List[Tree]): AppliedTypeTree = tree match {
         case tree: AppliedTypeTree if (tpt eq tree.tpt) && (args eq tree.args) => tree
         case _ => finalize(tree, untpd.AppliedTypeTree(tpt, args))
+      }
+      def TypeLambdaTree(tree: Tree)(tparams: List[TypeDef], body: Tree): TypeLambdaTree = tree match {
+        case tree: TypeLambdaTree if (tparams eq tree.tparams) && (body eq tree.body) => tree
+        case _ => finalize(tree, untpd.TypeLambdaTree(tparams, body))
       }
       def ByNameTypeTree(tree: Tree)(result: Tree): ByNameTypeTree = tree match {
         case tree: ByNameTypeTree if result eq tree.result => tree
@@ -1125,8 +1155,8 @@ object Trees {
           cpy.Return(tree)(transform(expr), transformSub(from))
         case Try(block, cases, finalizer) =>
           cpy.Try(tree)(transform(block), transformSub(cases), transform(finalizer))
-        case SeqLiteral(elems) =>
-          cpy.SeqLiteral(tree)(transform(elems))
+        case SeqLiteral(elems, elemtpt) =>
+          cpy.SeqLiteral(tree)(transform(elems), transform(elemtpt))
         case TypeTree(original) =>
           tree
         case SingletonTypeTree(ref) =>
@@ -1141,6 +1171,8 @@ object Trees {
           cpy.RefinedTypeTree(tree)(transform(tpt), transformSub(refinements))
         case AppliedTypeTree(tpt, args) =>
           cpy.AppliedTypeTree(tree)(transform(tpt), transform(args))
+        case TypeLambdaTree(tparams, body) =>
+          cpy.TypeLambdaTree(tree)(transformSub(tparams), transform(body))
         case ByNameTypeTree(result) =>
           cpy.ByNameTypeTree(tree)(transform(result))
         case TypeBoundsTree(lo, hi) =>
@@ -1229,8 +1261,8 @@ object Trees {
             this(this(x, expr), from)
           case Try(block, handler, finalizer) =>
             this(this(this(x, block), handler), finalizer)
-          case SeqLiteral(elems) =>
-            this(x, elems)
+          case SeqLiteral(elems, elemtpt) =>
+            this(this(x, elems), elemtpt)
           case TypeTree(original) =>
             x
           case SingletonTypeTree(ref) =>
@@ -1245,6 +1277,9 @@ object Trees {
             this(this(x, tpt), refinements)
           case AppliedTypeTree(tpt, args) =>
             this(this(x, tpt), args)
+          case TypeLambdaTree(tparams, body) =>
+            implicit val ctx: Context = localCtx
+            this(this(x, tparams), body)
           case ByNameTypeTree(result) =>
             this(x, result)
           case TypeBoundsTree(lo, hi) =>

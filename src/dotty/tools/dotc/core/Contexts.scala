@@ -2,6 +2,7 @@ package dotty.tools
 package dotc
 package core
 
+import interfaces.CompilerCallback
 import Decorators._
 import Periods._
 import Names._
@@ -17,7 +18,7 @@ import util.Positions._
 import ast.Trees._
 import ast.untpd
 import util.{FreshNameCreator, SimpleMap, SourceFile, NoSource}
-import typer._
+import typer.{Implicits, ImplicitRunInfo, ImportInfo, NamerContextOps, SearchHistory, TypeAssigner, Typer}
 import Implicits.ContextualImplicits
 import config.Settings._
 import config.Config
@@ -25,9 +26,10 @@ import reporting._
 import collection.mutable
 import collection.immutable.BitSet
 import printing._
-import config.{Settings, ScalaSettings, Platform, JavaPlatform}
+import config.{Settings, ScalaSettings, Platform, JavaPlatform, SJSPlatform}
 import language.implicitConversions
 import DenotTransformers.DenotTransformer
+import xsbti.AnalysisCallback
 
 object Contexts {
 
@@ -82,6 +84,12 @@ object Contexts {
     protected def compilerCallback_=(callback: CompilerCallback) =
       _compilerCallback = callback
     def compilerCallback: CompilerCallback = _compilerCallback
+
+    /** The sbt callback implementation if we are run from sbt, null otherwise */
+    private[this] var _sbtCallback: AnalysisCallback = _
+    protected def sbtCallback_=(callback: AnalysisCallback) =
+      _sbtCallback = callback
+    def sbtCallback: AnalysisCallback = _sbtCallback
 
     /** The current context */
     private[this] var _period: Period = _
@@ -247,7 +255,7 @@ object Contexts {
       withPhase(phase.id)
 
     final def withPhaseNoLater(phase: Phase) =
-      if (ctx.phase.id > phase.id) withPhase(phase) else ctx
+      if (phase.exists && ctx.phase.id > phase.id) withPhase(phase) else ctx
 
     /** If -Ydebug is on, the top of the stack trace where this context
      *  was created, otherwise `null`.
@@ -335,13 +343,17 @@ object Contexts {
     def thisCallArgContext: Context = {
       assert(owner.isClassConstructor)
       val constrCtx = outersIterator.dropWhile(_.outer.owner == owner).next
-      superOrThisCallContext(owner, constrCtx.scope).setTyperState(typerState)
+      superOrThisCallContext(owner, constrCtx.scope)
+        .setTyperState(typerState)
+        .setGadt(gadt)
     }
 
-    /** The super= or this-call context with given owner and locals. */
+    /** The super- or this-call context with given owner and locals. */
     private def superOrThisCallContext(owner: Symbol, locals: Scope): FreshContext = {
       var classCtx = outersIterator.dropWhile(!_.isClassDefContext).next
-      classCtx.outer.fresh.setOwner(owner).setScope(locals).setMode(classCtx.mode | Mode.InSuperCall)
+      classCtx.outer.fresh.setOwner(owner)
+        .setScope(locals)
+        .setMode(classCtx.mode | Mode.InSuperCall)
     }
 
     /** The context of expression `expr` seen as a member of a statement sequence */
@@ -364,6 +376,10 @@ object Contexts {
 
     /** Is the verbose option set? */
     def verbose: Boolean = base.settings.verbose.value
+
+    /** Should use colors when printing? */
+    def useColors: Boolean =
+      base.settings.color.value == "always"
 
     /** A condensed context containing essential information of this but
      *  no outer contexts except the initial context.
@@ -421,6 +437,7 @@ object Contexts {
     def setPeriod(period: Period): this.type = { this.period = period; this }
     def setMode(mode: Mode): this.type = { this.mode = mode; this }
     def setCompilerCallback(callback: CompilerCallback): this.type = { this.compilerCallback = callback; this }
+    def setSbtCallback(callback: AnalysisCallback): this.type = { this.sbtCallback = callback; this }
     def setTyperState(typerState: TyperState): this.type = { this.typerState = typerState; this }
     def setReporter(reporter: Reporter): this.type = setTyperState(typerState.withReporter(reporter))
     def setNewTyperState: this.type = setTyperState(typerState.fresh(isCommittable = true))
@@ -437,6 +454,7 @@ object Contexts {
     def setImportInfo(importInfo: ImportInfo): this.type = { this.importInfo = importInfo; this }
     def setRunInfo(runInfo: RunInfo): this.type = { this.runInfo = runInfo; this }
     def setDiagnostics(diagnostics: Option[StringBuilder]): this.type = { this.diagnostics = diagnostics; this }
+    def setGadt(gadt: GADTMap): this.type = { this.gadt = gadt; this }
     def setTypeComparerFn(tcfn: Context => TypeComparer): this.type = { this.typeComparer = tcfn(this); this }
     def setSearchHistory(searchHistory: SearchHistory): this.type = { this.searchHistory = searchHistory; this }
     def setFreshNames(freshNames: FreshNameCreator): this.type = { this.freshNames = freshNames; this }
@@ -513,8 +531,21 @@ object Contexts {
     /** The symbol loaders */
     val loaders = new SymbolLoaders
 
+    /** The platform, initialized by `initPlatform()`. */
+    private var _platform: Platform = _
+
     /** The platform */
-    val platform: Platform = new JavaPlatform
+    def platform: Platform = {
+      if (_platform == null) {
+        throw new IllegalStateException(
+            "initialize() must be called before accessing platform")
+      }
+      _platform
+    }
+
+    protected def newPlatform(implicit ctx: Context): Platform =
+      if (settings.scalajs.value) new SJSPlatform
+      else new JavaPlatform
 
     /** The loader that loads the members of _root_ */
     def rootLoader(root: TermSymbol)(implicit ctx: Context): SymbolLoader = platform.rootLoader(root)
@@ -525,9 +556,25 @@ object Contexts {
     /** The standard definitions */
     val definitions = new Definitions
 
+    /** Initializes the `ContextBase` with a starting context.
+     *  This initializes the `platform` and the `definitions`.
+     */
+    def initialize()(implicit ctx: Context): Unit = {
+      _platform = newPlatform
+      definitions.init()
+    }
+
     def squashed(p: Phase): Phase = {
       allPhases.find(_.period.containsPhaseId(p.id)).getOrElse(NoPhase)
     }
+
+    val _docstrings: mutable.Map[Symbol, String] =
+      mutable.Map.empty
+
+    def docstring(sym: Symbol): Option[String] = _docstrings.get(sym)
+
+    def addDocstring(sym: Symbol, doc: Option[String]): Unit =
+      doc.map(d => _docstrings += (sym -> d))
   }
 
   /** The essential mutable state of a context base, collected into a common class */

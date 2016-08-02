@@ -36,6 +36,27 @@ import Decorators._
 
   override def phaseName = "memoize"
 
+  /* Makes sure that, after getters and constructors gen, there doesn't
+   * exist non-deferred definitions that are not implemented. */
+  override def checkPostCondition(tree: Tree)(implicit ctx: Context): Unit = {
+    def errorLackImplementation(t: Tree) = {
+      val firstPhaseId = t.symbol.initial.validFor.firstPhaseId
+      val definingPhase = ctx.withPhase(firstPhaseId).phase.prev
+      throw new AssertionError(
+        i"Non-deferred definition introduced by $definingPhase lacks implementation: $t")
+    }
+    tree match {
+      case ddef: DefDef
+        if !ddef.symbol.is(Deferred) && ddef.rhs == EmptyTree =>
+          errorLackImplementation(ddef)
+      case tdef: TypeDef
+        if tdef.symbol.isClass && !tdef.symbol.is(Deferred) && tdef.rhs == EmptyTree =>
+        errorLackImplementation(tdef)
+      case _ =>
+    }
+    super.checkPostCondition(tree)
+  }
+
   /** Should run after mixin so that fields get generated in the
    *  class that contains the concrete getter rather than the trait
    *  that defines it.
@@ -68,6 +89,10 @@ import Decorators._
     }
 
     lazy val field = sym.field.orElse(newField).asTerm
+    
+    def adaptToField(tree: Tree) =
+      if (tree.isEmpty) tree else tree.ensureConforms(field.info.widen)
+      
     if (sym.is(Accessor, butNot = NoFieldNeeded))
       if (sym.isGetter) {
         def skipBlocks(t: Tree): Tree = t match {
@@ -85,13 +110,15 @@ import Decorators._
           case _ =>
             var rhs = tree.rhs.changeOwnerAfter(sym, field, thisTransform)
             if (isWildcardArg(rhs)) rhs = EmptyTree
-            val fieldDef = transformFollowing(ValDef(field, rhs))
+
+            val fieldDef = transformFollowing(ValDef(field, adaptToField(rhs)))
             val getterDef = cpy.DefDef(tree)(rhs = transformFollowingDeep(ref(field))(ctx.withOwner(sym), info))
             Thicket(fieldDef, getterDef)
         }
       } else if (sym.isSetter) {
         if (!sym.is(ParamAccessor)) { val Literal(Constant(())) = tree.rhs } // this is intended as an assertion
-        val initializer = Assign(ref(field), ref(tree.vparamss.head.head.symbol))
+        field.setFlag(Mutable) // necessary for vals mixed in from Scala2 traits
+        val initializer = Assign(ref(field), adaptToField(ref(tree.vparamss.head.head.symbol)))
         cpy.DefDef(tree)(rhs = transformFollowingDeep(initializer)(ctx.withOwner(sym), info))
       }
       else tree // curiously, some accessors from Scala2 have ' ' suffixes. They count as

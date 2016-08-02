@@ -13,7 +13,6 @@ import Decorators.SymbolIteratorDecorator
 import ast._
 import annotation.tailrec
 import CheckRealizable._
-import typer.Mode
 import util.SimpleMap
 import util.Stats
 import config.Config
@@ -45,19 +44,54 @@ trait SymDenotations { this: Context =>
     if (denot.is(ValidForever) || denot.isRefinementClass) true
     else {
       val initial = denot.initial
-      if (initial ne denot)
-        ctx.withPhase(initial.validFor.firstPhaseId).stillValid(initial.asSymDenotation)
-      else try {
-        val owner = denot.owner.denot
-        stillValid(owner) && (
-          !owner.isClass
-          || owner.isRefinementClass
-          || (owner.unforcedDecls.lookupAll(denot.name) contains denot.symbol)
-          || denot.isSelfSym)
-      } catch {
-        case ex: StaleSymbol => false
-      }
+      val firstPhaseId = initial.validFor.firstPhaseId.max(ctx.typerPhase.id)
+      if ((initial ne denot) || ctx.phaseId != firstPhaseId)
+        ctx.withPhase(firstPhaseId).stillValidInOwner(initial.asSymDenotation)
+      else
+        stillValidInOwner(denot)
     }
+
+  private[SymDenotations] def stillValidInOwner(denot: SymDenotation): Boolean = try {
+    val owner = denot.owner.denot
+    stillValid(owner) && (
+      !owner.isClass
+      || owner.isRefinementClass
+      || (owner.unforcedDecls.lookupAll(denot.name) contains denot.symbol)
+      || denot.isSelfSym)
+  } catch {
+    case ex: StaleSymbol => false
+  }
+
+  /** Explain why symbol is invalid; used for debugging only */
+  def traceInvalid(denot: Denotation): Boolean = {
+    def show(d: Denotation) = s"$d#${d.symbol.id}"
+    def explain(msg: String) = {
+      println(s"${show(denot)} is invalid at ${this.period} because $msg")
+      false
+    }
+    denot match {
+      case denot: SymDenotation =>
+        def explainSym(msg: String) = explain(s"$msg\n defined = ${denot.definedPeriodsString}")
+        if (denot.is(ValidForever) || denot.isRefinementClass) true
+        else {
+          implicit val ctx: Context = this
+          val initial = denot.initial
+          if ((initial ne denot) || ctx.phaseId != initial.validFor.firstPhaseId) {
+            ctx.withPhase(initial.validFor.firstPhaseId).traceInvalid(initial.asSymDenotation)
+          } else try {
+            val owner = denot.owner.denot
+            if (!traceInvalid(owner)) explainSym("owner is invalid")
+            else if (!owner.isClass || owner.isRefinementClass || denot.isSelfSym) true
+            else if (owner.unforcedDecls.lookupAll(denot.name) contains denot.symbol) true
+            else explainSym(s"decls of ${show(owner)} are ${owner.unforcedDecls.lookupAll(denot.name).toList}, do not contain ${denot.symbol}")
+          } catch {
+            case ex: StaleSymbol => explainSym(s"$ex was thrown")
+          }
+      }
+      case _ =>
+        explain("denotation is not a SymDenotation")
+    }
+  }
 }
 
 object SymDenotations {
@@ -444,10 +478,6 @@ object SymDenotations {
     final def isRefinementClass(implicit ctx: Context): Boolean =
       name.decode == tpnme.REFINE_CLASS
 
-    /** is this symbol a trait representing a type lambda? */
-    final def isLambdaTrait(implicit ctx: Context): Boolean =
-      isClass && name.startsWith(tpnme.hkLambdaPrefix) && owner == defn.ScalaPackageClass
-
     /** Is this symbol a package object or its module class? */
     def isPackageObject(implicit ctx: Context): Boolean = {
       val poName = if (isType) nme.PACKAGE_CLS else nme.PACKAGE
@@ -560,6 +590,10 @@ object SymDenotations {
     final def isPrimaryConstructor(implicit ctx: Context) =
       isConstructor && owner.primaryConstructor == symbol
 
+    /** Does this symbol denote the static constructor of its enclosing class? */
+    final def isStaticConstructor(implicit ctx: Context) =
+      name.isStaticConstructorName
+
     /** Is this a subclass of the given class `base`? */
     def isSubClass(base: Symbol)(implicit ctx: Context) = false
 
@@ -581,7 +615,7 @@ object SymDenotations {
 
     /** Is this symbol a class references to which that are supertypes of null? */
     final def isNullableClass(implicit ctx: Context): Boolean =
-      isClass && !isValueClass && !(this is ModuleClass)
+      isClass && !isValueClass && !(this is ModuleClass) && symbol != defn.NothingClass
 
     /** Is this definition accessible as a member of tree with type `pre`?
      *  @param pre          The type of the tree from which the selection is made
@@ -834,7 +868,7 @@ object SymDenotations {
      */
     final def topLevelClass(implicit ctx: Context): Symbol = {
       def topLevel(d: SymDenotation): Symbol = {
-        if ((d is PackageClass) || (d.owner is PackageClass)) d.symbol
+        if (d.isEffectiveRoot || (d is PackageClass) || (d.owner is PackageClass)) d.symbol
         else topLevel(d.owner)
       }
       val sym = topLevel(this)
@@ -967,7 +1001,7 @@ object SymDenotations {
       if (!canMatchInheritedSymbols) Iterator.empty
       else overriddenFromType(owner.info)
 
-    /** Returns all all matching symbols defined in parents of the selftype. */
+    /** Returns all matching symbols defined in parents of the selftype. */
     final def extendedOverriddenSymbols(implicit ctx: Context): Iterator[Symbol] =
       if (!canMatchInheritedSymbols) Iterator.empty
       else overriddenFromType(owner.asClass.classInfo.selfType)
@@ -1034,6 +1068,9 @@ object SymDenotations {
     /** The type parameters of a class symbol, Nil for all other symbols */
     def typeParams(implicit ctx: Context): List[TypeSymbol] = Nil
 
+    /** The named type parameters declared or inherited by this symbol */
+    def namedTypeParams(implicit ctx: Context): Set[TypeSymbol] = Set()
+
     /** The type This(cls), where cls is this class, NoPrefix for all other symbols */
     def thisType(implicit ctx: Context): Type = NoPrefix
 
@@ -1080,13 +1117,15 @@ object SymDenotations {
 
     def debugString = toString + "#" + symbol.id // !!! DEBUG
 
-        def hasSkolems(tp: Type): Boolean = tp match {
+    def hasSkolems(tp: Type): Boolean = tp match {
       case tp: SkolemType => true
       case tp: NamedType => hasSkolems(tp.prefix)
       case tp: RefinedType => hasSkolems(tp.parent) || hasSkolems(tp.refinedInfo)
-      case tp: PolyType => tp.paramBounds.exists(hasSkolems) || hasSkolems(tp.resType)
+      case tp: RecType => hasSkolems(tp.parent)
+      case tp: GenericType => tp.paramBounds.exists(hasSkolems) || hasSkolems(tp.resType)
       case tp: MethodType => tp.paramTypes.exists(hasSkolems) || hasSkolems(tp.resType)
       case tp: ExprType => hasSkolems(tp.resType)
+      case tp: HKApply => hasSkolems(tp.tycon) || tp.args.exists(hasSkolems)
       case tp: AndOrType => hasSkolems(tp.tp1) || hasSkolems(tp.tp2)
       case tp: TypeBounds => hasSkolems(tp.lo) || hasSkolems(tp.hi)
       case tp: AnnotatedType => hasSkolems(tp.tpe)
@@ -1167,16 +1206,38 @@ object SymDenotations {
     /** TODO: Document why caches are supposedly safe to use */
     private[this] var myTypeParams: List[TypeSymbol] = _
 
+    private[this] var myNamedTypeParams: Set[TypeSymbol] = _
+
+    /** The type parameters in this class, in the order they appear in the current
+     *  scope `decls`. This might be temporarily the incorrect order when
+     *  reading Scala2 pickled info. The problem is fixed by `updateTypeParams`
+     *  which is called once an unpickled symbol has been completed.
+     */
+    private def typeParamsFromDecls(implicit ctx: Context) =
+      unforcedDecls.filter(sym =>
+        (sym is TypeParam) && sym.owner == symbol).asInstanceOf[List[TypeSymbol]]
+
     /** The type parameters of this class */
     override final def typeParams(implicit ctx: Context): List[TypeSymbol] = {
-      def computeTypeParams = {
-        if (ctx.erasedTypes || is(Module)) Nil // fast return for modules to avoid scanning package decls
-        else if (this ne initial) initial.asSymDenotation.typeParams
-        else unforcedDecls.filter(sym =>
-          (sym is TypeParam) && sym.owner == symbol).asInstanceOf[List[TypeSymbol]]
-      }
-      if (myTypeParams == null) myTypeParams = computeTypeParams
+      if (myTypeParams == null)
+        myTypeParams =
+          if (ctx.erasedTypes || is(Module)) Nil // fast return for modules to avoid scanning package decls
+          else if (this ne initial) initial.asSymDenotation.typeParams
+          else infoOrCompleter match {
+            case info: TypeParamsCompleter => info.completerTypeParams(symbol)
+            case _ => typeParamsFromDecls
+          }
       myTypeParams
+    }
+
+    /** The named type parameters declared or inherited by this class */
+    override final def namedTypeParams(implicit ctx: Context): Set[TypeSymbol] = {
+      def computeNamedTypeParams: Set[TypeSymbol] =
+        if (ctx.erasedTypes || is(Module)) Set() // fast return for modules to avoid scanning package decls
+        else memberNames(abstractTypeNameFilter).map(name =>
+          info.member(name).symbol.asType).filter(_.is(TypeParam, butNot = ExpandedName)).toSet
+      if (myNamedTypeParams == null) myNamedTypeParams = computeNamedTypeParams
+      myNamedTypeParams
     }
 
     override protected[dotc] final def info_=(tp: Type) = {
@@ -1450,7 +1511,7 @@ object SymDenotations {
 
     /** Enter a symbol in given `scope` without potentially replacing the old copy. */
     def enterNoReplace(sym: Symbol, scope: MutableScope)(implicit ctx: Context): Unit = {
-      require((sym.denot.flagsUNSAFE is Private) ||  !(this is Frozen) || (scope ne this.unforcedDecls))
+      require((sym.denot.flagsUNSAFE is Private) ||  !(this is Frozen) || (scope ne this.unforcedDecls) || sym.hasAnnotation(defn.ScalaStaticAnnot))
       scope.enter(sym)
 
       if (myMemberFingerPrint != FingerPrint.unknown)
@@ -1479,6 +1540,21 @@ object SymDenotations {
       info.decls.openForMutations.unlink(sym)
       myMemberFingerPrint = FingerPrint.unknown
       if (myMemberCache != null) myMemberCache invalidate sym.name
+    }
+
+    /** Make sure the type parameters of this class appear in the order given
+     *  by `typeParams` in the scope of the class. Reorder definitions in scope if necessary.
+     */
+    def ensureTypeParamsInCorrectOrder()(implicit ctx: Context): Unit = {
+      val tparams = typeParams
+      if (!ctx.erasedTypes && !typeParamsFromDecls.corresponds(tparams)(_.name == _.name)) {
+        val decls = info.decls
+        val decls1 = newScope
+        for (tparam <- typeParams) decls1.enter(decls.lookup(tparam.name))
+        for (sym <- decls) if (!tparams.contains(sym)) decls1.enter(sym)
+        info = classInfo.derivedClassInfo(decls = decls1)
+        myTypeParams = null
+      }
     }
 
     /** All members of this class that have the given name.
@@ -1566,6 +1642,7 @@ object SymDenotations {
        */
       def isCachable(tp: Type): Boolean = tp match {
         case _: TypeErasure.ErasedValueType => false
+        case tp: TypeRef if tp.symbol.isClass => true
         case tp: TypeVar => tp.inst.exists && inCache(tp.inst)
         case tp: TypeProxy => inCache(tp.underlying)
         case tp: AndOrType => inCache(tp.tp1) && inCache(tp.tp2)
@@ -1586,10 +1663,10 @@ object SymDenotations {
                 if (cdenot.superClassBits contains symbol.superId) foldGlb(NoType, tp.parents)
                 else NoType
               case _ =>
-                baseTypeRefOf(tp.underlying)
+                baseTypeRefOf(tp.superType)
             }
           case tp: TypeProxy =>
-            baseTypeRefOf(tp.underlying)
+            baseTypeRefOf(tp.superType)
           case AndType(tp1, tp2) =>
             baseTypeRefOf(tp1) & baseTypeRefOf(tp2)
           case OrType(tp1, tp2) =>
@@ -1749,6 +1826,7 @@ object SymDenotations {
     override def isType = false
     override def owner: Symbol = throw new AssertionError("NoDenotation.owner")
     override def computeAsSeenFrom(pre: Type)(implicit ctx: Context): SingleDenotation = this
+    override def mapInfo(f: Type => Type)(implicit ctx: Context): SingleDenotation = this
     validFor = Period.allInRun(NoRunId) // will be brought forward automatically
   }
 
@@ -1796,9 +1874,9 @@ object SymDenotations {
   /** A subclass of LazyTypes where type parameters can be completed independently of
    *  the info.
    */
-  abstract class TypeParamsCompleter extends LazyType {
+  trait TypeParamsCompleter extends LazyType {
     /** The type parameters computed by the completer before completion has finished */
-    def completerTypeParams(sym: Symbol): List[TypeSymbol]
+    def completerTypeParams(sym: Symbol)(implicit ctx: Context): List[TypeSymbol]
   }
 
   val NoSymbolFn = (ctx: Context) => NoSymbol

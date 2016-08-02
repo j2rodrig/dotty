@@ -246,6 +246,8 @@ object RefChecks {
           isDefaultGetter(member.name) || // default getters are not checked for compatibility
           memberTp.overrides(otherTp)
 
+      def domain(sym: Symbol): Set[Name] = sym.info.namedTypeParams.map(_.name)
+
       //Console.println(infoString(member) + " overrides " + infoString(other) + " in " + clazz);//DEBUG
 
       // return if we already checked this combination elsewhere
@@ -342,6 +344,9 @@ object RefChecks {
         overrideError("cannot be used here - only term macros can override term macros")
       } else if (!compatibleTypes) {
         overrideError("has incompatible type" + err.whyNoMatchStr(memberTp, otherTp))
+      } else if (member.isType && domain(member) != domain(other)) {
+        overrideError("has different named type parameters: "+
+             i"[${domain(member).toList}%, %] instead of [${domain(other).toList}%, %]")
       } else {
         checkOverrideDeprecated()
       }
@@ -708,7 +713,17 @@ object RefChecks {
       if (clazz.is(Abstract))
         ctx.error("`abstract' modifier cannot be used with value classes", clazz.pos)
       if (!clazz.isStatic)
-        ctx.error("value class cannot be an inner class", clazz.pos)
+        ctx.error(s"value class may not be a ${if (clazz.owner.isTerm) "local class" else "member of another class"}", clazz.pos)
+      else {
+        val clParamAccessors = clazz.asClass.paramAccessors.filter(sym => sym.isTerm && !sym.is(Method))
+        clParamAccessors match {
+          case List(param) =>
+            if (param.is(Mutable))
+              ctx.error("value class parameter must not be a var", param.pos)
+          case _ =>
+            ctx.error("value class needs to have exactly one val parameter", clazz.pos)
+        }
+      }
       stats.foreach(checkValueClassMember)
     }
   }
@@ -822,7 +837,7 @@ class RefChecks extends MiniPhase { thisTransformer =>
       if (tree.symbol is Macro) EmptyTree else tree
     }
 
-    override def transformTemplate(tree: Template)(implicit ctx: Context, info: TransformerInfo) = {
+    override def transformTemplate(tree: Template)(implicit ctx: Context, info: TransformerInfo) = try {
       val cls = ctx.owner
       checkOverloadedRestrictions(cls)
       checkParents(cls)
@@ -830,6 +845,10 @@ class RefChecks extends MiniPhase { thisTransformer =>
       checkAllOverrides(cls)
       checkDerivedValueClass(cls, tree.body)
       tree
+    } catch {
+      case ex: MergeError =>
+        ctx.error(ex.getMessage, tree.pos)
+        tree
     }
 
     override def transformTypeTree(tree: TypeTree)(implicit ctx: Context, info: TransformerInfo) = {

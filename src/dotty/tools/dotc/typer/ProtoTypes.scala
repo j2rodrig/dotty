@@ -175,11 +175,11 @@ object ProtoTypes {
     def isMatchedBy(tp: Type)(implicit ctx: Context) =
       typer.isApplicable(tp, Nil, typedArgs, resultType)
 
-    def derivedFunProto(args: List[untpd.Tree], resultType: Type, typer: Typer) =
+    def derivedFunProto(args: List[untpd.Tree] = this.args, resultType: Type, typer: Typer = this.typer) =
       if ((args eq this.args) && (resultType eq this.resultType) && (typer eq this.typer)) this
       else (new FunProto(args, resultType, typer)).copyShadowMembers(this)
 
-    def argsAreTyped: Boolean = myTypedArgs.nonEmpty || args.isEmpty
+    def argsAreTyped: Boolean = myTypedArgs.size == args.length
 
     /** The typed arguments. This takes any arguments already typed using
      *  `typedArg` into account.
@@ -286,7 +286,7 @@ object ProtoTypes {
 
     override def isMatchedBy(tp: Type)(implicit ctx: Context) = {
       def isInstantiatable(tp: Type) = tp.widen match {
-        case PolyType(paramNames) => paramNames.length == targs.length
+        case tp: GenericType => tp.paramNames.length == targs.length
         case _ => false
       }
       isInstantiatable(tp) || tp.member(nme.apply).hasAltWith(d => isInstantiatable(d.info))
@@ -311,6 +311,9 @@ object ProtoTypes {
    */
   @sharable object AnyFunctionProto extends UncachedGroundType with MatchAlways
 
+  /** A prototype for type constructors that are followed by a type application */
+  @sharable object AnyTypeConstructorProto extends UncachedGroundType with MatchAlways
+
   /** Add all parameters in given polytype `pt` to the constraint's domain.
    *  If the constraint contains already some of these parameters in its domain,
    *  make a copy of the polytype and add the copy's type parameters instead.
@@ -320,10 +323,8 @@ object ProtoTypes {
    */
   def constrained(pt: PolyType, owningTree: untpd.Tree)(implicit ctx: Context): (PolyType, List[TypeVar]) = {
     val state = ctx.typerState
-    def howmany = if (owningTree.isEmpty) "no" else "some"
-    def committable = if (ctx.typerState.isCommittable) "committable" else "uncommittable"
-    assert(owningTree.isEmpty != ctx.typerState.isCommittable,
-      s"inconsistent: $howmany typevars were added to $committable constraint ${state.constraint}")
+    assert(!(ctx.typerState.isCommittable && owningTree.isEmpty),
+      s"inconsistent: no typevars were added to committable constraint ${state.constraint}")
 
     def newTypeVars(pt: PolyType): List[TypeVar] =
       for (n <- (0 until pt.paramNames.length).toList)
@@ -404,6 +405,11 @@ object ProtoTypes {
       WildcardType(TypeBounds.upper(wildApprox(mt.paramTypes(pnum))))
     case tp: TypeVar =>
       wildApprox(tp.underlying)
+    case tp @ HKApply(tycon, args) =>
+      wildApprox(tycon) match {
+        case _: WildcardType => WildcardType // this ensures we get a * type
+        case tycon1 => tp.derivedAppliedType(tycon1, args.mapConserve(wildApprox(_)))
+      }
     case tp: AndType =>
       val tp1a = wildApprox(tp.tp1)
       val tp2a = wildApprox(tp.tp2)
@@ -420,6 +426,8 @@ object ProtoTypes {
         WildcardType(tp1a.bounds | tp2a.bounds)
       else
         tp.derivedOrType(tp1a, tp2a)
+    case tp: LazyRef =>
+      WildcardType
     case tp: SelectionProto =>
       tp.derivedSelectionProto(tp.name, wildApprox(tp.memberProto), NoViewsAllowed)
     case tp: ViewProto =>
@@ -429,6 +437,8 @@ object ProtoTypes {
     case _ =>
       (if (theMap != null) theMap else new WildApproxMap).mapOver(tp)
   }
+
+  @sharable object AssignProto extends UncachedGroundType with MatchAlways
 
   private[ProtoTypes] class WildApproxMap(implicit ctx: Context) extends TypeMap {
     def apply(tp: Type) = wildApprox(tp, this)

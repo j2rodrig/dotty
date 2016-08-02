@@ -10,7 +10,7 @@ import dotty.tools.dotc.core.SymDenotations.SymDenotation
 import TreeTransforms.{MiniPhaseTransform, TransformerInfo}
 import dotty.tools.dotc.core.Types.{ThisType, TermRef}
 
-/** Replace This references to module classes  in static methods by global identifiers to the
+/** Replace This references to module classes in static methods by global identifiers to the
  *  corresponding modules.
  */
 class ElimStaticThis extends MiniPhaseTransform {
@@ -27,9 +27,11 @@ class ElimStaticThis extends MiniPhaseTransform {
   override def transformIdent(tree: tpd.Ident)(implicit ctx: Context, info: TransformerInfo): tpd.Tree = {
     if (ctx.owner.enclosingMethod.is(JavaStatic)) {
       tree.tpe match {
+        case TermRef(thiz: ThisType, _) if thiz.cls.is(ModuleClass) =>
+          ref(thiz.cls.sourceModule).select(tree.symbol)
         case TermRef(thiz: ThisType, _) =>
-          assert(thiz.underlying.typeSymbol.is(ModuleClass))
-          ref(thiz.underlying.typeSymbol.sourceModule).select(tree.symbol)
+          assert(tree.symbol.is(Flags.JavaStatic))
+          tree
         case _ => tree
       }
     }

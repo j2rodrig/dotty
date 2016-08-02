@@ -2,6 +2,7 @@
 *.class
 *.log
 *~
+*.swp
 
 # sbt specific
 dist/*
@@ -31,7 +32,12 @@ tests/partest-generated/
 tests/locks/
 /test-classes/
 
+# Used in tests
+scala-scala
 
 # Ignore output files but keep the directory
 out/
 !out/.keep
+
+# Ignore build-file
+.packages

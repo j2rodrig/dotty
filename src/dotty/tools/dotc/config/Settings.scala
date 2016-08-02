@@ -19,6 +19,7 @@ object Settings {
   val StringTag = ClassTag(classOf[String])
   val ListTag = ClassTag(classOf[List[_]])
   val VersionTag = ClassTag(classOf[ScalaVersion])
+  val OptionTag = ClassTag(classOf[Option[_]])
 
   class SettingsState(initialValues: Seq[Any]) {
     private var values = ArrayBuffer(initialValues: _*)
@@ -55,7 +56,8 @@ object Settings {
     choices: Seq[T] = Nil,
     prefix: String = "",
     aliases: List[String] = Nil,
-    depends: List[(Setting[_], Any)] = Nil)(private[Settings] val idx: Int) {
+    depends: List[(Setting[_], Any)] = Nil,
+    propertyClass: Option[Class[_]] = None)(private[Settings] val idx: Int) {
 
     def withAbbreviation(abbrv: String): Setting[T] =
       copy(aliases = aliases :+ abbrv)(idx)
@@ -112,14 +114,18 @@ object Settings {
       def doSet(argRest: String) = ((implicitly[ClassTag[T]], args): @unchecked) match {
         case (BooleanTag, _) =>
           update(true, args)
+        case (OptionTag, _) =>
+          update(Some(propertyClass.get.newInstance), args)
         case (ListTag, _) =>
           if (argRest.isEmpty) missingArg
           else update((argRest split ",").toList, args)
+        case (StringTag, _) if choices.nonEmpty =>
+          if (argRest.isEmpty) missingArg
+          else if (!choices.contains(argRest))
+            fail(s"$arg is not a valid choice for $name", args)
+          else update(argRest, args)
         case (StringTag, arg2 :: args2) =>
-          if (choices.nonEmpty && !(choices contains arg2))
-            fail(s"$arg2 is not a valid choice for $name", args2)
-          else
-            update(arg2, args2)
+          update(arg2, args2)
         case (IntTag, arg2 :: args2) =>
           try {
             val x = arg2.toInt
@@ -255,5 +261,8 @@ object Settings {
 
     def VersionSetting(name: String, descr: String, default: ScalaVersion = NoScalaVersion): Setting[ScalaVersion] =
       publish(Setting(name, descr, default))
+
+    def OptionSetting[T: ClassTag](name: String, descr: String): Setting[Option[T]] =
+      publish(Setting(name, descr, None, propertyClass = Some(implicitly[ClassTag[T]].runtimeClass)))
   }
 }

@@ -13,6 +13,7 @@ import Types._, Contexts._, Constants._, Names._, NameOps._, Flags._, DenotTrans
 import SymDenotations._, Symbols._, StdNames._, Annotations._, Trees._, Scopes._, Denotations._
 import util.Positions._
 import Decorators._
+import config.Printers._
 import Symbols._, TypeUtils._
 
 /** A macro transform that runs immediately after typer and that performs the following functions:
@@ -35,6 +36,8 @@ import Symbols._, TypeUtils._
  *  (7) Insert `.package` for selections of package object members
  *
  *  (8) Replaces self references by name with `this`
+ *
+ *  (9) Adds SourceFile annotations to all top-level classes and objects
  *
  *  The reason for making this a macro transform is that some functions (in particular
  *  super and protected accessors and instantiation checks) are naturally top-down and
@@ -68,7 +71,7 @@ class PostTyper extends MacroTransform with IdentityDenotTransformer  { thisTran
     // TODO fill in
   }
 
-  /** Check bounds of AppliedTypeTrees.
+  /** Check bounds of AppliedTypeTrees and TypeApplys.
    *  Replace type trees with TypeTree nodes.
    *  Replace constant expressions with Literal nodes.
    *  Note: Demanding idempotency instead of purity in literalize is strictly speaking too loose.
@@ -99,6 +102,9 @@ class PostTyper extends MacroTransform with IdentityDenotTransformer  { thisTran
    */
   private def normalizeTree(tree: Tree)(implicit ctx: Context): Tree = tree match {
     case tree: TypeTree => tree
+    case TypeApply(fn, args) =>
+      Checking.checkBounds(args, fn.tpe.widen.asInstanceOf[PolyType])
+      tree
     case _ =>
       if (tree.isType) {
         Checking.typeChecker.traverse(tree)
@@ -108,6 +114,17 @@ class PostTyper extends MacroTransform with IdentityDenotTransformer  { thisTran
         case ConstantType(value) if isIdempotentExpr(tree) => Literal(value)
         case _ => tree
       }
+  }
+
+  /** If the type of `tree` is a TermRefWithSignature with an underdefined
+   *  signature, narrow the type by re-computing the signature (which should
+   *  be fully-defined by now).
+   */
+  private def fixSignature[T <: Tree](tree: T)(implicit ctx: Context): T = tree.tpe match {
+    case tpe: TermRefWithSignature if tpe.signature.isUnderDefined =>
+      typr.println(i"fixing $tree with type ${tree.tpe.widen.toString} with sig ${tpe.signature} to ${tpe.widen.signature}")
+      tree.withType(TermRef.withSig(tpe.prefix, tpe.name, tpe.widen.signature)).asInstanceOf[T]
+    case _ => tree
   }
 
   class PostTyperTransformer extends Transformer {
@@ -127,8 +144,15 @@ class PostTyper extends MacroTransform with IdentityDenotTransformer  { thisTran
     private def transformAnnot(annot: Annotation)(implicit ctx: Context): Annotation =
       annot.derivedAnnotation(transformAnnot(annot.tree))
 
-    private def transformAnnots(tree: MemberDef)(implicit ctx: Context): Unit =
-      tree.symbol.transformAnnotations(transformAnnot)
+    private def transformMemberDef(tree: MemberDef)(implicit ctx: Context): Unit = {
+      val sym = tree.symbol
+      sym.transformAnnotations(transformAnnot)
+      if (!sym.is(SyntheticOrPrivate) && sym.owner.isClass) {
+        val info1 = Checking.checkNoPrivateLeaks(sym, tree.pos)
+        if (info1 ne sym.info)
+          sym.copySymDenotation(info = info1).installAfter(thisTransformer)
+      }
+    }
 
     private def transformSelect(tree: Select, targs: List[Tree])(implicit ctx: Context): Tree = {
       val qual = tree.qualifier
@@ -140,24 +164,60 @@ class PostTyper extends MacroTransform with IdentityDenotTransformer  { thisTran
       }
     }
 
+    private def normalizeTypeArgs(tree: TypeApply)(implicit ctx: Context): TypeApply = tree.tpe match {
+      case pt: PolyType => // wait for more arguments coming
+        tree
+      case _ =>
+        def decompose(tree: TypeApply): (Tree, List[Tree]) = tree.fun match {
+          case fun: TypeApply =>
+            val (tycon, args) = decompose(fun)
+            (tycon, args ++ tree.args)
+          case _ =>
+            (tree.fun, tree.args)
+        }
+        def reorderArgs(pnames: List[Name], namedArgs: List[NamedArg], otherArgs: List[Tree]): List[Tree] = pnames match {
+          case pname :: pnames1 =>
+            namedArgs.partition(_.name == pname) match {
+              case (NamedArg(_, arg) :: _, namedArgs1) =>
+                arg :: reorderArgs(pnames1, namedArgs1, otherArgs)
+              case _ =>
+                val otherArg :: otherArgs1 = otherArgs
+                otherArg :: reorderArgs(pnames1, namedArgs, otherArgs1)
+            }
+          case nil =>
+            assert(namedArgs.isEmpty && otherArgs.isEmpty)
+            Nil
+        }
+        val (tycon, args) = decompose(tree)
+        tycon.tpe.widen match {
+          case tp: PolyType =>
+            val (namedArgs, otherArgs) = args.partition(isNamedArg)
+            val args1 = reorderArgs(tp.paramNames, namedArgs.asInstanceOf[List[NamedArg]], otherArgs)
+            TypeApply(tycon, args1).withPos(tree.pos).withType(tree.tpe)
+          case _ =>
+            tree
+        }
+    }
+
     override def transform(tree: Tree)(implicit ctx: Context): Tree =
       try normalizeTree(tree) match {
         case tree: Ident =>
           tree.tpe match {
             case tpe: ThisType => This(tpe.cls).withPos(tree.pos)
-            case _ => paramFwd.adaptRef(tree)
+            case _ => paramFwd.adaptRef(fixSignature(tree))
           }
         case tree: Select =>
-          transformSelect(paramFwd.adaptRef(tree), Nil)
-        case tree @ TypeApply(fn, args) =>
+          transformSelect(paramFwd.adaptRef(fixSignature(tree)), Nil)
+        case tree: TypeApply =>
+          val tree1 @ TypeApply(fn, args) = normalizeTypeArgs(tree)
           Checking.checkBounds(args, fn.tpe.widen.asInstanceOf[PolyType])
           fn match {
             case sel: Select =>
               val args1 = transform(args)
               val sel1 = transformSelect(sel, args1)
-              if (superAcc.isProtectedAccessor(sel1)) sel1 else cpy.TypeApply(tree)(sel1, args1)
+              if (superAcc.isProtectedAccessor(sel1)) sel1 else cpy.TypeApply(tree1)(sel1, args1)
             case _ =>
-              super.transform(tree)
+              super.transform(tree1)
           }
         case tree @ Assign(sel: Select, _) =>
           superAcc.transformAssign(super.transform(tree))
@@ -172,20 +232,26 @@ class PostTyper extends MacroTransform with IdentityDenotTransformer  { thisTran
           }
           finally parentNews = saved
         case tree: DefDef =>
-          transformAnnots(tree)
+          transformMemberDef(tree)
           superAcc.wrapDefDef(tree)(super.transform(tree).asInstanceOf[DefDef])
         case tree: TypeDef =>
-          transformAnnots(tree)
+          transformMemberDef(tree)
           val sym = tree.symbol
           val tree1 =
-            if (sym.isClass) tree
+            if (sym.isClass) {
+              if (sym.owner.is(Package) &&
+                  ctx.compilationUnit.source.exists &&
+                  sym != defn.SourceFileAnnot)
+                sym.addAnnotation(Annotation.makeSourceFile(ctx.compilationUnit.source.file.path))
+              tree
+            }
             else {
               Checking.typeChecker.traverse(tree.rhs)
               cpy.TypeDef(tree)(rhs = TypeTree(tree.symbol.info))
             }
           super.transform(tree1)
         case tree: MemberDef =>
-          transformAnnots(tree)
+          transformMemberDef(tree)
           super.transform(tree)
         case tree: New if !inJavaAnnot && !parentNews.contains(tree) =>
           Checking.checkInstantiable(tree.tpe, tree.pos)

@@ -21,6 +21,7 @@ import StdNames._
 import NameOps._
 import ast.tpd.Tree
 import ast.TreeTypeMap
+import Constants.Constant
 import Denotations.{ Denotation, SingleDenotation, MultiDenotation }
 import collection.mutable
 import io.AbstractFile
@@ -360,11 +361,13 @@ trait Symbols { this: Context =>
 
 object Symbols {
 
+  implicit def eqSymbol: Eq[Symbol, Symbol] = Eq
+
   /** A Symbol represents a Scala definition/declaration or a package.
    *  @param coord  The coordinates of the symbol (a position or an index)
    *  @param id     A unique identifier of the symbol (unique per ContextBase)
    */
-  class Symbol private[Symbols] (val coord: Coord, val id: Int) extends DotClass with printing.Showable {
+  class Symbol private[Symbols] (val coord: Coord, val id: Int) extends DotClass with TypeParamInfo with printing.Showable {
 
     type ThisName <: Name
 
@@ -397,10 +400,10 @@ object Symbols {
 
     /** Subclass tests and casts */
     final def isTerm(implicit ctx: Context): Boolean =
-      (if(isDefinedInCurrentRun) lastDenot else denot).isTerm
+      (if (defRunId == ctx.runId) lastDenot else denot).isTerm
 
     final def isType(implicit ctx: Context): Boolean =
-      (if(isDefinedInCurrentRun) lastDenot else denot).isType
+      (if (defRunId == ctx.runId) lastDenot else denot).isType
 
     final def isClass: Boolean = isInstanceOf[ClassSymbol]
 
@@ -463,25 +466,37 @@ object Symbols {
       denot.topLevelClass.symbol.associatedFile
 
     /** The class file from which this class was generated, null if not applicable. */
-    final def binaryFile(implicit ctx: Context): AbstractFile =
-      pickFile(associatedFile, classFile = true)
+    final def binaryFile(implicit ctx: Context): AbstractFile = {
+      val file = associatedFile
+      if (file != null && file.path.endsWith("class")) file else null
+    }
 
     /** The source file from which this class was generated, null if not applicable. */
-    final def sourceFile(implicit ctx: Context): AbstractFile =
-      pickFile(associatedFile, classFile = false)
-
-   /** Desire to re-use the field in ClassSymbol which stores the source
-     *  file to also store the classfile, but without changing the behavior
-     *  of sourceFile (which is expected at least in the IDE only to
-     *  return actual source code.) So sourceFile has classfiles filtered out.
-     */
-    private def pickFile(file: AbstractFile, classFile: Boolean): AbstractFile =
-      if ((file eq null) || classFile != (file.path endsWith ".class")) null else file
+    final def sourceFile(implicit ctx: Context): AbstractFile = {
+      val file = associatedFile
+      if (file != null && !file.path.endsWith("class")) file
+      else denot.topLevelClass.getAnnotation(defn.SourceFileAnnot) match {
+        case Some(sourceAnnot) => sourceAnnot.argumentConstant(0) match {
+          case Some(Constant(path: String)) => AbstractFile.getFile(path)
+          case none => null
+        }
+        case none => null
+      }
+    }
 
     /** The position of this symbol, or NoPosition is symbol was not loaded
      *  from source.
      */
     def pos: Position = if (coord.isPosition) coord.toPosition else NoPosition
+
+    // TypeParamInfo methods
+    def isTypeParam(implicit ctx: Context) = denot.is(TypeParam)
+    def paramName(implicit ctx: Context) = name.asTypeName
+    def paramBounds(implicit ctx: Context) = denot.info.bounds
+    def paramBoundsAsSeenFrom(pre: Type)(implicit ctx: Context) = pre.memberInfo(this).bounds
+    def paramBoundsOrCompleter(implicit ctx: Context): Type = denot.infoOrCompleter
+    def paramVariance(implicit ctx: Context) = denot.variance
+    def paramRef(implicit ctx: Context) = denot.typeRef
 
 // -------- Printing --------------------------------------------------------
 
@@ -513,7 +528,7 @@ object Symbols {
 
     /** The source or class file from which this class was generated, null if not applicable. */
     override def associatedFile(implicit ctx: Context): AbstractFile =
-      if (assocFile != null || (this.owner is PackageClass)) assocFile
+      if (assocFile != null || (this.owner is PackageClass) || this.isEffectiveRoot) assocFile
       else super.associatedFile
 
     final def classDenot(implicit ctx: Context): ClassDenotation =

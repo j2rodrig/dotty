@@ -15,6 +15,7 @@ import core.StdNames._
 import core.Decorators._
 import core.TypeErasure.isErasedType
 import core.Phases.Phase
+import core.Mode
 import typer._
 import typer.ErrorReporting._
 import reporting.ThrowingReporter
@@ -25,6 +26,9 @@ import collection.mutable
 import ProtoTypes._
 import config.Printers
 import java.lang.AssertionError
+
+import dotty.tools.dotc.core.Names
+
 import scala.util.control.NonFatal
 
 /** Run by -Ycheck option after a given phase, this class retypes all syntax trees
@@ -51,7 +55,7 @@ class TreeChecker extends Phase with SymTransformer {
       !name.exists(c => c == '.' || c == ';' || c =='[' || c == '/' || c == '<' || c == '>')
 
   def printError(str: String)(implicit ctx: Context) = {
-    ctx.println(Console.RED + "[error] " + Console.WHITE  + str)
+    ctx.echo(Console.RED + "[error] " + Console.WHITE  + str)
   }
 
   val NoSuperClass = Trait | Package
@@ -117,17 +121,22 @@ class TreeChecker extends Phase with SymTransformer {
   def check(phasesToRun: Seq[Phase], ctx: Context) = {
     val prevPhase = ctx.phase.prev // can be a mini-phase
     val squahsedPhase = ctx.squashed(prevPhase)
-    ctx.println(s"checking ${ctx.compilationUnit} after phase ${squahsedPhase}")
-    val checkingCtx = ctx.fresh.setReporter(new ThrowingReporter(ctx.reporter))
+    ctx.echo(s"checking ${ctx.compilationUnit} after phase ${squahsedPhase}")
+
+    val checkingCtx = ctx
+        .fresh
+        .setMode(Mode.ImplicitsEnabled)
+        .setReporter(new ThrowingReporter(ctx.reporter))
+
     val checker = new Checker(previousPhases(phasesToRun.toList)(ctx))
     try checker.typedExpr(ctx.compilationUnit.tpdTree)(checkingCtx)
     catch {
       case NonFatal(ex) =>     //TODO CHECK. Check that we are bootstrapped
         implicit val ctx: Context = checkingCtx
-        ctx.println(i"*** error while checking ${ctx.compilationUnit} after phase ${checkingCtx.phase.prev} ***")
-        ctx.println(ex.toString)
-        ctx.println(ex.getStackTrace.take(30).deep.mkString("\n"))
-        ctx.println("<<<")
+        ctx.echo(i"*** error while checking ${ctx.compilationUnit} after phase ${checkingCtx.phase.prev} ***")
+        ctx.echo(ex.toString)
+        ctx.echo(ex.getStackTrace.take(30).deep.mkString("\n"))
+        ctx.echo("<<<")
         throw ex
     }
   }
@@ -162,10 +171,10 @@ class TreeChecker extends Phase with SymTransformer {
         }
 
         nowDefinedSyms += tree.symbol
-        //ctx.println(i"defined: ${tree.symbol}")
+        //ctx.echo(i"defined: ${tree.symbol}")
         val res = op
         nowDefinedSyms -= tree.symbol
-        //ctx.println(i"undefined: ${tree.symbol}")
+        //ctx.echo(i"undefined: ${tree.symbol}")
         res
       case _ => op
     }
@@ -179,6 +188,80 @@ class TreeChecker extends Phase with SymTransformer {
     def assertDefined(tree: untpd.Tree)(implicit ctx: Context) =
       if (tree.symbol.maybeOwner.isTerm)
         assert(nowDefinedSyms contains tree.symbol, i"undefined symbol ${tree.symbol}")
+
+    /** assert Java classes are not used as objects */
+    def assertIdentNotJavaClass(tree: Tree)(implicit ctx: Context): Unit = tree match {
+      case _ : untpd.Ident =>
+        assert(!tree.symbol.is(JavaModule), "Java class can't be used as value: " + tree)
+      case _ =>
+    }
+
+    /** check Java classes are not used as objects */
+    def checkIdentNotJavaClass(tree: Tree)(implicit ctx: Context): Unit = tree match {
+      // case tree: untpd.Ident =>
+      // case tree: untpd.Select =>
+      // case tree: untpd.SelectFromTypeTree =>
+      // case tree: untpd.Bind =>
+      case vd : ValDef =>
+        assertIdentNotJavaClass(vd.forceIfLazy)
+      case dd : DefDef =>
+        assertIdentNotJavaClass(dd.forceIfLazy)
+      // case tree: untpd.TypeDef =>
+      case Apply(fun, args) =>
+        assertIdentNotJavaClass(fun)
+        args.foreach(assertIdentNotJavaClass _)
+      // case tree: untpd.This =>
+      // case tree: untpd.Literal =>
+      // case tree: untpd.New =>
+      case Pair(left, right) =>
+        assertIdentNotJavaClass(left)
+        assertIdentNotJavaClass(right)
+      case Typed(expr, _) =>
+        assertIdentNotJavaClass(expr)
+      case NamedArg(_, arg) =>
+        assertIdentNotJavaClass(arg)
+      case Assign(_, rhs) =>
+        assertIdentNotJavaClass(rhs)
+      case Block(stats, expr) =>
+        stats.foreach(assertIdentNotJavaClass _)
+        assertIdentNotJavaClass(expr)
+      case If(_, thenp, elsep) =>
+        assertIdentNotJavaClass(thenp)
+        assertIdentNotJavaClass(elsep)
+      // case tree: untpd.Closure =>
+      case Match(selector, cases) =>
+        assertIdentNotJavaClass(selector)
+        cases.foreach(caseDef => assertIdentNotJavaClass(caseDef.body))
+      case Return(expr, _) =>
+        assertIdentNotJavaClass(expr)
+      case Try(expr, cases, finalizer) =>
+        assertIdentNotJavaClass(expr)
+        cases.foreach(caseDef => assertIdentNotJavaClass(caseDef.body))
+        assertIdentNotJavaClass(finalizer)
+      // case tree: TypeApply =>
+      // case tree: Super =>
+      case SeqLiteral(elems, _) =>
+        elems.foreach(assertIdentNotJavaClass)
+      // case tree: TypeTree =>
+      // case tree: SingletonTypeTree =>
+      // case tree: AndTypeTree =>
+      // case tree: OrTypeTree =>
+      // case tree: RefinedTypeTree =>
+      // case tree: AppliedTypeTree =>
+      // case tree: ByNameTypeTree =>
+      // case tree: TypeBoundsTree =>
+      // case tree: Alternative =>
+      // case tree: PackageDef =>
+      case Annotated(_, arg) =>
+        assertIdentNotJavaClass(arg)
+      case _ =>
+    }
+
+    override def typed(tree: untpd.Tree, pt: Type = WildcardType)(implicit ctx: Context): tpd.Tree = {
+      val tpdTree = super.typed(tree)
+      checkIdentNotJavaClass(tpdTree)
+      tpdTree
+    }
 
     override def typedUnadapted(tree: untpd.Tree, pt: Type)(implicit ctx: Context): tpd.Tree = {
       val res = tree match {
@@ -232,14 +315,24 @@ class TreeChecker extends Phase with SymTransformer {
     }.apply(tp)
 
     def checkNotRepeated(tree: Tree)(implicit ctx: Context): tree.type = {
-      assert(!tree.tpe.widen.isRepeatedParam, i"repeated parameter type not allowed here: $tree")
+      def allowedRepeated = (tree.symbol.flags is Case) && tree.tpe.widen.isRepeatedParam
+
+      assert(!tree.tpe.widen.isRepeatedParam || allowedRepeated, i"repeated parameter type not allowed here: $tree")
       tree
+    }
+
+    /** Check that all methods have MethodicType */
+    def isMethodType(pt: Type)(implicit ctx: Context): Boolean = pt match {
+      case at: AnnotatedType => isMethodType(at.tpe)
+      case _: MethodicType => true  // MethodType, ExprType, PolyType
+      case _ => false
     }
 
     override def typedIdent(tree: untpd.Ident, pt: Type)(implicit ctx: Context): Tree = {
       assert(tree.isTerm || !ctx.isAfterTyper, tree.show + " at " + ctx.phase)
       assert(tree.isType || !needsSelect(tree.tpe), i"bad type ${tree.tpe} for $tree # ${tree.uniqueId}")
       assertDefined(tree)
+
       checkNotRepeated(super.typedIdent(tree, pt))
     }
 
@@ -277,12 +370,14 @@ class TreeChecker extends Phase with SymTransformer {
       def isNonMagicalMethod(x: Symbol) =
         x.is(Method) &&
           !x.isCompanionMethod &&
-          !x.isValueClassConvertMethod &&
-          x != defn.newRefArrayMethod
+          !x.isValueClassConvertMethod
 
       val symbolsNotDefined = cls.classInfo.decls.toSet.filter(isNonMagicalMethod) -- impl.body.map(_.symbol) - constr.symbol
 
-      assert(symbolsNotDefined.isEmpty, i" $cls tree does not define methods: $symbolsNotDefined")
+      assert(symbolsNotDefined.isEmpty,
+          i" $cls tree does not define methods: ${symbolsNotDefined.toList}%, %\n" +
+          i"expected: ${cls.classInfo.decls.toSet.filter(isNonMagicalMethod).toList}%, %\n" +
+          i"defined: ${impl.body.map(_.symbol)}%, %")
 
       super.typedClassDef(cdef, cls)
     }
@@ -290,8 +385,10 @@ class TreeChecker extends Phase with SymTransformer {
     override def typedDefDef(ddef: untpd.DefDef, sym: Symbol)(implicit ctx: Context) =
       withDefinedSyms(ddef.tparams) {
         withDefinedSymss(ddef.vparamss) {
-          if (!sym.isClassConstructor) assert(isValidJVMMethodName(sym.name), s"${sym.fullName} name is invalid on jvm")
-          super.typedDefDef(ddef, sym)
+          if (!sym.isClassConstructor && !(sym.name eq Names.STATIC_CONSTRUCTOR)) assert(isValidJVMMethodName(sym.name), s"${sym.fullName} name is invalid on jvm")
+          val tpdTree = super.typedDefDef(ddef, sym)
+          assert(isMethodType(sym.info), i"wrong type, expect a method type for ${sym.fullName}, but found: ${sym.info}")
+          tpdTree
         }
       }
 

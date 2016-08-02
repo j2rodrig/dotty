@@ -6,6 +6,7 @@ import Contexts._, Types._, Symbols._, Names._, Flags._, Scopes._
 import SymDenotations._, Denotations.SingleDenotation
 import config.Printers._
 import util.Positions._
+import NameOps._
 import Decorators._
 import StdNames._
 import Annotations._
@@ -122,100 +123,21 @@ trait TypeOps { this: Context => // TODO: Make standalone object.
     def currentVariance = variance
   }
 
-  /** Approximate a type `tp` with a type that does not contain skolem types.
-   */
-  final def deskolemize(tp: Type): Type = deskolemize(tp, 1, Set())
-
-  private def deskolemize(tp: Type, variance: Int, seen: Set[SkolemType]): Type = {
-    def approx(lo: Type = defn.NothingType, hi: Type = defn.AnyType, newSeen: Set[SkolemType] = seen) =
-      if (variance == 0) NoType
-      else deskolemize(if (variance < 0) lo else hi, variance, newSeen)
-    tp match {
+  /** Approximate a type `tp` with a type that does not contain skolem types. */
+  object deskolemize extends ApproximatingTypeMap {
+    private var seen: Set[SkolemType] = Set()
+    def apply(tp: Type) = tp match {
       case tp: SkolemType =>
         if (seen contains tp) NoType
-        else approx(hi = tp.info, newSeen = seen + tp)
-      case tp: NamedType =>
-        val sym = tp.symbol
-        if (sym.isStatic) tp
         else {
-          val pre1 = deskolemize(tp.prefix, variance, seen)
-          if (pre1 eq tp.prefix) tp
-          else {
-            val d = tp.prefix.member(tp.name)
-            d.info match {
-              case TypeAlias(alias) => deskolemize(alias, variance, seen)
-              case _ =>
-                if (pre1.exists && !pre1.isRef(defn.NothingClass)) tp.derivedSelect(pre1)
-                else {
-                  ctx.log(s"deskolem: $tp: ${tp.info}")
-                  tp.info match {
-                    case TypeBounds(lo, hi) => approx(lo, hi)
-                    case info => approx(defn.NothingType, info)
-                  }
-                }
-            }
-          }
+          val saved = seen
+          seen += tp
+          try approx(hi = tp.info)
+          finally seen = saved
         }
-      case _: ThisType | _: BoundType | _: SuperType | NoType | NoPrefix =>
-        tp
-      case tp: RefinedType =>
-        val parent1 = deskolemize(tp.parent, variance, seen)
-        if (parent1.exists) {
-          val refinedInfo1 = deskolemize(tp.refinedInfo, variance, seen)
-          if (refinedInfo1.exists)
-            tp.derivedRefinedType(parent1, tp.refinedName, refinedInfo1)
-          else
-            approx(hi = parent1)
-        }
-        else approx()
-      case tp: TypeAlias =>
-        val alias1 = deskolemize(tp.alias, variance * tp.variance, seen)
-        if (alias1.exists) tp.derivedTypeAlias(alias1)
-        else approx(hi = TypeBounds.empty)
-      case tp: TypeBounds =>
-        val lo1 = deskolemize(tp.lo, -variance, seen)
-        val hi1 = deskolemize(tp.hi, variance, seen)
-        if (lo1.exists && hi1.exists) tp.derivedTypeBounds(lo1, hi1)
-        else approx(hi =
-          if (lo1.exists) TypeBounds.lower(lo1)
-          else if (hi1.exists) TypeBounds.upper(hi1)
-          else TypeBounds.empty)
-      case tp: ClassInfo =>
-        val pre1 = deskolemize(tp.prefix, variance, seen)
-        if (pre1.exists) tp.derivedClassInfo(pre1)
-        else NoType
-      case tp: AndOrType =>
-        val tp1d = deskolemize(tp.tp1, variance, seen)
-        val tp2d = deskolemize(tp.tp2, variance, seen)
-        if (tp1d.exists && tp2d.exists)
-          tp.derivedAndOrType(tp1d, tp2d)
-        else if (tp.isAnd)
-          approx(hi = tp1d & tp2d)  // if one of tp1d, tp2d exists, it is the result of tp1d & tp2d
-        else
-          approx(lo = tp1d & tp2d)
-      case tp: WildcardType =>
-        val bounds1 = deskolemize(tp.optBounds, variance, seen)
-        if (bounds1.exists) tp.derivedWildcardType(bounds1)
-        else WildcardType
       case _ =>
         if (tp.isInstanceOf[MethodicType]) assert(variance != 0, tp)
-        deskolemizeMap.mapOver(tp, variance, seen)
-    }
-  }
-
-  object deskolemizeMap extends TypeMap {
-    private var seen: Set[SkolemType] = _
-    def apply(tp: Type) = deskolemize(tp, variance, seen)
-    def mapOver(tp: Type, variance: Int, seen: Set[SkolemType]) = {
-      val savedVariance = this.variance
-      val savedSeen = this.seen
-      this.variance = variance
-      this.seen = seen
-      try super.mapOver(tp)
-      finally {
-        this.variance = savedVariance
-        this.seen = savedSeen
-      }
+        mapOver(tp)
     }
   }
 
@@ -272,10 +194,7 @@ trait TypeOps { this: Context => // TODO: Make standalone object.
         case tp: RefinedType => isClassRef(tp.parent)
         case _ => false
       }
-      def next(tp: TypeProxy) = tp.underlying match {
-        case TypeBounds(_, hi) => hi
-        case nx => nx
-      }
+
       /** If `tp1` and `tp2` are typebounds, try to make one fit into the other
        *  or to make them equal, by instantiating uninstantiated type variables.
        */
@@ -305,19 +224,24 @@ trait TypeOps { this: Context => // TODO: Make standalone object.
               return tp1.derivedRefinedType(
                 approximateUnion(OrType(tp1.parent, tp2.parent)),
                 tp1.refinedName,
-                homogenizedUnion(tp1.refinedInfo, tp2.refinedInfo).substRefinedThis(tp2, RefinedThis(tp1)))
+                homogenizedUnion(tp1.refinedInfo, tp2.refinedInfo))
                 //.ensuring { x => println(i"approx or $tp1 | $tp2 = $x\n constr = ${ctx.typerState.constraint}"); true } // DEBUG
             case _ =>
           }
         case _ =>
       }
+
       tp1 match {
+        case tp1: RecType =>
+          tp1.rebind(approximateOr(tp1.parent, tp2))
         case tp1: TypeProxy if !isClassRef(tp1) =>
-          approximateUnion(next(tp1) | tp2)
+          approximateUnion(tp1.superType | tp2)
         case _ =>
           tp2 match {
+            case tp2: RecType =>
+              tp2.rebind(approximateOr(tp1, tp2.parent))
             case tp2: TypeProxy if !isClassRef(tp2) =>
-              approximateUnion(tp1 | next(tp2))
+              approximateUnion(tp1 | tp2.superType)
             case _ =>
               val commonBaseClasses = tp.mapReduceOr(_.baseClasses)(intersect)
               val doms = dominators(commonBaseClasses, Nil)
@@ -331,15 +255,31 @@ trait TypeOps { this: Context => // TODO: Make standalone object.
     if (ctx.featureEnabled(defn.LanguageModuleClass, nme.keepUnions)) tp
     else tp match {
       case tp: OrType =>
-        approximateOr(tp.tp1, tp.tp2)
+        approximateOr(tp.tp1, tp.tp2)  // Maybe refactor using liftToRec?
       case tp @ AndType(tp1, tp2) =>
         tp derived_& (approximateUnion(tp1), approximateUnion(tp2))
       case tp: RefinedType =>
         tp.derivedRefinedType(approximateUnion(tp.parent), tp.refinedName, tp.refinedInfo)
+      case tp: RecType =>
+        tp.rebind(approximateUnion(tp.parent))
       case _ =>
         tp
     }
   }
+
+  /** Not currently needed:
+   *
+  def liftToRec(f: (Type, Type) => Type)(tp1: Type, tp2: Type)(implicit ctx: Context) = {
+    def f2(tp1: Type, tp2: Type): Type = tp2 match {
+      case tp2: RecType => tp2.rebind(f(tp1, tp2.parent))
+      case _ => f(tp1, tp2)
+    }
+    tp1 match {
+      case tp1: RecType => tp1.rebind(f2(tp1.parent, tp2))
+      case _ => f2(tp1, tp2)
+    }
+  }
+  */
 
   private def enterArgBinding(formal: Symbol, info: Type, cls: ClassSymbol, decls: Scope) = {
     val lazyInfo = new LazyType { // needed so we do not force `formal`.
@@ -421,13 +361,23 @@ trait TypeOps { this: Context => // TODO: Make standalone object.
      *  to the current scope, provided (1) variances of both aliases are the same, and
      *  (2) X is not yet defined in current scope. This "short-circuiting" prevents
      *  long chains of aliases which would have to be traversed in type comparers.
+     *
+     *  Note: Test i1401.scala shows that `forwardRefs` is also necessary
+     *  for typechecking in the case where self types refer to type parameters
+     *  that are upper-bounded by subclass instances.
      */
     def forwardRefs(from: Symbol, to: Type, prefs: List[TypeRef]) = to match {
       case to @ TypeBounds(lo1, hi1) if lo1 eq hi1 =>
-        for (pref <- prefs)
-          for (argSym <- pref.decls)
-            if (argSym is BaseTypeArg)
-              forwardRef(argSym, from, to, cls, decls)
+        for (pref <- prefs) {
+          def forward(): Unit =
+            for (argSym <- pref.decls)
+              if (argSym is BaseTypeArg)
+                forwardRef(argSym, from, to, cls, decls)
+          pref.info match {
+            case info: TempClassInfo => info.addSuspension(forward)
+            case _ => forward()
+          }
+        }
       case _ =>
     }
 
@@ -440,22 +390,37 @@ trait TypeOps { this: Context => // TODO: Make standalone object.
     var formals: SimpleMap[TypeName, Symbol] = SimpleMap.Empty // A map of all formal parent parameter
 
     // Strip all refinements from parent type, populating `refinements` and `formals` maps.
-    def normalizeToRef(tp: Type): TypeRef = tp.dealias match {
-      case tp: TypeRef =>
-        tp
-      case tp @ RefinedType(tp1, name: TypeName) =>
-        val prevInfo = refinements(name)
-        refinements = refinements.updated(name,
-            if (prevInfo == null) tp.refinedInfo else prevInfo & tp.refinedInfo)
-        formals = formals.updated(name, tp1.typeParamNamed(name))
-        normalizeToRef(tp1)
-      case ErrorType =>
-        defn.AnyType
-      case AnnotatedType(tpe, _) =>
-        normalizeToRef(tpe)
-      case _ =>
-        throw new TypeError(s"unexpected parent type: $tp")
+    def normalizeToRef(tp: Type): TypeRef = {
+      def fail = throw new TypeError(s"unexpected parent type: $tp")
+      tp.dealias match {
+        case tp: TypeRef =>
+          tp
+        case tp @ RefinedType(tp1, name: TypeName, rinfo) =>
+          rinfo match {
+            case TypeAlias(TypeRef(pre, name1)) if name1 == name && (pre =:= cls.thisType) =>
+              // Don't record refinements of the form X = this.X (These can arise using named parameters).
+              typr.println(s"dropping refinement $tp")
+            case _ =>
+              val prevInfo = refinements(name)
+              refinements = refinements.updated(name,
+                if (prevInfo == null) tp.refinedInfo else prevInfo & tp.refinedInfo)
+              formals = formals.updated(name, tp1.typeParamNamed(name))
+          }
+          normalizeToRef(tp1)
+        case ErrorType =>
+          defn.AnyType
+        case AnnotatedType(tpe, _) =>
+          normalizeToRef(tpe)
+        case HKApply(tycon: TypeRef, args) =>
+          tycon.info match {
+            case TypeAlias(alias) => normalizeToRef(alias.appliedTo(args))
+            case _ => fail
+          }
+        case _ =>
+          fail
+      }
     }
+
     val parentRefs = parents map normalizeToRef
 
     // Enter all refinements into current scope.
@@ -464,9 +429,9 @@ trait TypeOps { this: Context => // TODO: Make standalone object.
         s"redefinition of ${decls.lookup(name).debugString} in ${cls.showLocated}")
       enterArgBinding(formals(name), refinedInfo, cls, decls)
     }
-    // Forward definitions in super classes that have one of the refined paramters
+    // Forward definitions in super classes that have one of the refined parameters
     // as aliases directly to the refined info.
-    // Note that this cannot be fused bwith the previous loop because we now
+    // Note that this cannot be fused with the previous loop because we now
     // assume that all arguments have been entered in `decls`.
     refinements foreachBinding { (name, refinedInfo) =>
       forwardRefs(formals(name), refinedInfo, parentRefs)
@@ -528,19 +493,21 @@ trait TypeOps { this: Context => // TODO: Make standalone object.
    */
   def featureEnabled(owner: ClassSymbol, feature: TermName): Boolean = {
     def toPrefix(sym: Symbol): String =
-      if (sym eq defn.LanguageModuleClass) "" else toPrefix(sym.owner) + sym.name + "."
+      if (!sym.exists || (sym eq defn.LanguageModuleClass) || (sym eq defn.Scala2LanguageModuleRef)) ""
+      else toPrefix(sym.owner) + sym.name + "."
     def featureName = toPrefix(owner) + feature
-    def hasImport(implicit ctx: Context): Boolean = (
-         ctx.importInfo != null
-      && (   (ctx.importInfo.site.widen.typeSymbol eq owner)
-          && ctx.importInfo.originals.contains(feature)
-          ||
-          { var c = ctx.outer
-            while (c.importInfo eq ctx.importInfo) c = c.outer
-            hasImport(c)
-          }))
+    def hasImport(implicit ctx: Context): Boolean = {
+      if (ctx.importInfo == null || (ctx.importInfo.site.widen.typeSymbol ne owner)) false
+      else if (ctx.importInfo.excluded.contains(feature)) false
+      else if (ctx.importInfo.originals.contains(feature)) true
+      else {
+        var c = ctx.outer
+        while (c.importInfo eq ctx.importInfo) c = c.outer
+        hasImport(c)
+      }
+    }
     def hasOption = ctx.base.settings.language.value exists (s => s == featureName || s == "_")
-    hasImport || hasOption
+    hasImport(ctx.withPhase(ctx.typerPhase)) || hasOption
   }
 
   /** Is auto-tupling enabled? */
@@ -549,6 +516,9 @@ trait TypeOps { this: Context => // TODO: Make standalone object.
 
   def scala2Mode =
     featureEnabled(defn.LanguageModuleClass, nme.Scala2)
+
+  def dynamicsEnabled =
+    featureEnabled(defn.Scala2LanguageModuleClass, nme.dynamics)
 
   def testScala2Mode(msg: String, pos: Position) = {
     if (scala2Mode) migrationWarning(msg, pos)

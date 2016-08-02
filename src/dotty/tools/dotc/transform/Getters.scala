@@ -12,6 +12,7 @@ import Constants._
 import TreeTransforms._
 import Flags._
 import Decorators._
+import ValueClasses._
 
 /** Performs the following rewritings for fields of a class:
  *
@@ -34,7 +35,7 @@ import Decorators._
  *
  *  Omitted from the rewritings are
  *
- *   - private[this] fields in non-trait classes
+ *   - private[this] fields in classes (excluding traits, value classes)
  *   - fields generated for static modules (TODO: needed?)
  *   - parameters, static fields, and fields coming from Java
  *
@@ -53,8 +54,9 @@ class Getters extends MiniPhaseTransform with SymTransformer { thisTransform =>
   override def transformSym(d: SymDenotation)(implicit ctx: Context): SymDenotation = {
     def noGetterNeeded =
       d.is(NoGetterNeeded) ||
-      d.initial.asInstanceOf[SymDenotation].is(PrivateLocal) && !d.owner.is(Trait) && !d.is(Flags.Lazy) ||
+      d.initial.asInstanceOf[SymDenotation].is(PrivateLocal) && !d.owner.is(Trait) && !isDerivedValueClass(d.owner) && !d.is(Flags.Lazy) ||
       d.is(Module) && d.isStatic ||
+      d.hasAnnotation(defn.ScalaStaticAnnot) ||
       d.isSelfSym
     if (d.isTerm && (d.is(Lazy) || d.owner.isClass) && d.info.isValueType && !noGetterNeeded) {
       val maybeStable = if (d.isStable) Stable else EmptyFlags
@@ -67,8 +69,8 @@ class Getters extends MiniPhaseTransform with SymTransformer { thisTransform =>
   private val NoGetterNeeded = Method | Param | JavaDefined | JavaStatic
 
   override def transformValDef(tree: ValDef)(implicit ctx: Context, info: TransformerInfo): Tree =
-    if (tree.symbol is Method) DefDef(tree.symbol.asTerm, tree.rhs) else tree
+    if (tree.symbol is Method) DefDef(tree.symbol.asTerm, tree.rhs).withPos(tree.pos) else tree
 
   override def transformAssign(tree: Assign)(implicit ctx: Context, info: TransformerInfo): Tree =
-    if (tree.lhs.symbol is Method) tree.lhs.becomes(tree.rhs) else tree
+    if (tree.lhs.symbol is Method) tree.lhs.becomes(tree.rhs).withPos(tree.pos) else tree
 }

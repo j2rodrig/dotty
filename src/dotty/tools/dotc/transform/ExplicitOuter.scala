@@ -47,7 +47,7 @@ class ExplicitOuter extends MiniPhaseTransform with InfoTransformer { thisTransf
 
   /** Add outer accessors if a class always needs an outer pointer */
   override def transformInfo(tp: Type, sym: Symbol)(implicit ctx: Context) = tp match {
-    case tp @ ClassInfo(_, cls, _, decls, _) if needsOuterAlways(cls) =>
+    case tp @ ClassInfo(_, cls, _, decls, _) if needsOuterAlways(cls) && !sym.is(JavaDefined) =>
       val newDecls = decls.cloneScope
       newOuterAccessors(cls).foreach(newDecls.enter)
       tp.derivedClassInfo(decls = newDecls)
@@ -209,29 +209,41 @@ object ExplicitOuter {
   private def hasOuterParam(cls: ClassSymbol)(implicit ctx: Context): Boolean =
     !cls.is(Trait) && needsOuterIfReferenced(cls) && outerAccessor(cls).exists
 
-  /** Tree references a an outer class of `cls` which is not a static owner.
+  /** Tree references an outer class of `cls` which is not a static owner.
    */
   def referencesOuter(cls: Symbol, tree: Tree)(implicit ctx: Context): Boolean = {
-    def isOuter(sym: Symbol) =
+    def isOuterSym(sym: Symbol) =
       !sym.isStaticOwner && cls.isProperlyContainedIn(sym)
+    def isOuterRef(ref: Type): Boolean = ref match {
+      case ref: ThisType =>
+        isOuterSym(ref.cls)
+      case ref: TermRef =>
+        if (ref.prefix ne NoPrefix)
+          !ref.symbol.isStatic && isOuterRef(ref.prefix)
+        else if (ref.symbol is Hoistable)
+          // ref.symbol will be placed in enclosing class scope by LambdaLift, so it might need
+          // an outer path then.
+          isOuterSym(ref.symbol.owner.enclosingClass)
+        else
+          // ref.symbol will get a proxy in immediately enclosing class. If this properly
+          // contains the current class, it needs an outer path.
+          ctx.owner.enclosingClass.owner.enclosingClass.isContainedIn(ref.symbol.owner)
+      case _ => false
+    }
+    def hasOuterPrefix(tp: Type) = tp match {
+      case TypeRef(prefix, _) => isOuterRef(prefix)
+      case _ => false
+    }
     tree match {
-      case thisTree @ This(_) =>
-        isOuter(thisTree.symbol)
-      case id: Ident =>
-        id.tpe match {
-          case ref @ TermRef(NoPrefix, _) =>
-            if (ref.symbol is Hoistable)
-              // ref.symbol will be placed in enclosing class scope by LambdaLift, so it might need
-              // an outer path then.
-              isOuter(ref.symbol.owner.enclosingClass)
-            else
-              // ref.symbol will get a proxy in immediately enclosing class. If this properly
-              // contains the current class, it needs an outer path.
-              ctx.owner.enclosingClass.owner.enclosingClass.isContainedIn(ref.symbol.owner)
-          case _ => false
-        }
+      case _: This | _: Ident => isOuterRef(tree.tpe)
       case nw: New =>
-        isOuter(nw.tpe.classSymbol.owner.enclosingClass)
+        val newCls = nw.tpe.classSymbol
+        isOuterSym(newCls.owner.enclosingClass) ||
+        hasOuterPrefix(nw.tpe) ||
+        newCls.owner.isTerm && cls.isProperlyContainedIn(newCls)
+          // newCls might get proxies for free variables. If current class is
+          // properly contained in newCls, it needs an outer path to newCls access the
+          // proxies and forward them to the new instance.
       case _ =>
         false
     }
@@ -308,16 +320,21 @@ object ExplicitOuter {
     /** The path of outer accessors that references `toCls.this` starting from
      *  the context owner's this node.
      */
-    def path(toCls: Symbol): Tree = try {
+    def path(toCls: Symbol, start: Tree = This(ctx.owner.enclosingClass.asClass)): Tree = try {
       def loop(tree: Tree): Tree = {
         val treeCls = tree.tpe.widen.classSymbol
         val outerAccessorCtx = ctx.withPhaseNoLater(ctx.lambdaLiftPhase) // lambdalift mangles local class names, which means we cannot reliably find outer acessors anymore
         ctx.log(i"outer to $toCls of $tree: ${tree.tpe}, looking for ${outerAccName(treeCls.asClass)(outerAccessorCtx)} in $treeCls")
         if (treeCls == toCls) tree
-        else loop(tree.select(outerAccessor(treeCls.asClass)(outerAccessorCtx)).ensureApplied)
+        else {
+          val acc = outerAccessor(treeCls.asClass)(outerAccessorCtx)
+          assert(acc.exists,
+              i"failure to construct path from ${ctx.owner.ownersIterator.toList}%/% to `this` of ${toCls.showLocated};\n${treeCls.showLocated} does not have an outer accessor")
+          loop(tree.select(acc).ensureApplied)
+        }
       }
       ctx.log(i"computing outerpath to $toCls from ${ctx.outersIterator.map(_.owner).toList}")
-      loop(This(ctx.owner.enclosingClass.asClass))
+      loop(start)
     } catch {
       case ex: ClassCastException =>
         throw new ClassCastException(i"no path exists from ${ctx.owner.enclosingClass} to $toCls")
