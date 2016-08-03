@@ -22,11 +22,12 @@ class C {
 }
 
 class E {
-  class F {
-    type T <: x.type // old-error: not stable
-    val z: x.type = ??? // old-error: not stable
-  }
   lazy val x: F#T = ???
+  class F {
+    type T <: x.type // error: cyclic reference involving lazy value x
+    val z: x.type = ???
+  }
+  //if x is defined here, there is no error, which seems incorrect
 }
 
 class T1 {

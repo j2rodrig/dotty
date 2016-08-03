@@ -1,0 +1,3 @@
+object empty_object {
+
+}

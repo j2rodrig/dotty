@@ -61,14 +61,17 @@ class tests extends CompilerTest {
 
 
   @Test def pos_autoTupling() = compileFile(posDir, "autoTuplingTest", twice)
+  @Test def neg_cycles() = compileFile(negDir, "cycles")
   @Test def dotmod_failed_tests() = {
+    neg_cycles()
     pos_autoTupling()
     neg_autoTupling
   }
 
 
-  @Test def dotmod_empty = compileFile(dotmodPosDir, "empty", twice)
-  @Test def dotmod_viewpoint1 = compileFile(dotmodNegDir, "viewpoint1")
+  @Test def dotmod_empty_object() = compileFile(dotmodPosDir, "empty_object", twice)
+  @Test def dotmod_simple_readonly() = compileFile(dotmodNegDir, "simple_readonly")
+  @Test def dotmod_simple_viewpoint() = compileFile(dotmodNegDir, "simple_viewpoint")
 
   @Test def pickle_pickleOK = compileDir(testsDir, "pickling", testPickling)
 // This directory doesn't exist anymore

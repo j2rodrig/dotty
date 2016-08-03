@@ -281,3 +281,56 @@ NOTES
 	  type compatibility checks do not happen in Pattern mode.
 
 	SUCCESS: Passes all 662 positive Dotty tests.
+
+
+ISSUE CYCLE-1:
+
+	ERROR: in tests/neg/cycles.scala. Stack overflow after line 19 involving findMember.
+
+	New information: The cycle seems to be when looking for the mutability member
+	inside type member T inside class B. (Although previous evidence indicates that
+	the cycle causing the stack overflow is actually inside class C or D, searching
+	for a solution to the cycle in class B may solve the problem.)
+
+	New information: The actual cycle is looking for the mutability member inside T
+	with prefix E.x. The specific line triggering the cycle is:
+	"val denotTpe = tpe.member(MutabilityMember)" where tpe is a TermRef
+	representing the selection "E.this.x", which is widened to "E.this.F#T",
+	which has the bounds Nothing .. E.this.x.
+	The difficult part of this cycle is that it occurs entirely within the
+	original Dotty code (Types#findMember -> go(this) -> Denotations#findMember) --
+	all DotMod tries to do is call findMember at an (apparently) unusual time.
+
+	Actual code in example:
+	class E {
+      class F {
+        type T <: x.type // old-error: not stable
+        val z: x.type = ??? // old-error: not stable
+      }
+      lazy val x: F#T = ???
+    }
+	What is "old-error"? If x is eager rather than lazy, then Dotty triggers
+	"error: cyclic reference involving value x".
+	One option is to simply ignore this test case for now.
+	 The facts that may make ignoring acceptable are:
+	 - The type-projection operation # is known to cause type-correctness failures,
+	   and it may be removed in future versions of Dotty.
+	Another option is to try to determine whether there is:
+	- a bug in findMember
+	- a valid reason to disallow calling findMember in such cases
+	  (and what defines "such cases" anyway?)
+
+	Does findMember make sense for arbitrary type projections?
+
+	New information: If I change the order of the lazy val to the following, everything works OK:
+	class E {
+      lazy val x: F#T = ???
+      class F {
+        type T <: x.type // error: cyclic reference involving value x
+        val z: x.type = ???
+      }
+    }
+
+	Looks like a Dotty bug.
+
+	SUCCESS: With the definition ordering in tests/neg/cycles.scala changed, all negative tests pass.

@@ -70,7 +70,10 @@ object DotMod {
   }
 
 
-  val MutabilityMember = typeName("$$$$_mutability!$$$$")
+  val MutabilityMemberName = typeName("$$$$_mutability!$$$$")
+  def ReadonlyType(implicit ctx: Context) = TypeAlias(defn.ReadonlyAnnotType, 1)
+  def MutableType(implicit ctx: Context) = TypeAlias(defn.NothingType, 1)
+
 
   /**
     * A TypeComparer that also compares mutability.
@@ -81,11 +84,11 @@ object DotMod {
 
     override def isSubType(tp1: Type, tp2: Type): Boolean = {
       tp1.isError || tp2.isError || (super.isSubType(tp1, tp2) && {
-        val name = MutabilityMember
+        val name = MutabilityMemberName
         val denot1 = tp1.member(name)
         val denot2 = tp2.member(name)
-        val info1 = if (denot1.exists) denot1.info else TypeAlias(NothingType, 1)  // default to Nothing
-        val info2 = if (denot2.exists) denot2.info else TypeAlias(NothingType, 1)
+        val info1 = if (denot1.exists) denot1.info else MutableType  // default to Mutable
+        val info2 = if (denot2.exists) denot2.info else MutableType
         if (info1.isError || info2.isError)
           false // breakpoint
         if (denot1.exists || denot2.exists)
@@ -120,8 +123,6 @@ object DotMod {
      */
 
 
-    def ReadonlyType(implicit ctx: Context) = TypeAlias(defn.ReadonlyAnnotType, 1)
-
 
     /**
       * If tpe is an annotated type, finds the meaning of RI annotations.
@@ -138,7 +139,7 @@ object DotMod {
           tpe.derivedAnnotatedType(toShadows(tpe.underlying, shadowInfo), tpe.annot)  // leave non-RI annotations in place
       case _ =>
         if (shadowInfo.exists)
-          tpe.duplicate.addUniqueShadowMember(MutabilityMember, shadowInfo, visibleInMemberNames = true)
+          tpe.duplicate.addUniqueShadowMember(MutabilityMemberName, shadowInfo, visibleInMemberNames = true)
         else
           tpe
     }
@@ -152,16 +153,17 @@ object DotMod {
         if (tpe.prefix.isError)
           tpe
         else {
-          val denotPrefix = tpe.prefix.member(MutabilityMember)
-          val denotTpe = tpe.member(MutabilityMember)
+          // Check the prefix: We need to change the mutability of tpe only if tpe.prefix has a mutability member.
+          val denotPrefix = tpe.prefix.member(MutabilityMemberName)
           if (denotPrefix.exists) {
-            // we need to change the mutability only if the prefix has a mutability member
-            val infoCombined =
-            if (denotTpe.exists) // if prefix and tpe both have the shadow, combine their types with a union
-              OrType(denotPrefix.info, denotTpe.info)
-            else
-              denotPrefix.info // only the prefix has a shadow
-            tpe.duplicate.addUniqueShadowMember(MutabilityMember, infoCombined, visibleInMemberNames = true)
+            val infoCombined = {
+              val denotTpe = tpe.member(MutabilityMemberName)
+              if (denotTpe.exists) // if prefix and tpe both have the shadow, combine their types with a union
+                OrType(denotPrefix.info, denotTpe.info)
+              else
+                denotPrefix.info // only the prefix has a shadow
+            }
+            tpe.duplicate.addUniqueShadowMember(MutabilityMemberName, infoCombined, visibleInMemberNames = true)
           } else
             tpe
         }
