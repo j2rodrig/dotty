@@ -1,5 +1,15 @@
 NOTES
 
+	Initial Comments on the TryThree branch:
+    // Trying not to repeat code:
+    // alt1: report shadow members directly from findMember. but then, how should we do type comparison?
+    // alt2: instead of shadow members, use shadow base types. Treat bases as intersected types.
+    //    but how to express lack of mutability?--perhaps a type member in a refinement of the shadow base?
+    // Again here we run into the problem of expressing a lack of mutability given an underlying
+    // type that has mutability. This seems like a situation where we would want to do an override
+    // if the underlying type already contains that type member. Overrides are OK--I think I can
+    // live with overrides.
+
     /*
     ATTEMPT 1: FAILED: A RefinedType is not always accepted where a TermRef is accepted.
       One failure instance: in realApply in Applications: methPart(fun1).tpe is expected to be a TermRef.
@@ -326,7 +336,7 @@ ISSUE CYCLE-1:
 	class E {
       lazy val x: F#T = ???
       class F {
-        type T <: x.type // error: cyclic reference involving value x
+        type T <: x.type // error: cyclic reference involving lazy value x
         val z: x.type = ???
       }
     }
@@ -334,3 +344,51 @@ ISSUE CYCLE-1:
 	Looks like a Dotty bug.
 
 	SUCCESS: With the definition ordering in tests/neg/cycles.scala changed, all negative tests pass.
+
+MUTABILITY EXTRACTION
+
+	Is it possible to declare the mutability of one type to be the same as another type?
+
+	val foo: Foo { type +$M = readonly }
+	val bar: Bar { type +$M = foo.$M }
+
+	Annotations:
+	val foo: Foo @readonly
+	val bar: Bar @mutabilityOf(foo)
+
+	The type of bar is given a shadow member that is a TypeRef to the shadow member of foo, or:
+	  TypeRef(TermRef(NoPrefix, foo), $M)
+
+	Defining annotation:
+		class mutabilityOf(val ref: Any @readonly) extends scala.annotation.Annotation
+	The parameter "ref" is the term to extract mutability from.
+	It is @readonly so that it can take an argument of any mutability.
+	PROBLEM: Since the definition of mutabilityOf is loaded from a classfile, the current DotMod is not
+	processing the @readonly on the ref parameter.
+
+	One possible solution is to do annotation processing during lazy symbol completion.
+	However, it is currently unclear how to make a clean compiler extension using this mechanism.
+	Let's try it anyway.
+	New information: The completer in SymDenotation is not getting called. How are we getting the type of "ref"?
+	Let's see what the typer is actually doing with the "ref" parameter.
+	New information: The mutability extraction/attachment is not even complete yet.
+	I should finish this before trying to debug the last problem.
+
+	Partial SUCCESS: The following test:
+	  class C
+	  val c: C @readonly = ???
+	  val d: C @mutabilityOf(c) = c  // ok
+	  val e: C = d  // error
+
+	Reports the following errors:
+	./tests/dotmod/neg/mutability_of.scala:7: error: type mismatch:
+	 found   : mutability_of.C @readonly(mutability_of.c)
+	 required: Any
+	  val d: C @mutabilityOf(c) = c  // ok
+	                         ^
+	./tests/dotmod/neg/mutability_of.scala:8: error: type mismatch:
+	 found   : mutability_of.C @mutabilityOf(mutability_of.d)
+	 required: mutability_of.C
+	  val e: C = d  // error
+
+	Where is the definition of mutabilityOf getting typed?

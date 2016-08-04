@@ -439,9 +439,9 @@ object Types {
     }
 
     /** Ensures a uniquely-named shadow member by first removing all shadow bases with same-named members. */
-    final def addUniqueShadowMember(name: Name, infoFn: => Type, visibleInMemberNames: Boolean = false)(implicit ctx: Context): this.type = {
-      shadowBases = shadowBases.filter(info => info.base.refinedName != name)
-      addShadowMember(name, infoFn, visibleInMemberNames)
+    final def addUniqueShadowMember(name: Name, info: Type, visibleInMemberNames: Boolean = false)(implicit ctx: Context): this.type = {
+      shadowBases = shadowBases.filter(shadowInfo => shadowInfo.base.refinedName != name)
+      addShadowMember(name, info, visibleInMemberNames)
       this
     }
 

@@ -61,7 +61,7 @@ object DotMod {
 
     /** Creates a new Type equivalent to tp */
     def duplicate(implicit ctx: Context): Type = tp match {
-      case tp: TypeRef =>    //tp.newLikeThis(tp.prefix)
+      case tp: TypeRef =>
         TypeRef.createWithoutCaching(tp.prefix, tp.name)
       case tp: TermRef =>
         TermRef.createWithoutCaching(tp.prefix, tp.name)
@@ -105,24 +105,11 @@ object DotMod {
 
 
   class DotModTyper extends Typer {
-
-    // TODO: Trying not to repeat code
-    // alt1: report shadow members directly from findMember. but then, how should we do type comparison?
-    // alt2: instead of shadow members, use shadow base types. Treat bases as intersected types.
-    //    but how to express lack of mutability?--perhaps a type member in a refinement of the shadow base?
-    // Again here we run into the problem of expressing a lack of mutability given an underlying
-    // type that has mutability. This seems like a situation where we would want to do an override
-    // if the underlying type already contains that type member. Overrides are OK--I think I can
-    // live with overrides.
-
-
     /*
-    Next up: Merge latest Dotty.
-    Next up: Do standard tests still pass?
-    Next up: What about viewpoint adaptation on ExprTypes?
+    Next up: Mutability extraction?
+    Next up: Lazy symbol info ...
+    Next up: Readonly annotations in types loaded from class files?
      */
-
-
 
     /**
       * If tpe is an annotated type, finds the meaning of RI annotations.
@@ -135,7 +122,11 @@ object DotMod {
       case tpe: AnnotatedType =>
         if (tpe.annot.symbol eq defn.ReadonlyAnnot)
           tpe.derivedAnnotatedType(toShadows(tpe.underlying, ReadonlyType), tpe.annot)  // leave RI annotations in place (for now)
-        else
+        else if (tpe.annot.symbol eq defn.MutabilityOfAnnot) {
+          val argTpe = typed(tpe.annot.arguments.head).tpe
+          val newShadowInfo = argTpe.member(MutabilityMemberName).info
+          tpe.derivedAnnotatedType(toShadows(tpe.underlying, newShadowInfo), tpe.annot)  // leave RI annotations in place (for now)
+        } else
           tpe.derivedAnnotatedType(toShadows(tpe.underlying, shadowInfo), tpe.annot)  // leave non-RI annotations in place
       case _ =>
         if (shadowInfo.exists)
@@ -203,7 +194,7 @@ object DotMod {
   }
 
   /** This phase runs the regular Scala RefChecks with the DotMod type comparer to enforce necessary
-    * subtyping relationships between symbols.
+    * subtyping relationships among symbols.
     */
   class DotModRefChecks extends RefChecks {
     //override def run(implicit ctx: Context): Unit = {
