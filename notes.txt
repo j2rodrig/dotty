@@ -586,3 +586,17 @@ DISCUSSION OF REALIZATION OF SHADOW MEMBERS: What Shadow Members Mean
 	 required: mutability_of.C
 	  val e: C = d  // error
 	             ^
+	SUCCESS:
+	Needed to add special cases to the type comparer to handle refinements of the mutability member.
+	In particular, when comparing tp1 <: tp2 where tp1 has a mutability member but tp2 does not,
+	 ordinary subtyping logic simply ignores the member on tp1. What makes this a problem is that
+	 if tp1 is not a RefinedType, but widens to a RefinedType, then the ordinary type comparer
+	 will widen and then discard the refined type member without calling into the custom type comparer.
+	 What we do now is take over the subtype comparison where tp1 widens to a RefinedType that
+	 contains the mutability member. We do a findMember on tp2, compare the result with the widened tp1's
+	 mutability member, then continue the subtype comparison on tp1's parent and tp2 (or tp2's parent
+	 if tp2 is a refinement of the mutability member).
+	The opposite case, where tp2 is a refinement of the mutability member but tp1 does not contain
+	 the mutability member, is handled more simply. The default mutability is the bottom type mutable,
+	 so we need only to check whether tp1 is compatible with tp2's parent.
+

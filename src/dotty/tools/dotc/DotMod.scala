@@ -98,14 +98,18 @@ object DotMod {
       // Handle cases where a mutability member has not been set.
       if (!(tp2.isInstanceOf[ProtoType] || tp2.isError || (tp2 eq WildcardType))) {
         // Special case logic any time tp1 (or its widening) refines the mutability member.
-        // We need to check this here because otherwise the ordinary subtyping logic will
-        // assume that tp2 does not contain this member, and discard it.
+        // We need to check this here because otherwise the ordinary subtyping logic may
+        // assume that tp2 does not contain this member, and discard it from tp1.
         tp1.widen match {
           case tp1w: RefinedType if tp1w.refinedName eq MutabilityMemberName =>
             val denot2 = tp2.member(MutabilityMemberName)
             val info2 = if (denot2.exists) denot2.info else MutableType  // default to mutable
-            val resultInfo = super.isSubType(tp1w.refinedInfo, info2)
-            val resultParent = super.isSubType(tp1w, tp2)  // ordinary subtyping logic
+            val skipped2 = tp2 match {
+              case tp2: RefinedType => skipMatching(tp1w, tp2)  // if tp2 has matching refinements, get rid of them
+              case _ => tp2
+            }
+            val resultInfo = super.isSubType(tp1w.refinedInfo, info2)  // check refined member
+            val resultParent = super.isSubType(tp1w.parent, skipped2)  // check parents
             return resultInfo && resultParent
           case _ =>
         }
@@ -169,6 +173,8 @@ object DotMod {
           tp.derivedWildcardType(refineMutability(tp.optBounds, mutInfo))
         else
           tp.derivedWildcardType(TypeBounds(defn.NothingType, RefinedType(defn.AnyType, MutabilityMemberName, mutInfo)))
+      case _ =>
+        tp
     }
   }
 
@@ -215,27 +221,16 @@ object DotMod {
   }
 
   class DotModTyper extends Typer {
-    /*
-    Next up: Mutability extraction?
-    Next up: Lazy symbol info ...
-    Next up: Readonly annotations in types loaded from class files?
-     */
 
     def convertAnnotationToRefinement(tp: Type)(implicit ctx: Context): Type = tp match {
       case tp: AnnotatedType =>
         if (tp.annot.symbol eq defn.ReadonlyAnnot)
-          // TODO: ErrorType if !canHaveAnnotations
           refineMutability(tp.underlying, ReadonlyType)
         else if (tp.annot.symbol eq defn.MutableAnnot)
-          // TODO: ErrorType if !canHaveAnnotations
           refineMutability(tp.underlying, MutableType)
         else if (tp.annot.symbol eq defn.MutabilityOfAnnot) {
-          // TODO: ErrorType if !canHaveAnnotations
           val argTpe = typed(tp.annot.arguments.head).tpe
-          if (argTpe.member(MutabilityMemberName).exists)
-            refineMutability(tp.underlying, TypeAlias(TypeRef(argTpe, MutabilityMemberName), 1))
-          else
-            refineMutability(tp.underlying, MutableType)
+          refineMutability(tp.underlying, TypeAlias(TypeRef(argTpe, MutabilityMemberName), 1))
         } else
           tp
       case _ => tp
@@ -250,9 +245,12 @@ object DotMod {
 
       // Return a tree with the new type.
       val tree1 =
-        if (tree.tpe ne tpe1)
-          tree.withType(tpe1)
-        else
+        if (tree.tpe ne tpe1) {
+          if (!canHaveAnnotations(tree.tpe))
+            errorTree(tree, "Reference immutability annotations are not allowed here")
+          else
+            tree.withType(tpe1)
+        } else
           tree
 
       /*

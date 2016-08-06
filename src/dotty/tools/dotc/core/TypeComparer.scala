@@ -919,7 +919,7 @@ class TypeComparer(initctx: Context) extends DotClass with ConstraintHandling {
     *
     *  @return  The parent type of `tp2` after skipping the matching refinements.
    */
-  private def skipMatching(tp1: Type, tp2: RefinedType): Type = tp1 match {
+  protected def skipMatching(tp1: Type, tp2: RefinedType): Type = tp1 match {
     case tp1 @ RefinedType(parent1, name1, rinfo1: TypeAlias) if name1 == tp2.refinedName =>
       tp2.parent match {
         case parent2: RefinedType => skipMatching(parent1, parent2)

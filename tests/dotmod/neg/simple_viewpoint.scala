@@ -10,6 +10,9 @@ object simple_viewpoint {
   val c_x: Any = c.x  // error
   val c_y: Any = c.y  // error
 
+  val c2_x: Any @readonly = c.x  // ok
+  val c2_y: Any @readonly = c.y  // ok
+
 
   class D {
     val x: C = ???
