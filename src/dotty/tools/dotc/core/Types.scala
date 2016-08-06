@@ -1657,7 +1657,7 @@ object Types {
       else symbol
 
     def info(implicit ctx: Context): Type = {
-      denot.info
+      ctx.typeOpHooks.denotationAsSeenFrom(prefix, denot)
     }
 
     def isType = isInstanceOf[TypeRef]
@@ -1788,8 +1788,7 @@ object Types {
 
     //assert(name.toString != "<local Coder>")
     override def underlying(implicit ctx: Context): Type = {
-      val d = denot
-      if (d.isOverloaded) NoType else ctx.typeOpHooks.denotationAsSeenFrom(prefix, d)
+      if (denot.isOverloaded) NoType else info
     }
 
     override def signature(implicit ctx: Context): Signature = denot.signature
@@ -1810,7 +1809,7 @@ object Types {
 
     type ThisType = TypeRef
 
-    override def underlying(implicit ctx: Context): Type = ctx.typeOpHooks.denotationAsSeenFrom(prefix, denot)
+    override def underlying(implicit ctx: Context): Type = info
 
     override def superType(implicit ctx: Context): Type = info match {
       case TypeBounds(_, hi) => hi

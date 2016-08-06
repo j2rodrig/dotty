@@ -600,3 +600,47 @@ DISCUSSION OF REALIZATION OF SHADOW MEMBERS: What Shadow Members Mean
 	 the mutability member, is handled more simply. The default mutability is the bottom type mutable,
 	 so we need only to check whether tp1 is compatible with tp2's parent.
 
+	NOTE on viewpoint adaptation:
+	For a denotation selection to be viewpoint adapted, two conditions must be met:
+	- the selected denotation must be a term (not a type).
+	- the type of the selected denotation must be an annotatable non-singleton type,
+	 or a proxy for such a type.
+
+	Revisiting the list of acceptable types for viewpoint adaptation:
+	Types we should be able to refine:
+	 - TypeRef
+	 - RefinedType / RecType
+	 - AndType / OrType
+	 - PolyParam
+	 - TypeVar
+	 - HKApply
+	Types where the underlying type may be refineable:
+	 - AnnotatedType
+	 - ExprType       -- viewpoint adaptation of result is needed so that arbitrary widenings produce a viewpoint-adapted result
+	 - TypeLambda
+	 - WildcardType   -- viewpoint adaptation may change the upper bound of the WildcardType.
+
+	Question: does every non-overloaded denotation have a valid symbol?
+	Answer: no, but we don't care--we're only looking at the type of the denotation, not its symbol.
+
+ASSIGNABILITY
+
+	What we're doing for assignability is to introduce a second type member that contains the mutability
+	of the prefix type. There are now two type members we're using:
+		__MUTABILITY__   -- the mutability of the type
+		__PREFIX_MUTABILITY__   -- the mutability of the prefix type (if the type is viewpoint-adapted)
+	The check for assignability is rather simple: If the info of the __PREFIX_MUTABILITY__ member is
+	a subtype of mutable, then the type is assignable. Otherwise, it is not assignable.
+
+	Implications for type comparison:
+	If tp1 is a RefinedType, it is no longer sufficient to to just look at tp1's refinedInfo;
+	the refinement no longer necessarily refers to the mutability member.
+	Instead, it does a findMember on tp1 to capture any underlying refinements of the mutability member.
+
+	Furthermore, if tp2 is a refinement of the prefix mutability, then subtyping unconditionally proceeds
+	to tp2's parent type. The net effect is that the prefix mutability member itself has no effect
+	on type comparisons. (Although the result of a findMember on this member is used to check assignability.)
+
+	Other changes: moved the call to the viewpoint-adaptation hook to NamedType#info rather than
+	TypeRef/TermRef#underlying. This change ensures that a calls to both info and underlying return
+	a viewpoint-adapted result.

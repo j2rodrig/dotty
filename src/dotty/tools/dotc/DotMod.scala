@@ -77,6 +77,7 @@ object DotMod {
 
 
   val MutabilityMemberName = typeName("__MUTABILITY__")
+  val PrefixMutabilityName = typeName("__PREFIX_MUTABILITY__")
   def ReadonlyType(implicit ctx: Context) = TypeAlias(defn.ReadonlyAnnotType, 1)
   def MutableType(implicit ctx: Context) = TypeAlias(defn.MutableAnnotType, 1)
 
@@ -101,16 +102,19 @@ object DotMod {
         // We need to check this here because otherwise the ordinary subtyping logic may
         // assume that tp2 does not contain this member, and discard it from tp1.
         tp1.widen match {
-          case tp1w: RefinedType if tp1w.refinedName eq MutabilityMemberName =>
-            val denot2 = tp2.member(MutabilityMemberName)
-            val info2 = if (denot2.exists) denot2.info else MutableType  // default to mutable
-            val skipped2 = tp2 match {
-              case tp2: RefinedType => skipMatching(tp1w, tp2)  // if tp2 has matching refinements, get rid of them
-              case _ => tp2
+          case tp1w: RefinedType =>
+            val denot1 = tp1w.member(MutabilityMemberName)
+            if (denot1.exists) {
+              val denot2 = tp2.member(MutabilityMemberName)
+              val info2 = if (denot2.exists) denot2.info else MutableType // default to mutable
+              val skipped2 = tp2 match {
+                case tp2: RefinedType => skipMatching(tp1w, tp2) // if tp2 has matching refinements, get rid of them
+                case _ => tp2
+              }
+              val resultInfo = super.isSubType(denot1.info, info2) // check refined member
+              val resultParent = super.isSubType(tp1w.parent, skipped2) // check parents
+              return resultInfo && resultParent
             }
-            val resultInfo = super.isSubType(tp1w.refinedInfo, info2)  // check refined member
-            val resultParent = super.isSubType(tp1w.parent, skipped2)  // check parents
-            return resultInfo && resultParent
           case _ =>
         }
 
@@ -123,6 +127,11 @@ object DotMod {
             val denot1 = tp1.member(MutabilityMemberName)
             if (!denot1.exists)
               return isSubType(tp1, tp2.parent)  // member's OK, but still have to check the parent.
+
+          // Also make sure the presence of a prefix mutability member doesn't affect subtyping
+          case tp2: RefinedType if tp2.refinedName eq PrefixMutabilityName =>
+            return isSubType(tp1, tp2.parent)    // member's OK, but still have to check the parent.
+
           case _ =>
         }
       }
@@ -154,35 +163,40 @@ object DotMod {
     case _ => false
   })
 
-  def refineMutability(tp: Type, mutInfo: TypeBounds)(implicit ctx: Context): Type = {
-    if (canHaveAnnotations(tp))
-      RefinedType(dropRefinementsNamed(tp, MutabilityMemberName), MutabilityMemberName, mutInfo)
-    else tp match {
+  def refineResultMember(tp: Type, name: Name, info: TypeBounds, otherMembersToDrop: List[Name] = Nil)(implicit ctx: Context): Type = {
+    if (canHaveAnnotations(tp)) {
+      RefinedType(dropRefinementsNamed(tp, name :: otherMembersToDrop), name, info)
+    } else tp match {
       case tp: ExprType =>
-        tp.derivedExprType(refineMutability(tp.resultType, mutInfo))
+        tp.derivedExprType(refineResultMember(tp.resultType, name, info))
       case tp: AnnotatedType =>
-        tp.derivedAnnotatedType(refineMutability(tp.underlying, mutInfo), tp.annot)
+        tp.derivedAnnotatedType(refineResultMember(tp.underlying, name, info), tp.annot)
       case tp: TypeAlias =>
-        tp.derivedTypeAlias(refineMutability(tp.alias, mutInfo))
+        tp.derivedTypeAlias(refineResultMember(tp.alias, name, info))
       case tp: TypeBounds =>
-        tp.derivedTypeBounds(tp.lo, refineMutability(tp.hi, mutInfo))
+        tp.derivedTypeBounds(tp.lo, refineResultMember(tp.hi, name, info))
       case tp: TypeLambda =>
-        tp.derivedTypeLambda(tp.paramNames, tp.paramBounds, refineMutability(tp.resultType, mutInfo))
+        tp.derivedTypeLambda(tp.paramNames, tp.paramBounds, refineResultMember(tp.resultType, name, info))
       case tp: WildcardType =>
         if (tp.optBounds.exists)
-          tp.derivedWildcardType(refineMutability(tp.optBounds, mutInfo))
+          tp.derivedWildcardType(refineResultMember(tp.optBounds, name, info))
         else
-          tp.derivedWildcardType(TypeBounds(defn.NothingType, RefinedType(defn.AnyType, MutabilityMemberName, mutInfo)))
+          tp.derivedWildcardType(TypeBounds(defn.NothingType, RefinedType(defn.AnyType, name, info)))
       case _ =>
         tp
     }
   }
 
-  def dropRefinementsNamed(tp: Type, name: Name)(implicit ctx: Context): Type = tp match {
-    case tp: RefinedType if tp.refinedName eq name =>
-      dropRefinementsNamed(tp.underlying, name)
+  def dropRefinementsNamed(tp: Type, names: List[Name])(implicit ctx: Context): Type = tp match {
+    case tp: RefinedType if names.contains(tp.refinedName) =>
+      dropRefinementsNamed(tp.underlying, names)
     case _ =>
       tp
+  }
+
+  def isAssignable(tp: Type)(implicit ctx: Context): Boolean = {
+    val prefixMutDenot = tp.member(PrefixMutabilityName)
+    !prefixMutDenot.exists || (prefixMutDenot.info <:< defn.MutableAnnotType)
   }
 
   class DotModTypeOpHooks(initCtx: Context) extends TypeOpHooks(initCtx) {
@@ -191,18 +205,27 @@ object DotMod {
     override def denotationAsSeenFrom(pre: Type, denot: Denotation): Type = {
       var target = denot.info
       if (denot.isTerm && isViewpointAdaptable(target) && !ctx.erasedTypes) {   // do viewpoint adaption for terms only, and not during erasure phase
+
+        // Prefix mutability
         val prefixMutabilityDenot = pre.member(MutabilityMemberName)
-        val prefixMutability = if (prefixMutabilityDenot.exists) prefixMutabilityDenot.info.asInstanceOf[TypeBounds].hi else defn.MutableAnnotType
+        val prefixBounds = if (prefixMutabilityDenot.exists)
+          prefixMutabilityDenot.info.asInstanceOf[TypeBounds]
+        else
+          MutableType
+
+        // Target mutability and assignability
         val underlyingMutabilityDenot = target.member(MutabilityMemberName)
         val underlyingMutabilityBounds = if (underlyingMutabilityDenot.exists) underlyingMutabilityDenot.info else MutableType
         val targetMutabilityBounds = underlyingMutabilityBounds match {
           case tp: TypeAlias =>
-            tp.derivedTypeAlias(simplifiedOrType(prefixMutability, tp.alias))
+            tp.derivedTypeAlias(simplifiedOrType(prefixBounds.hi, tp.alias))
           case tp: TypeBounds =>
-            tp.derivedTypeBounds(tp.lo, simplifiedOrType(prefixMutability, tp.hi))
+            tp.derivedTypeBounds(tp.lo, simplifiedOrType(prefixBounds.hi, tp.hi))
         }
         if (targetMutabilityBounds ne underlyingMutabilityBounds)
-          target = refineMutability(target, targetMutabilityBounds)
+          target = refineResultMember(target, MutabilityMemberName, targetMutabilityBounds, otherMembersToDrop = List(PrefixMutabilityName))
+        if (prefixBounds ne MutableType)
+          target = refineResultMember(target, PrefixMutabilityName, prefixBounds)
       }
       target
     }
@@ -221,16 +244,28 @@ object DotMod {
   }
 
   class DotModTyper extends Typer {
+    /*
+    TODO: try examples (e.g., functional code, iterator example)
+    */
+
+    def customChecks(tree: tpd.Tree)(implicit ctx: Context): tpd.Tree = tree match {
+      case tree: tpd.Assign =>
+        if (isAssignable(tree.lhs.tpe))
+          tree
+        else
+          errorTree(tree, d"Cannot assign to unassignable type ${tree.lhs.tpe}")
+      case _ => tree
+    }
 
     def convertAnnotationToRefinement(tp: Type)(implicit ctx: Context): Type = tp match {
       case tp: AnnotatedType =>
         if (tp.annot.symbol eq defn.ReadonlyAnnot)
-          refineMutability(tp.underlying, ReadonlyType)
+          refineResultMember(tp.underlying, MutabilityMemberName, ReadonlyType)
         else if (tp.annot.symbol eq defn.MutableAnnot)
-          refineMutability(tp.underlying, MutableType)
+          refineResultMember(tp.underlying, MutabilityMemberName, MutableType)
         else if (tp.annot.symbol eq defn.MutabilityOfAnnot) {
           val argTpe = typed(tp.annot.arguments.head).tpe
-          refineMutability(tp.underlying, TypeAlias(TypeRef(argTpe, MutabilityMemberName), 1))
+          refineResultMember(tp.underlying, MutabilityMemberName, TypeAlias(TypeRef(argTpe, MutabilityMemberName), 1))
         } else
           tp
       case _ => tp
@@ -265,7 +300,7 @@ object DotMod {
       else
         tree1
       */
-      tree1
+      customChecks(tree1)
     }
 
     override def newLikeThis: Typer = new DotModTyper
