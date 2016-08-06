@@ -392,3 +392,197 @@ MUTABILITY EXTRACTION
 	  val e: C = d  // error
 
 	Where is the definition of mutabilityOf getting typed?
+
+	Definition is loaded by: requiredClass("dotty.mutabilityOf").typeRef
+	Def. of requiredClass: base.staticRef(path.toTypeName).requiredSymbol(_.isClass).asClass
+	Def. of typeRef: TypeRef(owner.thisType, name.asTypeName, this)
+
+	New information: The @readonly part of the Any param type doesn't seem to be part of the mutabilityOf
+	constructor signature at all. Perhaps it's not getting put into the classfile to begin with?
+	Making the readonly class inherit from ClassfileAnnotation... no effect.
+
+	Perhaps there's another route to getting mutability to appear in classfiles?
+	A possibility: Representing shadow members as real type refinements (that wrap type expressions).
+	Would there need to be some logic to set the "override" flag on refined members?
+
+	FAILURE: Tried a refinement type in mutabilityOf:
+		class mutabilityOf(val ref: Any { type $M$ <: readonly } ) extends scala.annotation.Annotation
+	Same symptom is occurring -- it seems that "Any { type $M$ <: readonly }" is being interpreted as
+	merely "Any" during the check. This is actually a symptom of a bigger issue: in general, for:
+		val foo: Any { type _m = readonly }
+		val bar: Any { type _m = readonly }
+	foo is not compatible with bar. This is surprising because according to DOT, this should work.
+	CORRECTION:
+	The mutability-member name I was using contained the unicode symbol ɱ (code point 0x0271).
+	Changed to an all-ASCII name, it works as expected. (weird bug).
+	New information:
+	The failure above is due to:
+	1. Matching refinement members removed in TypeComparer on line:
+		val skipped2 = skipMatching(tp1w, tp2)
+	2. The DotMod type comparer extension finding a shadow member inside tp1w, but not tp2.
+
+	One option is to do the mutability check at the top level only (e.g., in topLevelSubType, not isSubType).
+	This option would be OK if we do not need to consider type member compatibility in subtype checks (which we do).
+	Another option is to attempt the bigger problem of shadow members (see below).
+
+	Another issue:
+	Ondrej and I seem to be in agreement that the adaptation of TermRefs (and singleton types in general)
+	should not be viewpoint-adapted.
+	The interpretation of shadow members on singleton types is really that the underlying (widened)
+	types have those members.
+	The idea here is that shadow members become real members when they are widened to TypeRefs.
+
+DISCUSSION OF REALIZATION OF SHADOW MEMBERS: What Shadow Members Mean
+
+	Examples:
+
+	C.this.type  -- is a singleton type
+
+	C @readonly  -- becomes:
+	C { type __MUTABILITY__ <: readonly }
+
+	Given:
+	val c: C @readonly
+	c.x  -- has type: c.x.type { type +$M$ = c.$M$ }
+
+	The following types can be wrapped in RefinedTypes:
+	 TypeRef
+	 RefinedType / RecType
+	 AndType / OrType
+	 PolyType? / TypeLambda?
+	The following types cannot be wrapped directly, but should have their underlying types wrapped appropriately:
+	 TermRef
+	 ThisType? / SuperType?
+	 SingletonType?
+
+
+	One of the problems with refinement is that:
+		{ type _M = Nothing } { type _M <: readonly } is compatible with { type _M = Nothing },
+	which means that once we decide to add a member that declares a type to be Mutable,
+	we can't arbitrarily override it.
+	However: If we set the latter mutability to be equal:
+		{ type _M = Nothing } { type _M = readonly }
+	then the last (outermost) mutability seems to override the previous mutability.
+	The handling of TypeAliases seems to behave a little differently than mere TypeBounds;
+	  if we just set the latter bounds without an alias:
+		{ type _M = Nothing } { type _M >: readonly <: readonly }
+	  then _M is interpreted to be Nothing rather than readonly.
+	Covariance should allow the desired subtyping relationship: { type _M = Nothing } <: { type _M = readonly }.
+
+	Avoiding false negatives:
+	Considering a type T without the member _M, we have:
+		T { type _M = readonly } <: T
+	which is incorrect.
+	Probably what we should check for during subtyping is: If the lesser type is a refinement of member _M,
+	and the greater type does not define member _M, then we force return false if the lesser type's version
+	of _M isn't Nothing. (We should do this check in isSubType before calling super.isSubType for the best performance.)
+
+	Widening and type refinements:
+	A big issue that I have to solve here is how to deal with widenings (which need to be viewpoint-adapted).
+	The current solution is to handle widenings by using shadow members on TermRefs.
+	This is no longer the current solution. It should be possible to perform viewpoint adaptation without shadow members.
+
+	Where viewpoint adaptation happens:
+	Currently, the place where viewpoint happens is when the underlying type of a NamedType is taken.
+
+	Where annotations can occur:
+	Pursuant to email conversation with Ondrej, annotating singleton types doesn't make sense (since a
+	singleton type contains, by definition, exactly one type). The criterion for annotation is the
+	same as the criterion for refinability: if the type can be refined, then we allow an RI annotation
+	to be placed on that type.
+	The following can be annotated:
+	- TypeRef
+	- PolyParam
+	- RefinedType / RecType
+	- HKApply
+	- TypeVar ?
+	- AndType / OrType
+	- AnnotatedType
+	Some types cannot be annotated directly, but their underlying types participate in viewpoint adaptation.
+	The following cannot be annotated, but they can be the target of a viewpoint adaptation:
+	- ExprType
+	- TypeAlias / TypeBounds
+	- TypeLambda
+	- WildcardType
+
+	SUCCESS: in doing basic viewpoint adaptation with type refinements rather than shadow members.
+	Deprecated code (for adding & viewpoint adapting shadow members):
+	/*
+    /**
+      * If tpe is an annotated type, finds the meaning of RI annotations.
+      * If there is a meaningful RI annotation, sets the first non-annotation underlying type's
+      * shadow member.
+      *
+      * Returns a version of the type that has shadow members, but is stripped of all RI annotations.
+      */
+    def toShadows(tpe: Type, shadowInfo: Type)(implicit ctx: Context): Type = tpe match {
+      case tpe: AnnotatedType =>
+        if (tpe.annot.symbol eq defn.ReadonlyAnnot)
+          tpe.derivedAnnotatedType(toShadows(tpe.underlying, ReadonlyType), tpe.annot)  // leave RI annotations in place (for now)
+        else if (tpe.annot.symbol eq defn.MutabilityOfAnnot) {
+          val argTpe = typed(tpe.annot.arguments.head).tpe
+          val newShadowInfo = argTpe.member(MutabilityMemberName).info
+          tpe.derivedAnnotatedType(toShadows(tpe.underlying, newShadowInfo), tpe.annot)  // leave RI annotations in place (for now)
+        } else
+          tpe.derivedAnnotatedType(toShadows(tpe.underlying, shadowInfo), tpe.annot)  // leave non-RI annotations in place
+      case _ =>
+        if (shadowInfo.exists)
+          tpe.duplicate.addUniqueShadowMember(MutabilityMemberName, shadowInfo, visibleInMemberNames = true)
+        else
+          tpe
+    }
+
+    def adaptType(tpe: Type)(implicit ctx: Context): Type = tpe match {
+
+      case tpe: AnnotatedType =>
+        toShadows(tpe, NoType)
+
+      case tpe: TermRef =>
+        if (tpe.prefix.isError)
+          tpe
+        else {
+          // Check the prefix: We need to change the mutability of tpe only if tpe.prefix has a mutability member.
+          val denotPrefix = tpe.prefix.member(MutabilityMemberName)
+          if (denotPrefix.exists) {
+            val infoCombined = {
+              val denotTpe = tpe.member(MutabilityMemberName)
+              if (denotTpe.exists) {
+                // if prefix and tpe both have the shadow, combine their types with a union.
+                val info1 = denotPrefix.info.asInstanceOf[TypeAlias].hi  // assume we've got type aliases here
+                val info2 = denotTpe.info.asInstanceOf[TypeAlias].hi
+                TypeAlias(OrType(info1, info2), 1)
+              } else
+                denotPrefix.info // only the prefix has a shadow
+            }
+            tpe.duplicate.addUniqueShadowMember(MutabilityMemberName, infoCombined, visibleInMemberNames = true)
+          } else
+            tpe
+        }
+
+      case _ =>
+        tpe
+    }
+	*/
+
+	FAILURE: Involving @mutabiliyOf.
+	Test input:
+	  class C
+	  val c: C @readonly = ???
+	  val d: C @mutabilityOf(c) = c  // ok
+	  val e: C = d  // error
+	Output:
+	./tests/dotmod/neg/mutability_of.scala:7: error: type mismatch:
+	 found   : mutability_of.C{__MUTABILITY__ =+ dotty.readonly}(mutability_of.c)
+	 required: AnyRef{__MUTABILITY__ <: dotty.readonly}
+	  val d: C @mutabilityOf(c) = c  // ok
+	                         ^
+	./tests/dotmod/neg/mutability_of.scala:7: error: type mismatch:
+	 found   : mutability_of.C{__MUTABILITY__ =+ dotty.readonly}(mutability_of.c)
+	 required: mutability_of.C{__MUTABILITY__ =+ mutability_of.c.__MUTABILITY__}
+	  val d: C @mutabilityOf(c) = c  // ok
+	                              ^
+	./tests/dotmod/neg/mutability_of.scala:8: error: type mismatch:
+	 found   : mutability_of.C{__MUTABILITY__ =+ mutability_of.c.__MUTABILITY__}(mutability_of.d)
+	 required: mutability_of.C
+	  val e: C = d  // error
+	             ^

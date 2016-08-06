@@ -135,9 +135,10 @@ class Compiler {
     rootScope.enter(ctx.definitions.RootPackage)(bootstrap)
     val start = bootstrap.fresh
       .setOwner(defn.RootClass)
-      .setTyper(new DotMod.DotModTyper)
+      .setTyper(new Typer)
       .setMode(Mode.ImplicitsEnabled)
       .setTyperState(new MutableTyperState(ctx.typerState, ctx.typerState.reporter, isCommittable = true))
+    DotMod.customInit(start)
     ctx.initialize()(start) // re-initialize the base context with start
     def addImport(ctx: Context, refFn: () => TermRef) =
       ctx.fresh.setImportInfo(ImportInfo.rootImport(refFn)(ctx))

@@ -1,3 +1,3 @@
 package dotty
 
-class mutabilityOf(val ref: Any @readonly) extends scala.annotation.Annotation
+class mutabilityOf(val ref: { type __MUTABILITY__ <: readonly }) extends scala.annotation.Annotation

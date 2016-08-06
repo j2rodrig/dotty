@@ -104,10 +104,19 @@ object Contexts {
     protected def mode_=(mode: Mode) = _mode = mode
     def mode: Mode = _mode
 
-    /** The current type comparer */
+    /** The current typer state */
     private[this] var _typerState: TyperState = _
     protected def typerState_=(typerState: TyperState) = _typerState = typerState
     def typerState: TyperState = _typerState
+
+    /** The current extensible type operations */
+    private[this] var _typeOpHooks: TypeOpHooks = _
+    protected def typeOpHooks_=(typeOpHooks: TypeOpHooks) = _typeOpHooks = typeOpHooks
+    def typeOpHooks: TypeOpHooks = {
+      if (_typeOpHooks.ctx ne this)
+        _typeOpHooks = _typeOpHooks.copyIn(this)
+      _typeOpHooks
+    }
 
     /** The current plain printer */
     private[this] var _printerFn: Context => Printer = _
@@ -180,6 +189,7 @@ object Contexts {
     protected def moreProperties_=(moreProperties: Map[String, Any]) = _moreProperties = moreProperties
     def moreProperties: Map[String, Any] = _moreProperties
 
+    /** The current type comparer */
     private var _typeComparer: TypeComparer = _
     protected def typeComparer_=(typeComparer: TypeComparer) = _typeComparer = typeComparer
     def typeComparer: TypeComparer = {
@@ -439,6 +449,7 @@ object Contexts {
     def setCompilerCallback(callback: CompilerCallback): this.type = { this.compilerCallback = callback; this }
     def setSbtCallback(callback: AnalysisCallback): this.type = { this.sbtCallback = callback; this }
     def setTyperState(typerState: TyperState): this.type = { this.typerState = typerState; this }
+    def setTypeOpHooks(typeOpHooks: TypeOpHooks): this.type = { this.typeOpHooks = typeOpHooks; this }
     def setReporter(reporter: Reporter): this.type = setTyperState(typerState.withReporter(reporter))
     def setNewTyperState: this.type = setTyperState(typerState.fresh(isCommittable = true))
     def setExploreTyperState: this.type = setTyperState(typerState.fresh(isCommittable = false))
@@ -496,6 +507,7 @@ object Contexts {
     period = InitialPeriod
     mode = Mode.None
     typerState = new TyperState(new ConsoleReporter())
+    typeOpHooks = new TypeOpHooks(this)
     printerFn = new RefinedPrinter(_)
     owner = NoSymbol
     sstate = settings.defaultState

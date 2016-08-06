@@ -475,9 +475,9 @@ object Types {
           case tp: TypeRef =>
             tp.denot.findMember(name, pre, excluded)
           case tp: TermRef =>
-            go (tp.underlying match {
+            go (tp.underlying match {   // TODO: note the widening to underlying here
               case mt: MethodType
-              if mt.paramTypes.isEmpty && (tp.symbol is Stable) => mt.resultType
+              if mt.paramTypes.isEmpty && (tp.symbol is Stable) => mt.resultType   // TODO: note the widening here
               case tp1 => tp1
             })
           case tp: PolyParam =>
@@ -487,7 +487,7 @@ object Types {
           case tp: HKApply =>
             goApply(tp)
           case tp: TypeProxy =>
-            go(tp.underlying)
+            go(tp.underlying)  // TODO: note the widening to underlying here
           case tp: ClassInfo =>
             tp.cls.findMember(name, pre, excluded)
           case AndType(l, r) =>
@@ -1656,7 +1656,9 @@ object Types {
       if (checkedPeriod.runId == ctx.runId) lastSymbol
       else symbol
 
-    def info(implicit ctx: Context): Type = denot.info
+    def info(implicit ctx: Context): Type = {
+      denot.info
+    }
 
     def isType = isInstanceOf[TypeRef]
     def isTerm = isInstanceOf[TermRef]
@@ -1787,7 +1789,7 @@ object Types {
     //assert(name.toString != "<local Coder>")
     override def underlying(implicit ctx: Context): Type = {
       val d = denot
-      if (d.isOverloaded) NoType else d.info
+      if (d.isOverloaded) NoType else ctx.typeOpHooks.denotationAsSeenFrom(prefix, d)
     }
 
     override def signature(implicit ctx: Context): Signature = denot.signature
@@ -1808,7 +1810,7 @@ object Types {
 
     type ThisType = TypeRef
 
-    override def underlying(implicit ctx: Context): Type = info
+    override def underlying(implicit ctx: Context): Type = ctx.typeOpHooks.denotationAsSeenFrom(prefix, denot)
 
     override def superType(implicit ctx: Context): Type = info match {
       case TypeBounds(_, hi) => hi

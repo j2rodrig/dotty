@@ -3,22 +3,26 @@ package dotc
 
 import ast.{tpd, untpd}
 import core._
-import core.Annotations._
 import core.Contexts._
 import core.Decorators._
-import core.DenotTransformers._
+import core.Denotations._
 import core.Flags._
 import core.Names._
 import core.Symbols._
-import core.SymDenotations._
+import core.TypeOpHooks
 import core.Types._
-import dotty.tools.dotc.core.Denotations.SingleDenotation
-import transform.TreeTransforms._
 import typer._
 import typer.ErrorReporting._
 
 
 object DotMod {
+
+  def customInit(ctx: FreshContext): FreshContext = {
+    ctx.setTypeComparerFn(new DotModTypeComparer(_))
+    ctx.setTypeOpHooks(new DotModTypeOpHooks(ctx))
+    ctx.setTyper(new DotModTyper)
+    ctx
+  }
 
 
   /**
@@ -60,6 +64,7 @@ object DotMod {
   implicit class TypeDecorator(val tp: Type) extends AnyVal {
 
     /** Creates a new Type equivalent to tp */
+    /*
     def duplicate(implicit ctx: Context): Type = tp match {
       case tp: TypeRef =>
         TypeRef.createWithoutCaching(tp.prefix, tp.name)
@@ -67,12 +72,14 @@ object DotMod {
         TermRef.createWithoutCaching(tp.prefix, tp.name)
       case _ => tp  // TODO: duplicate other types of types
     }
+    */
   }
 
 
-  val MutabilityMemberName = typeName("$$$$_mutability!$$$$")
+  val MutabilityMemberName = typeName("__MUTABILITY__")
   def ReadonlyType(implicit ctx: Context) = TypeAlias(defn.ReadonlyAnnotType, 1)
-  def MutableType(implicit ctx: Context) = TypeAlias(defn.NothingType, 1)
+  def MutableType(implicit ctx: Context) = TypeAlias(defn.MutableAnnotType, 1)
+
 
 
   /**
@@ -83,26 +90,129 @@ object DotMod {
   class DotModTypeComparer(initCtx: Context) extends TypeComparer(initCtx) {
 
     override def isSubType(tp1: Type, tp2: Type): Boolean = {
-      tp1.isError || tp2.isError || (super.isSubType(tp1, tp2) && {
-        val name = MutabilityMemberName
-        val denot1 = tp1.member(name)
-        val denot2 = tp2.member(name)
-        val info1 = if (denot1.exists) denot1.info else MutableType  // default to Mutable
-        val info2 = if (denot2.exists) denot2.info else MutableType
-        if (info1.isError || info2.isError)
-          false // breakpoint
-        if (denot1.exists || denot2.exists)
-          false  // breakpoint
-        val result = super.isSubType(info1, info2)
-        if (!result)
-          false  // breakpoint
-        result
-      })
+
+      // The (tp2 eq WildcardType) check below carries the implicit assumption that
+      // the upper bound is readonly.
+      // TODO: What do we assume about upper type bounds in the general case? Do we augment type bounds <: Any with a readonly refinement?
+
+      // Handle cases where a mutability member has not been set.
+      if (!(tp2.isInstanceOf[ProtoType] || tp2.isError || (tp2 eq WildcardType))) {
+        // Special case logic any time tp1 (or its widening) refines the mutability member.
+        // We need to check this here because otherwise the ordinary subtyping logic will
+        // assume that tp2 does not contain this member, and discard it.
+        tp1.widen match {
+          case tp1w: RefinedType if tp1w.refinedName eq MutabilityMemberName =>
+            val denot2 = tp2.member(MutabilityMemberName)
+            val info2 = if (denot2.exists) denot2.info else MutableType  // default to mutable
+            val resultInfo = super.isSubType(tp1w.refinedInfo, info2)
+            val resultParent = super.isSubType(tp1w, tp2)  // ordinary subtyping logic
+            return resultInfo && resultParent
+          case _ =>
+        }
+
+        // Special case logic any time tp2 refines the mutability member, but tp1 does not.
+        // If tp1 does not have the mutability member, we default it to mutable.
+        // Practically, defaulting tp1's member to mutable just means we ignore the
+        // member on tp2 (and allow the type comparison to proceed on tp2's parent).
+        tp2 match {
+          case tp2: RefinedType if tp2.refinedName eq MutabilityMemberName =>
+            val denot1 = tp1.member(MutabilityMemberName)
+            if (!denot1.exists)
+              return isSubType(tp1, tp2.parent)  // member's OK, but still have to check the parent.
+          case _ =>
+        }
+      }
+
+      super.isSubType(tp1, tp2)
     }
 
     override def copyIn(ctx: Context): TypeComparer = new DotModTypeComparer(ctx)
   }
 
+  def canHaveAnnotations(tp: Type)(implicit ctx: Context): Boolean = tp match {
+    case _: TypeRef => true
+    case _: RefinedOrRecType => true
+    case _: AndOrType => true
+    case _: PolyParam => true
+    case _: HKApply => true
+    case _: TypeVar => true
+    case tp: AnnotatedType => canHaveAnnotations(tp.underlying)
+    case _ => false
+  }
+
+  def isViewpointAdaptable(tp: Type)(implicit ctx: Context): Boolean = canHaveAnnotations(tp) || (tp match {
+    case tp: ExprType => isViewpointAdaptable(tp.resultType)
+    case tp: AnnotatedType => isViewpointAdaptable(tp.underlying)
+    case tp: TypeAlias => isViewpointAdaptable(tp.alias)
+    case tp: TypeBounds => isViewpointAdaptable(tp.hi)
+    case tp: TypeLambda => isViewpointAdaptable(tp.resultType)
+    case tp: WildcardType => !tp.optBounds.exists || isViewpointAdaptable(tp.optBounds)
+    case _ => false
+  })
+
+  def refineMutability(tp: Type, mutInfo: TypeBounds)(implicit ctx: Context): Type = {
+    if (canHaveAnnotations(tp))
+      RefinedType(dropRefinementsNamed(tp, MutabilityMemberName), MutabilityMemberName, mutInfo)
+    else tp match {
+      case tp: ExprType =>
+        tp.derivedExprType(refineMutability(tp.resultType, mutInfo))
+      case tp: AnnotatedType =>
+        tp.derivedAnnotatedType(refineMutability(tp.underlying, mutInfo), tp.annot)
+      case tp: TypeAlias =>
+        tp.derivedTypeAlias(refineMutability(tp.alias, mutInfo))
+      case tp: TypeBounds =>
+        tp.derivedTypeBounds(tp.lo, refineMutability(tp.hi, mutInfo))
+      case tp: TypeLambda =>
+        tp.derivedTypeLambda(tp.paramNames, tp.paramBounds, refineMutability(tp.resultType, mutInfo))
+      case tp: WildcardType =>
+        if (tp.optBounds.exists)
+          tp.derivedWildcardType(refineMutability(tp.optBounds, mutInfo))
+        else
+          tp.derivedWildcardType(TypeBounds(defn.NothingType, RefinedType(defn.AnyType, MutabilityMemberName, mutInfo)))
+    }
+  }
+
+  def dropRefinementsNamed(tp: Type, name: Name)(implicit ctx: Context): Type = tp match {
+    case tp: RefinedType if tp.refinedName eq name =>
+      dropRefinementsNamed(tp.underlying, name)
+    case _ =>
+      tp
+  }
+
+  class DotModTypeOpHooks(initCtx: Context) extends TypeOpHooks(initCtx) {
+
+    /** The info of the given denotation, as viewed from the given prefix. */
+    override def denotationAsSeenFrom(pre: Type, denot: Denotation): Type = {
+      var target = denot.info
+      if (denot.isTerm && isViewpointAdaptable(target) && !ctx.erasedTypes) {   // do viewpoint adaption for terms only, and not during erasure phase
+        val prefixMutabilityDenot = pre.member(MutabilityMemberName)
+        val prefixMutability = if (prefixMutabilityDenot.exists) prefixMutabilityDenot.info.asInstanceOf[TypeBounds].hi else defn.MutableAnnotType
+        val underlyingMutabilityDenot = target.member(MutabilityMemberName)
+        val underlyingMutabilityBounds = if (underlyingMutabilityDenot.exists) underlyingMutabilityDenot.info else MutableType
+        val targetMutabilityBounds = underlyingMutabilityBounds match {
+          case tp: TypeAlias =>
+            tp.derivedTypeAlias(simplifiedOrType(prefixMutability, tp.alias))
+          case tp: TypeBounds =>
+            tp.derivedTypeBounds(tp.lo, simplifiedOrType(prefixMutability, tp.hi))
+        }
+        if (targetMutabilityBounds ne underlyingMutabilityBounds)
+          target = refineMutability(target, targetMutabilityBounds)
+      }
+      target
+    }
+
+    def simplifiedOrType(tp1: Type, tp2: Type): Type = {
+      if (tp1 eq tp2) tp1
+      else if (tp1 eq defn.ReadonlyAnnotType) tp1
+      else if (tp2 eq defn.ReadonlyAnnotType) tp2
+      else if (tp1 eq defn.MutableAnnotType) tp2
+      else if (tp2 eq defn.MutableAnnotType) tp1
+      else OrType(tp1, tp2)
+    }
+
+    /** A new object of the same type as this one, using the given context. */
+    override def copyIn(ctx: Context) = new DotModTypeOpHooks(ctx)
+  }
 
   class DotModTyper extends Typer {
     /*
@@ -111,73 +221,41 @@ object DotMod {
     Next up: Readonly annotations in types loaded from class files?
      */
 
-    /**
-      * If tpe is an annotated type, finds the meaning of RI annotations.
-      * If there is a meaningful RI annotation, sets the first non-annotation underlying type's
-      * shadow member.
-      *
-      * Returns a version of the type that has shadow members, but is stripped of all RI annotations.
-      */
-    def toShadows(tpe: Type, shadowInfo: Type)(implicit ctx: Context): Type = tpe match {
-      case tpe: AnnotatedType =>
-        if (tpe.annot.symbol eq defn.ReadonlyAnnot)
-          tpe.derivedAnnotatedType(toShadows(tpe.underlying, ReadonlyType), tpe.annot)  // leave RI annotations in place (for now)
-        else if (tpe.annot.symbol eq defn.MutabilityOfAnnot) {
-          val argTpe = typed(tpe.annot.arguments.head).tpe
-          val newShadowInfo = argTpe.member(MutabilityMemberName).info
-          tpe.derivedAnnotatedType(toShadows(tpe.underlying, newShadowInfo), tpe.annot)  // leave RI annotations in place (for now)
+    def convertAnnotationToRefinement(tp: Type)(implicit ctx: Context): Type = tp match {
+      case tp: AnnotatedType =>
+        if (tp.annot.symbol eq defn.ReadonlyAnnot)
+          // TODO: ErrorType if !canHaveAnnotations
+          refineMutability(tp.underlying, ReadonlyType)
+        else if (tp.annot.symbol eq defn.MutableAnnot)
+          // TODO: ErrorType if !canHaveAnnotations
+          refineMutability(tp.underlying, MutableType)
+        else if (tp.annot.symbol eq defn.MutabilityOfAnnot) {
+          // TODO: ErrorType if !canHaveAnnotations
+          val argTpe = typed(tp.annot.arguments.head).tpe
+          if (argTpe.member(MutabilityMemberName).exists)
+            refineMutability(tp.underlying, TypeAlias(TypeRef(argTpe, MutabilityMemberName), 1))
+          else
+            refineMutability(tp.underlying, MutableType)
         } else
-          tpe.derivedAnnotatedType(toShadows(tpe.underlying, shadowInfo), tpe.annot)  // leave non-RI annotations in place
-      case _ =>
-        if (shadowInfo.exists)
-          tpe.duplicate.addUniqueShadowMember(MutabilityMemberName, shadowInfo, visibleInMemberNames = true)
-        else
-          tpe
-    }
-
-    def adaptType(tpe: Type)(implicit ctx: Context): Type = tpe match {
-
-      case tpe: AnnotatedType =>
-        toShadows(tpe, NoType)
-
-      case tpe: TermRef =>
-        if (tpe.prefix.isError)
-          tpe
-        else {
-          // Check the prefix: We need to change the mutability of tpe only if tpe.prefix has a mutability member.
-          val denotPrefix = tpe.prefix.member(MutabilityMemberName)
-          if (denotPrefix.exists) {
-            val infoCombined = {
-              val denotTpe = tpe.member(MutabilityMemberName)
-              if (denotTpe.exists) // if prefix and tpe both have the shadow, combine their types with a union
-                OrType(denotPrefix.info, denotTpe.info)
-              else
-                denotPrefix.info // only the prefix has a shadow
-            }
-            tpe.duplicate.addUniqueShadowMember(MutabilityMemberName, infoCombined, visibleInMemberNames = true)
-          } else
-            tpe
-        }
-
-      case _ =>
-        tpe
+          tp
+      case _ => tp
     }
 
     override def adapt(tree0: tpd.Tree, pt: Type, original: untpd.Tree)(implicit ctx: Context): tpd.Tree = {
       // Find out what type the default typer thinks this tree has.
       val tree = super.adapt(tree0, pt, original)
-      val tpe = tree.tpe
 
-      // Do our stuff to the type.
-      val tpe1 = adaptType(tpe)
+      // Turn RI annotations into type refinements.
+      val tpe1 = convertAnnotationToRefinement(tree.tpe)
 
       // Return a tree with the new type.
       val tree1 =
-        if (tpe ne tpe1)
+        if (tree.tpe ne tpe1)
           tree.withType(tpe1)
         else
           tree
 
+      /*
       // Check tpe1 against the prototype with our custom type comparer.
       val dontCheck = ctx.mode.is(Mode.Pattern) || !tpe1.exists || pt.isInstanceOf[ProtoType] || (pt eq WildcardType)
       if (!dontCheck) {
@@ -188,6 +266,8 @@ object DotMod {
       }
       else
         tree1
+      */
+      tree1
     }
 
     override def newLikeThis: Typer = new DotModTyper
