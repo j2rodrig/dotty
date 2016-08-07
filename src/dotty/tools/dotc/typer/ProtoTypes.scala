@@ -108,7 +108,7 @@ object ProtoTypes {
 
     def derivedSelectionProto(name: Name, memberProto: Type, compat: Compatibility)(implicit ctx: Context) =
       if ((name eq this.name) && (memberProto eq this.memberProto) && (compat eq this.compat)) this
-      else SelectionProto(name, memberProto, compat).copyShadowMembers(this)
+      else SelectionProto(name, memberProto, compat)
 
     override def equals(that: Any): Boolean = that match {
       case that: SelectionProto =>
@@ -177,7 +177,7 @@ object ProtoTypes {
 
     def derivedFunProto(args: List[untpd.Tree] = this.args, resultType: Type, typer: Typer = this.typer) =
       if ((args eq this.args) && (resultType eq this.resultType) && (typer eq this.typer)) this
-      else (new FunProto(args, resultType, typer)).copyShadowMembers(this)
+      else new FunProto(args, resultType, typer)
 
     def argsAreTyped: Boolean = myTypedArgs.size == args.length
 
@@ -254,7 +254,7 @@ object ProtoTypes {
 
     def derivedViewProto(argType: Type, resultType: Type)(implicit ctx: Context) =
       if ((argType eq this.argType) && (resultType eq this.resultType)) this
-      else ViewProto(argType, resultType).copyShadowMembers(this)
+      else ViewProto(argType, resultType)
 
     def map(tm: TypeMap)(implicit ctx: Context): ViewProto = derivedViewProto(tm(argType), tm(resultType))
 
@@ -294,7 +294,7 @@ object ProtoTypes {
 
     def derivedPolyProto(targs: List[Type], resultType: Type) =
       if ((targs eq this.targs) && (resType eq this.resType)) this
-      else PolyProto(targs, resType).copyShadowMembers(this)
+      else PolyProto(targs, resType)
 
     def map(tm: TypeMap)(implicit ctx: Context): PolyProto =
       derivedPolyProto(targs mapConserve tm, tm(resultType))
