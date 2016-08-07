@@ -107,12 +107,10 @@ object DotMod {
             if (denot1.exists) {
               val denot2 = tp2.member(MutabilityMemberName)
               val info2 = if (denot2.exists) denot2.info else MutableType // default to mutable
-              val skipped2 = tp2 match {
-                case tp2: RefinedType => skipMatching(tp1w, tp2) // if tp2 has matching refinements, get rid of them
-                case _ => tp2
-              }
+              val dropped1 = dropRefinementsNamed(tp1w, List(MutabilityMemberName, PrefixMutabilityName))
+              val dropped2 = dropRefinementsNamed(tp2.widen, List(MutabilityMemberName, PrefixMutabilityName))
               val resultInfo = super.isSubType(denot1.info, info2) // check refined member
-              val resultParent = super.isSubType(tp1w.parent, skipped2) // check parents
+              val resultParent = super.isSubType(dropped1, dropped2) // check parents
               return resultInfo && resultParent
             }
           case _ =>
@@ -204,28 +202,40 @@ object DotMod {
     /** The info of the given denotation, as viewed from the given prefix. */
     override def denotationAsSeenFrom(pre: Type, denot: Denotation): Type = {
       var target = denot.info
-      if (denot.isTerm && isViewpointAdaptable(target) && !ctx.erasedTypes) {   // do viewpoint adaption for terms only, and not during erasure phase
+      if (pre.member(MutabilityMemberName).exists && denot.isTerm && isViewpointAdaptable(target) && !ctx.erasedTypes) {   // do viewpoint adaption for terms only, and not during erasure phase
 
         // Prefix mutability
-        val prefixMutabilityDenot = pre.member(MutabilityMemberName)
-        val prefixBounds = if (prefixMutabilityDenot.exists)
-          prefixMutabilityDenot.info.asInstanceOf[TypeBounds]
-        else
-          MutableType
+        //val prefixMutabilityDenot = pre.member(MutabilityMemberName)
+        //val prefixBounds = if (prefixMutabilityDenot.exists)
+        //  prefixMutabilityDenot.info.asInstanceOf[TypeBounds]
+        //else
+        //  MutableType
 
         // Target mutability and assignability
-        val underlyingMutabilityDenot = target.member(MutabilityMemberName)
-        val underlyingMutabilityBounds = if (underlyingMutabilityDenot.exists) underlyingMutabilityDenot.info else MutableType
-        val targetMutabilityBounds = underlyingMutabilityBounds match {
+        //val underlyingMutabilityDenot = target.member(MutabilityMemberName)
+        //val underlyingMutabilityBounds = if (underlyingMutabilityDenot.exists) underlyingMutabilityDenot.info else MutableType
+        //val targetMutabilityBounds = underlyingMutabilityBounds match {
+        //  case tp: TypeAlias =>
+        //    tp.derivedTypeAlias(simplifiedOrType(prefixBounds.hi, tp.alias))
+        //  case tp: TypeBounds =>
+        //    tp.derivedTypeBounds(tp.lo, simplifiedOrType(prefixBounds.hi, tp.hi))
+        //}
+        //if (targetMutabilityBounds ne underlyingMutabilityBounds)
+        //  target = refineResultMember(target, MutabilityMemberName, targetMutabilityBounds, otherMembersToDrop = List(PrefixMutabilityName))
+        //if (prefixBounds ne MutableType)
+        //  target = refineResultMember(target, PrefixMutabilityName, prefixBounds)
+
+        val preMut = TypeRef(pre, MutabilityMemberName)
+        val underMutDenot = target.member(MutabilityMemberName)
+        val underMutBounds = if (underMutDenot.exists) underMutDenot.info else MutableType
+        val targetMutBounds = underMutBounds match {
           case tp: TypeAlias =>
-            tp.derivedTypeAlias(simplifiedOrType(prefixBounds.hi, tp.alias))
+            tp.derivedTypeAlias(preMut | tp.alias)
           case tp: TypeBounds =>
-            tp.derivedTypeBounds(tp.lo, simplifiedOrType(prefixBounds.hi, tp.hi))
+            tp.derivedTypeBounds(preMut | tp.lo, preMut | tp.hi)
         }
-        if (targetMutabilityBounds ne underlyingMutabilityBounds)
-          target = refineResultMember(target, MutabilityMemberName, targetMutabilityBounds, otherMembersToDrop = List(PrefixMutabilityName))
-        if (prefixBounds ne MutableType)
-          target = refineResultMember(target, PrefixMutabilityName, prefixBounds)
+        target = refineResultMember(target, MutabilityMemberName, targetMutBounds, otherMembersToDrop = List(PrefixMutabilityName))
+        target = refineResultMember(target, PrefixMutabilityName, TypeAlias(preMut, 1))
       }
       target
     }
@@ -264,7 +274,7 @@ object DotMod {
         else if (tp.annot.symbol eq defn.MutableAnnot)
           refineResultMember(tp.underlying, MutabilityMemberName, MutableType)
         else if (tp.annot.symbol eq defn.MutabilityOfAnnot) {
-          val argTpe = typed(tp.annot.arguments.head).tpe
+          val argTpe = typed(tp.annot.arguments.head).tpe.widenIfUnstable
           refineResultMember(tp.underlying, MutabilityMemberName, TypeAlias(TypeRef(argTpe, MutabilityMemberName), 1))
         } else
           tp

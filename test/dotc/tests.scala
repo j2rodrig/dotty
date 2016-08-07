@@ -76,6 +76,8 @@ class tests extends CompilerTest {
   @Test def dotmod_unannotatable() = compileFile(dotmodNegDir, "unannotatable")
   @Test def dotmod_assignability() = compileFile(dotmodNegDir, "assignability")
 
+  @Test def dotmod_iterator() = compileFile(dotmodPosDir, "iterator", twice)
+
   @Test def pickle_pickleOK = compileDir(testsDir, "pickling", testPickling)
 // This directory doesn't exist anymore
 // @Test def pickle_pickling = compileDir(coreDir, "pickling", testPickling)
