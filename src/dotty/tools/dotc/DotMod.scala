@@ -202,7 +202,7 @@ object DotMod {
     /** The info of the given denotation, as viewed from the given prefix. */
     override def denotationAsSeenFrom(pre: Type, denot: Denotation): Type = {
       var target = denot.info
-      if (pre.member(MutabilityMemberName).exists && denot.isTerm && isViewpointAdaptable(target) && !ctx.erasedTypes) {   // do viewpoint adaption for terms only, and not during erasure phase
+      if (!ctx.erasedTypes && denot.isTerm && isViewpointAdaptable(target) && pre.member(MutabilityMemberName).exists) {   // do viewpoint adaption for terms only, and not during erasure phase
 
         // Prefix mutability
         //val prefixMutabilityDenot = pre.member(MutabilityMemberName)
@@ -240,6 +240,7 @@ object DotMod {
       target
     }
 
+    /*
     def simplifiedOrType(tp1: Type, tp2: Type): Type = {
       if (tp1 eq tp2) tp1
       else if (tp1 eq defn.ReadonlyAnnotType) tp1
@@ -248,6 +249,7 @@ object DotMod {
       else if (tp2 eq defn.MutableAnnotType) tp1
       else OrType(tp1, tp2)
     }
+    */
 
     /** A new object of the same type as this one, using the given context. */
     override def copyIn(ctx: Context) = new DotModTypeOpHooks(ctx)

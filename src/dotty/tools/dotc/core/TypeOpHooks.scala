@@ -8,7 +8,7 @@ import Types._
   * Customizable type operations.
   */
 class TypeOpHooks(initCtx: Context) {
-  implicit val ctx = initCtx
+  implicit val ctx: Context = initCtx
 
   /** The info of the given denotation, as viewed from the given prefix. */
   def denotationAsSeenFrom(pre: Type, denot: Denotation): Type = denot.info

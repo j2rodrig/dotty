@@ -60,13 +60,16 @@ class tests extends CompilerTest {
   val typerDir  = dotcDir + "typer/"
 
 
-  @Test def pos_autoTupling() = compileFile(posDir, "autoTuplingTest", twice)
-  @Test def neg_cycles() = compileFile(negDir, "cycles")
+  // Tests that DotMod failed in the past. Collected here for easy retesting.
   @Test def dotmod_failed_tests() = {
+    pos_checkInstantiable()
     neg_cycles()
     pos_autoTupling()
     neg_autoTupling
   }
+  @Test def pos_checkInstantiable() = compileFile(posDir, "checkInstantiable", twice)
+  @Test def pos_autoTupling() = compileFile(posDir, "autoTuplingTest", twice)
+  @Test def neg_cycles() = compileFile(negDir, "cycles")
 
 
   @Test def dotmod_empty_object() = compileFile(dotmodPosDir, "empty_object", twice)
@@ -77,6 +80,9 @@ class tests extends CompilerTest {
   @Test def dotmod_assignability() = compileFile(dotmodNegDir, "assignability")
 
   @Test def dotmod_iterator() = compileFile(dotmodPosDir, "iterator", twice)
+
+  @Test def all_dotmod_neg() = compileFiles(dotmodNegDir, verbose = true, compileSubDirs = false)
+
 
   @Test def pickle_pickleOK = compileDir(testsDir, "pickling", testPickling)
 // This directory doesn't exist anymore
