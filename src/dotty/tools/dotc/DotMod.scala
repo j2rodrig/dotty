@@ -283,6 +283,32 @@ object DotMod {
       case _ => tp
     }
 
+    override def adaptApplyResult(funRef: TermRef, res: tpd.Tree)(implicit ctx: Context): tpd.Tree = {
+      val rcvMutDenot = funRef.prefix.member(MutabilityMemberName)
+      val methodAnnots = funRef.symbol.annotations
+
+      if (methodAnnots.exists(_.matches(defn.ReadonlyAnnot)))
+        res
+
+      else if (methodAnnots.exists(_.matches(defn.MutabilityOfAnnot))) {
+        methodAnnots.filter(_.matches(defn.MutabilityOfAnnot)).foreach { annot =>
+          val mutOfDenot = typed(annot.arguments.head).tpe.member(MutabilityMemberName)
+          val mutOfInfo = if (mutOfDenot.exists) mutOfDenot.info else MutableType
+          if (rcvMutDenot.exists && !(rcvMutDenot.info <:< mutOfInfo))
+            return errorTree(res, d"Incompatible receiver mutability in call to method ${funRef.name}:\n" +
+              d"  Receiver has mutability ${rcvMutDenot.info}, method has mutability $mutOfInfo")
+        }
+        res
+      }
+      else {
+        if (!rcvMutDenot.exists || rcvMutDenot.info <:< MutableType)
+          res
+        else
+          errorTree(res, d"Incompatible receiver mutability in call to mutable method ${funRef.name}:\n" +
+            d"  Receiver has mutability ${rcvMutDenot.info}")
+      }
+    }
+
     override def adapt(tree0: tpd.Tree, pt: Type, original: untpd.Tree)(implicit ctx: Context): tpd.Tree = {
       // Find out what type the default typer thinks this tree has.
       val tree = super.adapt(tree0, pt, original)
