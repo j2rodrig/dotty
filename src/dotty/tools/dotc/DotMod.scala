@@ -109,7 +109,7 @@ object DotMod {
               val info2 = if (denot2.exists) denot2.info else MutableType // default to mutable
               val dropped1 = dropRefinementsNamed(tp1w, List(MutabilityMemberName, PrefixMutabilityName))
               val dropped2 = dropRefinementsNamed(tp2.widen, List(MutabilityMemberName, PrefixMutabilityName))
-              val resultInfo = super.isSubType(denot1.info, info2) // check refined member
+              val resultInfo = isSubType(denot1.info, info2) // check refined member
               val resultParent = super.isSubType(dropped1, dropped2) // check parents
               return resultInfo && resultParent
             }
@@ -134,7 +134,22 @@ object DotMod {
         }
       }
 
-      super.isSubType(tp1, tp2)
+      val tp1defaulted = tp1 match {
+        // If tp1 refers to the mutability member of another type, but that member doesn't exist, then default to mutable.
+        case tp1: TypeRef if (tp1.name eq MutabilityMemberName) && !tp1.denot.exists =>
+          defn.MutableAnnotType
+        case _ =>
+          tp1
+      }
+      val tp2defaulted = tp2 match {
+        // If tp2 refers to the mutability member of another type, but that member doesn't exist, then default to mutable.
+        case tp2: TypeRef if (tp2.name eq MutabilityMemberName) && !tp2.denot.exists =>
+          defn.MutableAnnotType
+        case _ =>
+          tp2
+      }
+
+      super.isSubType(tp1defaulted, tp2defaulted)
     }
 
     override def copyIn(ctx: Context): TypeComparer = new DotModTypeComparer(ctx)

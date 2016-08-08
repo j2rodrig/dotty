@@ -644,3 +644,15 @@ ASSIGNABILITY
 	Other changes: moved the call to the viewpoint-adaptation hook to NamedType#info rather than
 	TypeRef/TermRef#underlying. This change ensures that a calls to both info and underlying return
 	a viewpoint-adapted result.
+
+VIEWPOINT ADAPTATION
+
+	Successful adaptation of method results by using @mutabilityOf(this). See polymorphic_mut test.
+
+	Type comparer needed to be augmented to check TypeRefs that refer to the mutability member
+	 of another type. It is possible that the mutability member does not exist on the
+	 referred-to type, so such TypeRefs are defaulted to mutable before comparing.
+
+	Method receiver mutability is not yet considered. Taking receiver mutability into account
+	during viewpoint adaptation should be easy enough, but something will have to be done about handling
+	the mutability of ThisTypes.
