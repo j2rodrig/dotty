@@ -8,4 +8,10 @@ object mutability_of {
   val e: C = d  // error
   val f: C @mutabilityOf(d) = c  // ok
   val g: C @mutabilityOf(e) = c  // error
+
+  class D {
+    val c: C = ???
+    def m(): C @mutabilityOf(this) = c  // ok
+    def n(): C @mutabilityOf(this) = d  // error
+  }
 }

@@ -453,6 +453,8 @@ class Definitions {
 
   lazy val ReadonlyAnnotType = ctx.requiredClassRef("dotty.readonly")
   def ReadonlyAnnot(implicit ctx: Context) = ReadonlyAnnotType.symbol.asClass
+  lazy val PolyreadAnnotType = ctx.requiredClassRef("dotty.polyread")
+  def PolyreadAnnot(implicit ctx: Context) = PolyreadAnnotType.symbol.asClass
   lazy val MutableAnnotType = ctx.requiredClassRef("dotty.mutable")
   def MutableAnnot(implicit ctx: Context) = MutableAnnotType.symbol.asClass
   lazy val MutabilityOfAnnotType = ctx.requiredClassRef("dotty.mutabilityOf")

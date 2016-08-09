@@ -656,3 +656,49 @@ VIEWPOINT ADAPTATION
 	Method receiver mutability is not yet considered. Taking receiver mutability into account
 	during viewpoint adaptation should be easy enough, but something will have to be done about handling
 	the mutability of ThisTypes.
+
+
+Implemented mutability of types with ThisType and NoPrefix prefixes.
+PROBLEM: There seems to be some infinite recursion when trying to find the type of an annotation itself.
+SUCCESS: The problem was that I was performing viewpoint adaptation on module references,
+which was causing an infinite loop when trying to resolve the type of dotty.readonly.
+Fortunately, it is unnecessary to perform viewpoint adaptation on modules.
+FAILURE: Having problems with ThisType class names not actually appearing in context trees.
+E.g., the members of object P {...} are actually in the synthetic class P$ { ... }.
+ Perhaps I can trace the ownership chain through symbols instead of contexts.
+ It is possible that there will be uncompleted symbols in the ownership chain,
+ but if there is a way to get annotations from uncompleted symbols, that should work.
+FAILURE: Tried using the symbol's originalName instead of name. Doesn't work.
+It is possible that viewpoint adaptation really doesn't need to do this.
+
+However, the issue here is that a use of "this" inside a method should have the appropriate mutability,
+and that mutability varies depending on what method the "this" is used within.
+If a method is receiver-polymorphic in a class C, we need this to have the type:
+ C { __MUTABILITY__ >: mutable <: readonly }
+The question that remains here is: given an arbitrary this-type, how do we reliably
+determine what its mutability should be? Is it safe to traverse the owner-symbol chain
+starting from the current context owner? It seems to be safe...
+The mutability of C.this can be read from the enclosing definition whose symbol is non-weak,
+ and whose effective owner is C. If there is no such symbol, then we are inside the constructor
+ of C, so C.this is mutable.
+
+PROBLEM: Discovered it is possible for the current context owner to not be contained in
+the class we want to get the ThisType of. Perhaps what we want to do is have the ThisType
+mutability computation start with a symbol that we know is inside the correct class?
+SOLVED: Ignored (returned mutable for) package/root classes and inside constructors.
+
+NOTE: I'm not calling mutabilityOf when processing the @mutabilityOf(x) annotation.
+It causes cyclic reference errors. For the @mutabilityOf(x) annotation, the mutability
+is exactly x.__MUTABILITY__ without any attempt to simplify.
+
+Failing tests:
+	assignability
+	receiver
+	assignable_mutability
+Changed defn.MutableAnnotType to MutableType in assignability check. The assignability test now passes.
+
+NOTE ON TYPE BOUNDS: It seems that, in general, type bounds are only comparable to other type bounds
+(or type aliases). Comparing a type bounds type to a non-type-bounds type does not seem to work.
+The reason seems to be that type bounds (and class infos) are type types, whereas most other types
+are term (value/reference) types.
+

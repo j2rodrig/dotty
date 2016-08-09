@@ -80,6 +80,7 @@ class tests extends CompilerTest {
   @Test def dotmod_assignability() = compileFile(dotmodNegDir, "assignability")
   @Test def dotmod_receiver() = compileFile(dotmodNegDir, "receiver")
   @Test def dotmod_polymorphic_mut() = compileFile(dotmodNegDir, "polymorphic_mut")
+  @Test def dotmod_assignable_mutability_of() = compileFile(dotmodNegDir, "assignable_mutability_of")
 
   @Test def dotmod_iterator() = compileFile(dotmodPosDir, "iterator", twice)
 
