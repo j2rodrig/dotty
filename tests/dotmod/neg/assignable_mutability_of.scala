@@ -8,12 +8,12 @@ object assignable_mutability_of {
 
     def m(): Any @mutabilityOf(this) = {
       x = x  // ok: this is mutable
-      x
+      x  // ok
     }
 
     @polyread def n(): Any @mutabilityOf(this) = {
       x = x   // error: this has polymorphic mutability
-      x
+      x  // ok
     }
 
     @polyread def o(): Any @mutabilityOf(this) = {
@@ -22,7 +22,7 @@ object assignable_mutability_of {
 
     @readonly def p(): Any @mutabilityOf(this) = {
       x = x    // error
-      x
+      x  // ok
     }
   }
 }

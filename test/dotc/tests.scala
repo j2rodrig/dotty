@@ -62,11 +62,21 @@ class tests extends CompilerTest {
 
   // Tests that DotMod failed in the past. Collected here for easy retesting.
   @Test def dotmod_failed_tests() = {
+    pos_t2435()
+    pos_t1123()
+    pos_Iter2()
+    neg_zoo()
+    neg_i1050a()
     pos_checkInstantiable()
     neg_cycles()
     pos_autoTupling()
     neg_autoTupling
   }
+  @Test def pos_t2435() = compileFile(posDir, "t2435")
+  @Test def pos_t1123() = compileFile(posDir, "t1123")
+  @Test def pos_Iter2() = compileFile(posDir, "Iter2")
+  @Test def neg_zoo() = compileFile(negDir, "zoo")
+  @Test def neg_i1050a() = compileFile(negDir, "i1050a")
   @Test def pos_checkInstantiable() = compileFile(posDir, "checkInstantiable", twice)
   @Test def pos_autoTupling() = compileFile(posDir, "autoTuplingTest", twice)
   @Test def neg_cycles() = compileFile(negDir, "cycles")

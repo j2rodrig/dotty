@@ -1,9 +1,9 @@
-import dotty.{mutabilityOf, readonly}
+import dotty._
 
 object polymorphic_mut {
 
   class C {
-    @readonly def ident(): C @mutabilityOf(this) = this
+    @polyread def ident(): C @mutabilityOf(this) = this
   }
   val cm: C = ???
   val cr: C @readonly = ???

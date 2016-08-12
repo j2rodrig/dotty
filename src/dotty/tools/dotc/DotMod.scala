@@ -5,7 +5,6 @@ import ast.{tpd, untpd}
 import core._
 import core.Annotations._
 import core.Contexts._
-import core.Decorators._
 import core.Denotations._
 import core.Flags._
 import core.Names._
@@ -18,6 +17,8 @@ import typer.ErrorReporting._
 
 object DotMod {
 
+  // FRONT-END INITIALIZATION
+
   def customInit(ctx: FreshContext): FreshContext = {
     ctx.setTypeComparerFn(new DotModTypeComparer(_))
     ctx.setTypeOpHooks(new DotModTypeOpHooks(ctx))
@@ -25,72 +26,38 @@ object DotMod {
     ctx
   }
 
-
-  /**
-    * Get information about the given Def tree.
-    *
-    * In practice, a Context always has a tree and an owner context.
-    * But trees are not always associated with a type or a completed symbol.
-    * So this is our way of getting needed information about enclosing definitions.
-    */
-  implicit class UntypedTreeDecorator(val tree: untpd.Tree) extends AnyVal {
-    def name: Name = tree match {
-      case tree: untpd.NameTree => tree.name
-    }
-    /** Gets the flags that have been set on this tree, or EmptyFlags if no flags have been set */
-    def getFlags(implicit ctx: Context): FlagSet = tree match {
-      case tree: untpd.MemberDef =>
-        //if (tree.symbol.isCompleted) tree.symbol.flags
-        //else
-        untpd.modsDeco(tree).mods.flags
-      case _ => EmptyFlags
-    }
-    /** Gets typed annotation trees from this tree, or empty list if no annotations */
-    def getAnnotations(implicit ctx: Context): List[tpd.Tree] = tree match {
-      case tree: untpd.MemberDef =>
-        //if (tree.symbol.isCompleted)
-        //  tree.symbol.annotations.map(_.tree)
-        //else {
-        val untypedAnnotTrees = untpd.modsDeco(tree).mods.annotations
-        if (untypedAnnotTrees.nonEmpty)
-          System.err.println(s"Typing Annotations: ${untypedAnnotTrees.head}")
-        untypedAnnotTrees.mapconserve(ctx.typer.typedAnnotation)
-        //}
-      case _ => Nil
-    }
-  }
+  // DECORATORS
 
   implicit class SymbolDecorator(val sym: Symbol) extends AnyVal {
-    /** Gets annotations as a list of typed trees (for consistency with UntypedTreeDecorator) */
-    //def getAnnotations(implicit ctx: Context): List[tpd.Tree] = symbol.annotations.map(_.tree)
+    /** Gets annotations on a symbol without forcing the symbol's completion. */
+    def annotationsWithoutCompleting(implicit ctx: Context): List[Annotation] = sym.infoOrCompleter match {
+      case inf: Typer#Completer =>
+        // we've got a completer here, so look at the original untyped tree, and type the annotations directly
+        untpd.modsDeco(inf.original.asInstanceOf[untpd.MemberDef]).mods.annotations.map { annotTree =>
+          Annotation(ctx.typer.typedAnnotation(annotTree))
+        }
+      case _ =>  // no completer, so return already-typed annotations.
+        sym.annotations
+    }
   }
 
   implicit class TypeDecorator(val tp: Type) extends AnyVal {
-
-    /** Creates a new Type equivalent to tp */
-    /*
-    def duplicate(implicit ctx: Context): Type = tp match {
-      case tp: TypeRef =>
-        TypeRef.createWithoutCaching(tp.prefix, tp.name)
-      case tp: TermRef =>
-        TermRef.createWithoutCaching(tp.prefix, tp.name)
-      case _ => tp  // TODO: duplicate other types of types
-    }
-    */
   }
 
 
+  // CONSTANTS
+
   val MutabilityMemberName = typeName("__MUTABILITY__")
   val PrefixMutabilityName = typeName("__PREFIX_MUTABILITY__")
-  def ReadonlyType(implicit ctx: Context) = TypeAlias(defn.ReadonlyAnnotType, 1)
-  def PolyreadType(implicit ctx: Context) = TypeBounds(defn.MutableAnnotType, defn.ReadonlyAnnotType)
-  def MutableType(implicit ctx: Context) = TypeAlias(defn.MutableAnnotType, 1)
+  def ReadonlyType(implicit ctx: Context) = TypeAlias(defn.ReadonlyAnnotType, 1)  // info for a readonly mutability member
+  def MutableType(implicit ctx: Context) = TypeAlias(defn.MutableAnnotType, 1)    // info for a mutable mutability member
 
 
 
-  /**
+  /******************
+    * TYPE COMPARER *
+    ******************
     * A TypeComparer that also compares mutability.
-    *
     * @param initCtx the context the comparer operates within
     */
   class DotModTypeComparer(initCtx: Context) extends TypeComparer(initCtx) {
@@ -140,16 +107,30 @@ object DotMod {
       }
 
       val tp1defaulted = tp1 match {
-        // If tp1 refers to the mutability member of another type, but that member doesn't exist, then default to mutable.
+        // If tp1 refers to the mutability member of another type, but that member doesn't exist, find its default mutability.
         case tp1: TypeRef if (tp1.name eq MutabilityMemberName) && !tp1.denot.exists =>
-          defn.MutableAnnotType
+          tp1.prefix match {
+            case _: ThisType =>  // we've got a this-type with polymorphic mutability: don't reduce
+              if (tp2 eq defn.ReadonlyAnnotType)  // all this-type mutabilities are <: readonly
+                return true
+              tp1
+            case _ =>  // something else: default to mutable
+              defn.MutableAnnotType
+          }
         case _ =>
           tp1
       }
       val tp2defaulted = tp2 match {
         // If tp2 refers to the mutability member of another type, but that member doesn't exist, then default to mutable.
         case tp2: TypeRef if (tp2.name eq MutabilityMemberName) && !tp2.denot.exists =>
-          defn.MutableAnnotType
+          tp2.prefix match {
+            case _: ThisType =>  // we've got a this-type with polymorphic mutability: don't reduce
+              if (tp1 eq defn.MutableAnnotType)  // all this-type mutabilities are >: mutable
+                return true
+              tp2
+            case _ =>  // something else: default to mutable
+              defn.MutableAnnotType
+          }
         case _ =>
           tp2
       }
@@ -212,8 +193,8 @@ object DotMod {
       tp
   }
 
-  /** Returns a TypeRef to the mutability of the given type. */
-  def mutabilityOf(tp: Type)(implicit ctx: Context): TypeRef = {
+  /** Returns the mutability of the given type. */
+  def mutabilityOf(tp: Type)(implicit ctx: Context): Type = {
     val tpw = tp.widenIfUnstable  // get a stable type (to correctly reference members of the type)
     tpw match {
       case tpw: ThisType =>
@@ -223,19 +204,44 @@ object DotMod {
       case NoPrefix =>
         defn.MutableAnnotType
       case _ =>
-        TypeRef(tpw, MutabilityMemberName)
+        val mutDenot = tpw.member(MutabilityMemberName)
+        if (mutDenot.exists)
+          mutDenot.info match {
+            case TypeAlias(mut) =>  // tp has a specific mutability alias
+              mut
+            case _ =>
+              TypeRef(tpw, MutabilityMemberName)  // type bounds: not using type bounds right now, but just in case
+          }
+        else
+          defn.MutableAnnotType
     }
   }
 
   /** Finds the declared mutability of C.this for class C in the current context */
   def mutabilityOfThis(tpe: ThisType)(implicit ctx: Context): TypeRef = {
     def rec(sym: Symbol): TypeRef = {
-      assert(sym.effectiveOwner.exists, s"Owners of ${ctx.owner} do not contain expected ${tpe.cls}")
-      if (sym.effectiveOwner eq tpe.cls)
+      val currentOwner = sym.effectiveOwner
+
+      // If sym is non-weak, and its immediate non-weak owner is the class we're looking for,
+      // then sym may contain annotations describing the receiver type.
+      if (currentOwner eq tpe.cls)
         declaredReceiverType(sym, tpe)
+
+      // It is entirely possible that the current context owner is not inside the class
+      // symbol we're looking for. In such cases, we will just return mutable.
+      // See test neg/i1050a for an example where mutabilityOfThis is called inside a
+      // viewpoint adaptation, which results from a symbol completion that is triggered during a type comparison.
+      else if (!currentOwner.exists) {
+        // I'm still not convinced that this should be happening, or that returning mutable is the
+        // right thing to do. So I'm showing a message so I can see when it happens.
+        System.err.println(s"WEIRD WARNING: Mutability of ${tpe.cls.name}.this is being requested from outside of ${tpe.cls}. Assuming @mutable.")
+        defn.MutableAnnotType
+      }
+
       else
-        rec(sym.effectiveOwner)
+        rec(currentOwner)
     }
+
     if (ctx.owner.isPackageObject || ctx.owner.isEffectiveRoot || (ctx.owner.skipWeakOwner eq tpe.cls))
       defn.MutableAnnotType  // we're inside a static module or the class constructor
     else
@@ -249,7 +255,7 @@ object DotMod {
   def declaredReceiverType(sym: Symbol, thisTpe: ThisType)(implicit ctx: Context): TypeRef = {
     assert(sym.effectiveOwner eq thisTpe.cls, s"The owner of $sym is expected to be ${thisTpe.cls}")
     // Take the first annotation declared on the symbol
-    sym.annotations.foreach { annot =>
+    sym.annotationsWithoutCompleting.foreach { annot =>
       if (annot.symbol eq defn.ReadonlyAnnot)
         return defn.ReadonlyAnnotType
       else if (annot.symbol eq defn.PolyreadAnnot)
@@ -267,13 +273,15 @@ object DotMod {
 
     /** The info of the given denotation, as viewed from the given prefix. */
     override def denotationAsSeenFrom(pre: Type, denot: Denotation): Type = {
+      // TODO: check receiver mutability/adaptation info for ExprTypes?
+
       var target = denot.info
       if (!ctx.erasedTypes && denot.isTerm && !(denot.symbol is Module) && isViewpointAdaptable(target)) {   // do viewpoint adaption for terms only, and not during erasure phase
 
         // Find prefix mutability.
         val preMut = mutabilityOf(pre)
 
-        // Do a viewpoint adpatation only if the prefix is non-mutable.
+        // Do a viewpoint adaptation only if the prefix is non-mutable.
         if (preMut ne defn.MutableAnnotType) {
           // Find mutability underlying target
           val underMutDenot = target.member(MutabilityMemberName)
@@ -287,6 +295,8 @@ object DotMod {
               tp.derivedTypeBounds(preMut | tp.lo, preMut | tp.hi)
           }
           target = refineResultMember(target, MutabilityMemberName, targetMutBounds, otherMembersToDrop = List(PrefixMutabilityName))
+
+          // Assignability
           target = refineResultMember(target, PrefixMutabilityName, TypeAlias(preMut, 1))
         }
       }
@@ -297,10 +307,12 @@ object DotMod {
     override def copyIn(ctx: Context) = new DotModTypeOpHooks(ctx)
   }
 
-  class DotModTyper extends Typer {
-    /*
-    TODO: try examples (e.g., functional code, iterator example)
+
+  /**********
+    * TYPER *
+    **********
     */
+  class DotModTyper extends Typer {
 
     def customChecks(tree: tpd.Tree)(implicit ctx: Context): tpd.Tree = tree match {
       case tree: tpd.Assign =>
@@ -318,19 +330,22 @@ object DotMod {
         else if (tp.annot.symbol eq defn.MutableAnnot)
           refineResultMember(tp.underlying, MutabilityMemberName, MutableType)
         else if (tp.annot.symbol eq defn.MutabilityOfAnnot) {
-          val argTpe = typed(tp.annot.arguments.head).tpe
-          val argMut = TypeRef(argTpe.widenIfUnstable, MutabilityMemberName)
-          refineResultMember(tp.underlying, MutabilityMemberName, TypeAlias(argMut, 1))
+          val argMutability = mutabilityOf(typed(tp.annot.arguments.head).tpe)
+          refineResultMember(tp.underlying, MutabilityMemberName, TypeAlias(argMutability, 1))
         } else
           tp
-      case _ => tp
+      case _ =>
+        tp
     }
 
     override def adaptApplyResult(funRef: TermRef, res: tpd.Tree)(implicit ctx: Context): tpd.Tree = {
       val receiverMut = mutabilityOf(funRef.prefix)
       if (receiverMut eq defn.MutableAnnotType)  // if the receiver is mutable, then no checks are needed
         res
-      else {
+      else if (funRef.symbol eq NoSymbol) {
+        System.err.println(s"WEIRD WARNING: Method application doesn't have a method symbol. funRef type is: $funRef")
+        res
+      } else {
         funRef.symbol.effectiveOwner.thisType match {
 
           // If the owner is not a class, then we're calling a no-prefix method.
@@ -339,13 +354,16 @@ object DotMod {
 
           // The owner is a class, find the method's declared receiver mutability, and compare with the given receiver mutability
           case thisTpe: ThisType =>
-            val declaredMut = declaredReceiverType(funRef.symbol, thisTpe)
+            // Make sure to do a this-substitution on the returned receiver type.
+            // Before substitution, @polyread methods have a declared mutability like C.this.__MUTABILITY__,
+            // which would not otherwise compare equal to the receiver mutability.
+            val declaredMut = declaredReceiverType(funRef.symbol, thisTpe).substThis(thisTpe.cls, funRef.prefix)
             if (receiverMut <:< declaredMut)
               res
             else
               errorTree(res, d"Incompatible receiver mutability in call to method ${funRef.name}:\n" +
-                d"  Expected: $receiverMut\n" +
-                d"  Got: $declaredMut")
+                d"  Expected: $declaredMut\n" +
+                d"  Got: $receiverMut")
         }
       }
     }
@@ -354,18 +372,24 @@ object DotMod {
       // Find out what type the default typer thinks this tree has.
       val tree = super.adapt(tree0, pt, original)
 
-      // Turn RI annotations into type refinements.
-      val tpe1 = convertAnnotationToRefinement(tree.tpe)
+      // Add refinements to certain types.
+      val tpe1 = tree.tpe match {
 
-      // Return a tree with the new type.
-      val tree1 =
-        if (tree.tpe ne tpe1) {
-          if (!canHaveAnnotations(tree.tpe))
-            errorTree(tree, "Reference immutability annotations are not allowed here")
+        // if there's an annotation, convert it to a mutability
+        case tp: AnnotatedType =>
+          val tp1 = convertAnnotationToRefinement(tp)
+          if ((tp1 ne tp) && !canHaveAnnotations(tree.tpe))
+            errorType("Reference immutability annotations are not allowed here", tree.pos)
           else
-            tree.withType(tpe1)
-        } else
-          tree
+            tp1
+
+        // if we've got type bounds with upper bound Any, make the upper bound readonly
+        case tp: RealTypeBounds if tp.hi eq defn.AnyType =>
+          tp.derivedTypeBounds(tp.lo, refineResultMember(tp.hi, MutabilityMemberName, ReadonlyType))
+
+        case tp =>
+          tp
+      }
 
       /*
       // Check tpe1 against the prototype with our custom type comparer.
@@ -379,13 +403,17 @@ object DotMod {
       else
         tree1
       */
-      customChecks(tree1)
+      customChecks(tree.withType(tpe1))
     }
 
     override def newLikeThis: Typer = new DotModTyper
   }
 
-  /** This phase runs the regular Scala RefChecks with the DotMod type comparer to enforce necessary
+
+  /**************
+    * REFCHECKS *
+    **************
+    * This phase runs the regular Scala RefChecks with the DotMod type comparer to enforce necessary
     * subtyping relationships among symbols.
     */
   class DotModRefChecks extends RefChecks {

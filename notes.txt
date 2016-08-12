@@ -694,7 +694,7 @@ is exactly x.__MUTABILITY__ without any attempt to simplify.
 Failing tests:
 	assignability
 	receiver
-	assignable_mutability
+	assignable_mutability_of
 Changed defn.MutableAnnotType to MutableType in assignability check. The assignability test now passes.
 
 NOTE ON TYPE BOUNDS: It seems that, in general, type bounds are only comparable to other type bounds
@@ -702,3 +702,150 @@ NOTE ON TYPE BOUNDS: It seems that, in general, type bounds are only comparable 
 The reason seems to be that type bounds (and class infos) are type types, whereas most other types
 are term (value/reference) types.
 
+The failing case in the receiver test is the following:
+  class C {
+    @mutabilityOf(c) def mc() = ???
+  }
+  val c: C @readonly = ???
+  c.mc()  // ok
+I'm getting the following error:
+	./tests/dotmod/neg/receiver.scala:15: error: Incompatible receiver mutability in call to method mc:
+	  Expected: dotty.mutable
+	  Got: receiver.c.__MUTABILITY__
+I should be getting receiver.c.__MUTABILITY__ for the declared receiver mutability, not mutable. Why?
+This test is no longer up-to-date. The @mutabilityOf annotations are not currently supported for
+ receiver types in DOTmod. Instead, we are using @polyread.
+However, an error is still happening on the same line:
+./tests/dotmod/neg/receiver.scala:15: error: Incompatible receiver mutability in call to method mp:
+  Expected: C.this.__MUTABILITY__
+  Got: receiver.c.__MUTABILITY__
+It is possible that a this-substitution of some sort needs to happen here. Unlike appearances of
+"this" in the method signature (which are substituted on application), appearances of "this" on the
+method symbol itself are not automatically substituted.
+SUCCESS: Correct behaviour observed on the receiver test.
+
+Representation of this-polymorphism: The mutability of "this" is different depending on where
+it is being viewed from.
+
+This-Polymorphism:
+	Thinking about changing @polyread on methods back to @mutabiltyOf(this).
+	Reasoning:
+	A "this" is never just a "this". A ThisType is implicitly understood to contain a mutability member,
+	a member that is defined by annotations on an enclosing method. Where a method explicitly
+	declares @mutable, appropriate ThisTypes ought to return a mutability of mutable, and likewise
+	for @readonly. @mutabilityOf(this) is no exception--the mutability declared is this.__MUTABILITY__.
+	Uses of "this" inside such methods are therefore understood to have the type "this @mutabilityOf(this)",
+	 or "this.type{ __MUTABILITY__ += this.__MUTABILITY__ }". The selection of the __MUTABILITY__ member
+	 of "this" is "this.__MUTABILITY__", so the definition is circular. While the circularity may seem odd,
+	 what this definition captures is that the mutability of "this" is exactly itself.
+
+	 What the foregoing means for type comparison is that ... well, trying to work out the defaults
+	 inside the type comparer may be very difficult.
+	 What the type comparer really should know is that the bounds on this.__MUTABILITY__ are
+	 mutable .. readonly. Setting such bounds ensures that the type comparer knows that
+	 mutable <: this.__MUTABILITY__ <: readonly.
+	 So in such cases, the mutability of "this" is both bounded and aliased.
+	 (For arbitrary type aliasing, the default bounds are assumed to be Nothing .. Any,
+	 so bounds don't actually have to be set explicitly. But here, if we want to make sure
+	 everything works OK with mutable .. readonly bounds, we have to make sure that these bounds
+	 are either inserted literally, or otherwise that all parts of the system understand that
+	 these bounds are there.)
+
+	 One possibility for making sure all mutability defaults are computed correctly is to allow
+	 findMember itself to be extended.
+	 Another possibility is to literally retype This trees to be type refinements that define
+	 the desired mutabilities.
+
+Current test status:
+	All DotMod tests currently passing except for assignable_mutability_of.
+	The following method should generate an error, but doesn't:
+    @polyread def n(): Any @mutabilityOf(this) = {
+      x = x   // error: this has polymorphic mutability
+      x  // ok
+    }
+Also generating cyclic reference errors on standard Dotty tests.
+The cyclic reference error seems to be due to an attempt to access annotations on a symbol
+while finding a receiver mutability. Standard annotation access attempts to complete the
+symbol, which causes the cyclic reference. Instead of forcing symbol completion, I will
+check whether the symbol is complete, and if not, reach into the completer to find the annotation
+trees. (I had something like this before, but I disabled it because it didn't seem necessary, which
+was because I could access symbol ownership chains without causing an error. But it seems that
+ownership chains only need access to the symbol denotation, not the denotation info.)
+PARTIAL SUCCESS.
+
+One of the negative tests is triggering a DotMod assertion:
+	testing ./tests/neg/i1050a.scala
+	assertion failure for Tiark1.V(Tiark1.v) <:< ?{ brand: ? }, frozen = false
+
+	java.lang.AssertionError: assertion failed: Owners of val <local Tiark1$> do not contain expected class V
+
+It seems that one of my assumptions was incorrect. Namely, that the current context owner is never
+outside the class that we are trying to get the this-type for.
+Since this error is happening during viewpoint adaptation (triggered by a findMember),
+perhaps the symbol to start the search with is the member being found--but this would be incorrect.
+We still want to return the mutability of the this-type from the current point of view.
+Perhaps the best thing to do here is just return mutable if the current context is outside of the
+ThisType's class. I'm not entirely convinced this is the right thing to do, so I'm issuing a
+"WEIRD WARNING" so I can see if it's happening anywhere unexpected (if it only happens on inputs
+that have other errors, then it's probably OK to do this).
+
+Assertion error on tests/neg/zoo.scala.
+Happens during receiver-mutability checking at method application. A call to the method
+symbol's effectiveOwner yields NoDenotation.
+The method application in question here doesn't actually have a method symbol.
+(The neg/zoo test attempts to define and call methods structurally, which is not supported by Dotty at this time.)
+Issuing a "WEIRD WARNING" on this case also.
+
+MatchError during pos/Iter2.scala:
+The erasure phase finds the type: RefinedType(RefinedType(TypeRef(TermRef(NoPrefix,$1$),scala$Tuple3$$T2), __MUTABILITY__, TypeAlias(TypeRef(ThisType(TypeRef(NoPrefix,dotty)),mutable), 1)), __PREFIX_MUTABILITY__, TypeAlias(TypeRef(TermRef(NoPrefix,$1$),__MUTABILITY__), 1))
+which it tries to interpret as an array of mutable type. I.e.: []dotty.mutable
+It blows up because it doesn't expect more than one refinement. See:
+	TypeErasure.apply (RefinedType case).
+	TypeErasure.eraseArray (in particular, the first line: "val defn.ArrayOf(elemtp) = tp").
+	Definitions.ArrayOf.unapply (in particular, the line: "case at: RefinedType if (at isRef ArrayType.symbol) && at.argInfos.length == 1 => Some(at.argInfos.head)").
+Mutability refinements shouldn't be considered arrays.
+The quickest solution is to disable phases starting at erasure. Can't do codegen, but at least lets me get on with other things.
+The next easiest solution to this issue is to remove mutability refinements before the erasure phase (as with Rytz' work).
+
+Errors found on dotty compiler test:
+	./src/dotty/./tools/dotc/core/Symbols.scala:562: error: illegal cyclic reference: alias ErrorSymbol.this.underlying.ThisName of type ThisName refers back to the type itself
+	    type ThisName = underlying.ThisName
+	         ^
+	./src/dotty/./tools/dotc/transform/Pickler.scala:48: error: missing arguments for method addrOfTree in class TreeBuffer
+	follow this method with `_' if you want to treat it as a partially applied function
+	      pickler.addrOfTree = treePkl.buf.addrOfTree
+	                                       ^
+	./src/dotty/./tools/dotc/transform/Pickler.scala:49: error: missing arguments for method addrOfSym in class TreePickler
+	follow this method with `_' if you want to treat it as a partially applied function
+	      pickler.addrOfSym = treePkl.addrOfSym
+	                                  ^
+The first of these errors doesn't seem to interact with DotMod code at all. I'm going to ignore it for now.
+Probably best to ignore tests other than standard pos & neg for now.
+
+Another error:
+./tests/pos/t1123.scala:8: error: non-private method f refers to private object extraListener
+ in its type signature => AnyRef{__MUTABILITY__ =+ dotty.mutable; __PREFIX_MUTABILITY__ =+ Editor.this.extraListener.__MUTABILITY__}
+    def f = extraListener.h
+        ^
+Temporary fix: Set __PREFIX_MUTABILITY__ to be either mutable or readonly (no path-dependent stuff).
+Although it's probably not a complete solution.
+Update: after adding better mutability defaulting (below), t1123 now passes. It passes because the mutability of path
+Editor.this.extraListener now resolves to the mutability of Editor.this, which resolves to dotty.mutable.
+However, t2435 (below) still fails.
+
+Another error:
+./tests/pos/t2435.scala:10: error: illegal cyclic reference: alias FConstant.this.tail.T of type T refers back to the type itself
+    type T = tail.T
+         ^
+Probably from the same basic problem as the previous error.
+Update: Probably not the same basic problem: still fails, but t1123 passes.
+
+Maybe I've got to:
+- add mutability members to all types where they're valid (during tree adaptation)
+- look up mutabilities with findMember during viewpoint adaptation (rather than make TypeRefs)
+
+What I actually did:
+- Add checks in the type comparer where the mutability member is not defined:
+  - if we're comparing a TypeRef with ThisType prefix, don't default to any other mutability.
+  - if tp2 is the readonly type, or tp1 is the mutable type, pass the subtype with no further checks.
+SUCCESS: All current DotMod tests pass.

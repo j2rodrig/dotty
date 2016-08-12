@@ -1,5 +1,4 @@
-import dotty.readonly
-import dotty.mutabilityOf
+import dotty._
 
 object mutability_of {
   class C
@@ -12,6 +11,7 @@ object mutability_of {
   class D {
     val c: C = ???
     def m(): C @mutabilityOf(this) = c  // ok
-    def n(): C @mutabilityOf(this) = d  // error
+    @polyread def n(): C @mutabilityOf(this) = c  // ok
+    @polyread def o(): C @mutabilityOf(this) = d  // error
   }
 }
