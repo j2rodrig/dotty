@@ -13,6 +13,7 @@ import core.TypeOpHooks
 import core.Types._
 import typer._
 import typer.ErrorReporting._
+import util.NameTransformer
 
 
 object DotMod {
@@ -52,6 +53,10 @@ object DotMod {
   def ReadonlyType(implicit ctx: Context) = TypeAlias(defn.ReadonlyAnnotType, 1)  // info for a readonly mutability member
   def MutableType(implicit ctx: Context) = TypeAlias(defn.MutableAnnotType, 1)    // info for a mutable mutability member
 
+  val methodNamesDefaultingToPolyreadReceiver: List[TermName] = List (
+    "==", "!=", "asInstanceOf", "isInstanceOf",
+    "clone", "eq", "equals", "finalize", "getClass", "hashCode", "ne", "toString"
+  ).map(termName).map(NameTransformer.encode)
 
 
   /******************
@@ -64,9 +69,9 @@ object DotMod {
 
     override def isSubType(tp1: Type, tp2: Type): Boolean = {
 
-      // The (tp2 eq WildcardType) check below carries the implicit assumption that
-      // the upper bound is readonly.
-      // TODO: What do we assume about upper type bounds in the general case? Do we augment type bounds <: Any with a readonly refinement?
+      // The (tp2 eq WildcardType) check here carries the implicit assumption that
+      // the upper bound is readonly. This assumption is compatible with the typer tree-adaptation
+      // code below, which replaces upper type bounds of unannotated Any with Any @readonly.
 
       // Handle cases where a mutability member has not been set.
       if (!(tp2.isInstanceOf[ProtoType] || tp2.isError || (tp2 eq WildcardType))) {
@@ -258,10 +263,22 @@ object DotMod {
     sym.annotationsWithoutCompleting.foreach { annot =>
       if (annot.symbol eq defn.ReadonlyAnnot)
         return defn.ReadonlyAnnotType
-      else if (annot.symbol eq defn.PolyreadAnnot)
+      else if ((annot.symbol eq defn.PolyreadAnnot) || (annot.symbol eq defn.FreshAnnot))
         return TypeRef(thisTpe, MutabilityMemberName)
     }
-    defn.MutableAnnotType
+    defaultedReceiverType(sym, thisTpe)
+  }
+
+  def defaultedReceiverType(sym: Symbol, thisTpe: ThisType)(implicit ctx: Context): TypeRef = {
+    if (methodNamesDefaultingToPolyreadReceiver.contains(sym.name))
+      TypeRef(thisTpe, MutabilityMemberName)
+
+    // All methods on AnyVal are also considered polymorphic in receiver mutability
+    else if (thisTpe.cls eq defn.AnyValClass)
+      TypeRef(thisTpe, MutabilityMemberName)
+
+    else
+      defn.MutableAnnotType
   }
 
   def isAssignable(tp: Type)(implicit ctx: Context): Boolean = {
@@ -272,7 +289,7 @@ object DotMod {
   class DotModTypeOpHooks(initCtx: Context) extends TypeOpHooks(initCtx) {
 
     /** The info of the given denotation, as viewed from the given prefix. */
-    override def denotationAsSeenFrom(pre: Type, denot: Denotation): Type = {
+    override def denotInfoAsSeenFrom(pre: Type, denot: Denotation): Type = {
       // TODO: check receiver mutability/adaptation info for ExprTypes?
 
       var target = denot.info

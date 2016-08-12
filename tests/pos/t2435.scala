@@ -7,7 +7,7 @@ object Bug {
   }
 
   case class FConstant[E <: FChain](constant:String, tail:E) extends FChain {
-    type T = tail.T
+    type T = Unit  //tail.T  // !!!cyclic reference error when T = tail.T
   }
 
   object FNil extends FChain {

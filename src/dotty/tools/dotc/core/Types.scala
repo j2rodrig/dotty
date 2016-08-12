@@ -1590,7 +1590,7 @@ object Types {
       if (checkedPeriod.runId == ctx.runId) lastSymbol
       else symbol
 
-    def info(implicit ctx: Context): Type = ctx.typeOpHooks.denotationAsSeenFrom(prefix, denot)
+    def info(implicit ctx: Context): Type = ctx.typeOpHooks.denotInfoAsSeenFrom(prefix, denot)
 
     def isType = isInstanceOf[TypeRef]
     def isTerm = isInstanceOf[TermRef]

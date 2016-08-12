@@ -62,6 +62,7 @@ class tests extends CompilerTest {
 
   // Tests that DotMod failed in the past. Collected here for easy retesting.
   @Test def dotmod_failed_tests() = {
+    pos_Map()
     pos_t2435()
     pos_t1123()
     pos_Iter2()
@@ -72,6 +73,7 @@ class tests extends CompilerTest {
     pos_autoTupling()
     neg_autoTupling
   }
+  @Test def pos_Map() = compileFile(posDir, "Map")
   @Test def pos_t2435() = compileFile(posDir, "t2435")
   @Test def pos_t1123() = compileFile(posDir, "t1123")
   @Test def pos_Iter2() = compileFile(posDir, "Iter2")

@@ -849,3 +849,15 @@ What I actually did:
   - if we're comparing a TypeRef with ThisType prefix, don't default to any other mutability.
   - if tp2 is the readonly type, or tp1 is the mutable type, pass the subtype with no further checks.
 SUCCESS: All current DotMod tests pass.
+
+Up next:
+- test mutability of type bounds (abstract type members)
+- ExprType annotations / viewpoint adaptation / receiver checking
+- RefChecks?
+
+Bugfix: Test pos/Map was failing because abstract type bounds now have an upper bound of readonly,
+but like "==" were getting a mutable receiver by default. The fix is to whitelist certain method names.
+Currently, all method names I find in Any and most in AnyRef are defaulted to polymorphic receiver mutabilities.
+All methods in class AnyVal are also defaulted this way. AnyVal is a strange case because it's not a
+reference type, but Scala allows it to be inherited.
+
