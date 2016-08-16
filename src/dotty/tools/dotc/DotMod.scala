@@ -13,12 +13,12 @@ import core.Symbols._
 import core.SymDenotations._
 import core.TypeOpHooks
 import core.Types._
-import transform.OverridingPairs
-import transform.TreeTransforms.TransformerInfo
+import transform._
+import transform.TreeTransforms._
 import typer._
 import typer.ErrorReporting._
-import util.NameTransformer
-import util.Positions.Position
+import util._
+import util.Positions._
 
 
 /*
@@ -329,38 +329,25 @@ object DotMod {
         return TypeRef(ctx.typer.typed(annot.arguments.head).tpe.widenIfUnstable, MutabilityMemberName)
     }
     // No annotations found on the symbol, so choose a default
-    //defaultedReceiverType(sym, thisTpe)
     defn.MutableAnnotType
   }
 
-  /*
-  def defaultedReceiverType(sym: Symbol, thisTpe: ThisType)(implicit ctx: Context): TypeRef = {
-    if (sym.isParameterless /*|| methodNamesDefaultingToPolyreadReceiver.contains(sym.name)*/)
-      TypeRef(thisTpe, MutabilityMemberName)
-
-    // All methods on AnyVal are also considered polymorphic in receiver mutability
-    //else if (thisTpe.cls eq defn.AnyValClass)
-    //  TypeRef(thisTpe, MutabilityMemberName)
-
-    else
-      defn.MutableAnnotType
-  }*/
-
   def ignoreReceiverMutabilityWhenCalled(sym: Symbol)(implicit ctx: Context): Boolean = {
     val ownerClassIfExists = sym.effectiveOwner
-    //methodNamesDefaultingToPolyreadReceiver.contains(sym.name) ||
-      (ownerClassIfExists eq defn.AnyClass) ||
-      (ownerClassIfExists eq defn.AnyValClass) ||
-      (ownerClassIfExists eq defn.ObjectClass)
+    (ownerClassIfExists eq defn.AnyClass) ||
+    (ownerClassIfExists eq defn.AnyValClass) ||
+    (ownerClassIfExists eq defn.ObjectClass)
   }
 
   /**
     * Replaces a recursive this-mutability with its equivalent in the current context.
     * For example, when calling a polyread method d from a non-polyread method e:
+    * {{{
     *   class C {
     *     @polyread def d: Any @mutabiliyOf(this) = ???   // here, @mutabilityOf(this) means { __MUTABILITY__ = C.this.__MUTABILITY__ }
     *     def e: Any = d   // here, @mutabilityOf(this) should mean { __MUTABILITY__ = mutable }
     *   }
+    * }}}
     */
   def substThisMutability(tp: Type)(implicit ctx: Context): Type = tp.finalResultType.member(MutabilityMemberName) match {
     case NoDenotation =>
@@ -424,50 +411,12 @@ object DotMod {
 
     /** The info of the given denotation, as viewed from the given prefix. */
     override def denotInfoAsSeenFrom(pre: Type, denot: Denotation): Type = {
-      var target = denot.info
-      if (!ctx.erasedTypes && denot.isTerm && !(denot.symbol is Module) && isViewpointAdaptable(target)) {   // do viewpoint adaption for terms only, and not during erasure phase
-
-        //checkReceiverMutability(pre, denot.symbol)
-
-        if (denot.symbol.name eq termName("asInstanceOf"))
-          false  // br
-
-        //System.err.println(d"Target ${denot.symbol.name} result is: $target, prefix is: $pre")
-        //System.err.println(d"Target mutability is: ${mutabilityOf(target)}, prefix mut is: ${mutabilityOf(pre)}")
-        target = viewpointAdapt(pre, target)
-        //System.err.println(d"Target ${denot.symbol.name} adapted to: $target")
-        /*
-        //def substThisIfNeeded(tp: Type): Type =
-        //  if ((pre ne NoPrefix)
-        val ownerClass = denot.symbol.effectiveOwner.asClass
-
-        // Find prefix mutability.
-        val preMut = mutabilityOf(pre)
-
-        // Do a viewpoint adaptation only if the prefix is non-mutable.
-        //if (preMut ne defn.MutableAnnotType) {
-          // Find mutability underlying target
-          val underDenot = target.member(MutabilityMemberName)
-          val underMut =
-            if (underDenot.exists) underDenot.info.asInstanceOf[TypeAlias].alias
-            else declaredReceiverType(denot.symbol, ownerClass.thisType.asInstanceOf[ThisType])
-
-          // Do viewpoint adaptation
-          val targetMut = preMut.substThis(ownerClass, pre) | underMut.substThis(ownerClass, pre)
-          /*underMutBounds match {
-            case tp: TypeAlias =>
-              tp.derivedTypeAlias((preMut | tp.alias).substThis(denot.symbol.effectiveOwner.asClass, pre))
-            //case tp: TypeBounds =>
-            //  tp.derivedTypeBounds(preMut | tp.lo, preMut | tp.hi)
-          }*/
-          target = refineResultMember(target, MutabilityMemberName, TypeAlias(targetMut, 1), otherMembersToDrop = List(PrefixMutabilityName))
-
-          // Assignability
-          target = refineResultMember(target, PrefixMutabilityName, TypeAlias(preMut, 1))
-          */
-        //}
-      }
-      target
+      val target = denot.info
+      // do viewpoint adaption for terms only, and not during erasure phase
+      if (!ctx.erasedTypes && denot.isTerm && !(denot.symbol is Module) && isViewpointAdaptable(target))
+        viewpointAdapt(pre, target)
+      else
+        target
     }
 
     /** A new object of the same type as this one, using the given context. */
@@ -497,21 +446,6 @@ object DotMod {
       } else
         tree
     }
-
-    /*
-    def viewpointAdaptTree(tree: tpd.Tree)(implicit ctx: Context): tpd.Tree = tree match {
-      case _: tpd.Ident | _: tpd.Select if !(tree.symbol is Module) =>
-        if (tree.asInstanceOf[tpd.NameTree].name eq termName("im"))
-          false
-        tree.tpe match {
-          case tpe: TermRef =>
-            val adapted = viewpointAdapt(tpe.prefix, tpe.underlying)
-            tree.withType(adapted)
-          case _ => tree
-        }
-      case _ => tree
-    }
-    */
 
     def preChecks(tree: tpd.Tree)(implicit ctx: Context): tpd.Tree = tree match {
       case tree: tpd.Ident if (tree.symbol ne NoSymbol) && !tree.symbol.isStatic =>
@@ -550,96 +484,11 @@ object DotMod {
         tp
     }
 
-    /*override def adaptApplyResult(funRef: TermRef, res0: tpd.Tree)(implicit ctx: Context): tpd.Tree = {
-
-      // get a version of the result where recursive this-type mutabilities are substituted out for non-recursive mutabilities where possible
-      val res = res0.withType(substThisMutability(res0.tpe))
-
-      System.err.println(d"In adaptApplyResult($funRef)")
-      val receiverMut = mutabilityOf(funRef.prefix)
-      if (receiverMut eq defn.MutableAnnotType)  // if the receiver is mutable, then no checks are needed
-        res
-      else if (funRef.symbol eq NoSymbol) {
-        System.err.println(s"WEIRD WARNING: Method application doesn't have a method symbol. funRef type is: $funRef")
-        res
-      } else {
-        funRef.symbol.effectiveOwner.thisType match {
-
-          // If the owner is not a class, then we're calling a no-prefix method.
-          case NoPrefix =>
-            res
-
-          // The owner is a class, find the method's declared receiver mutability, and compare with the given receiver mutability
-          case thisTpe: ThisType =>
-            //if (!ignoreReceiverMutabilityWhenCalled(funRef.symbol, thisTpe))
-            //  res
-            //else
-            {
-              // Make sure to do a this-substitution on the returned receiver type.
-              // Before substitution, @polyread methods have a declared mutability like C.this.__MUTABILITY__,
-              // which would not otherwise compare equal to the receiver mutability.
-              val declaredMut = declaredReceiverType(funRef.symbol, thisTpe)  //.substThis(thisTpe.cls, funRef.prefix)
-              if (receiverMut <:< declaredMut) {
-                //if (methodNamesDefaultingToPolyreadResult.contains(funRef.symbol.name) && !funRef.symbol.info.finalResultType.member(MutabilityMemberName).exists)
-                //  res.withType(refineResultMember(res.tpe, MutabilityMemberName, TypeAlias(mutabilityOf(funRef.prefix), 1)))
-                //else
-                res //.defaultedReceiverAdaptation(funRef.symbol, funRef.prefix)
-              }
-              else
-                errorTree(res, d"Incompatible receiver mutability in call to method ${funRef.name}:\n" +
-                  d"  Expected: $declaredMut\n" +
-                  d"  Got: $receiverMut")
-            }
-        }
-      }
-    }*/
-
-    /*  // an attempt to viewpoint-adapt match cases
-    override def typedBind(tree: untpd.Bind, pt: Type)(implicit ctx: Context): tpd.Tree = {
-      val tpdBind = super.typedBind(tree, pt)
-      tpdBind.withType(tpdBind.tpe.adaptWith(pt))
-    }*/
-
-    /*
-    // an attempt to set default mutabilities for parameterless-method results
-    override def typedDefDef(ddef: untpd.DefDef, sym: Symbol)(implicit ctx: Context) = {
-      val tpt1 =
-        if (sym.isParameterless)
-          ddef.tpt match {
-            case _: untpd.TypeTree =>
-              ddef.tpt
-            case _: untpd.Annotated =>
-              ddef.tpt
-            case tpt =>
-              //Annotated(Apply(Select(New(Ident(mutabilityOf)),<init>),List(This())),Ident(C))
-              //untpd.Annotated(untpd.Apply(untpd.Select(untpd.New(untpd.Ident(typeName("mutabilityOf"))), termName("<init>")), List(untpd.This(sym.effectiveOwner.name.asTypeName))), original)
-              var tpe = typedType(tpt).tpe
-              if (canHaveAnnotations(tpe) && !tpe.member(MutabilityMemberName).exists)
-                sym.effectiveOwner.thisType match {
-                  case thisTpe: ThisType =>
-                    tpe = refineResultMember(tpe, MutabilityMemberName, TypeAlias(declaredReceiverType(sym, thisTpe), 1))
-                  case _ =>
-                }
-              untpd.TypeTree(tpt).withType(tpe)
-          }
-        else
-          ddef.tpt
-      super.typedDefDef(untpd.cpy.DefDef(ddef)(tpt = tpt1), sym)
-    }*/
-
     override def adaptInterpolated(tree0: tpd.Tree, pt: Type, original: untpd.Tree)(implicit ctx: Context): tpd.Tree = {
 
       val tree01 = preChecks(tree0)
       if (tree01.tpe.isError)
         return tree01
-
-      /*val tpe01 = tree01.tpe match {
-        case tpe: TermRef if !tpe.symbol.isStatic && isViewpointAdaptable(tpe.underlying) =>
-          val vptu = viewpointAdapt(tpe.prefix, tpe.underlying)
-          TermRef(tpe, vptu)
-        case tp =>
-          tp
-      }*/
 
       // Find out what type the default typer thinks this tree has.
       val tree = super.adaptInterpolated(tree01, pt, original)
@@ -664,30 +513,6 @@ object DotMod {
         case tp =>
           tp
       }
-
-      /*// For parameterless defs: default result mutability is receiver mutability
-      tree match {
-        case tree: tpd.DefDef if tree.symbol.isParameterless && !tpe1.finalResultType.member(MutabilityMemberName).exists =>
-          tree.symbol.effectiveOwner.thisType match {
-            case thisType: ThisType =>
-              tpe1 = refineResultMember(tpe1, MutabilityMemberName, TypeAlias(declaredReceiverType(tree.symbol, thisType), 1))
-            case _ =>
-          }
-        case _ =>
-      }*/
-
-      /*
-      // Check tpe1 against the prototype with our custom type comparer.
-      val dontCheck = ctx.mode.is(Mode.Pattern) || !tpe1.exists || pt.isInstanceOf[ProtoType] || (pt eq WildcardType)
-      if (!dontCheck) {
-        if (new DotModTypeComparer(ctx).isSubType(tpe1, pt))
-          tree1
-        else
-          err.typeMismatch(tree1, pt)
-      }
-      else
-        tree1
-      */
 
       customChecks(tree.withType(tpe1))
     }
