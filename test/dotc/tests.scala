@@ -48,6 +48,7 @@ class tests extends CompilerTest {
   val replDir       = testsDir + "repl/"
   val dotmodPosDir  = testsDir + "dotmod/pos/"
   val dotmodNegDir  = testsDir + "dotmod/neg/"
+  val dotmodCollDir = testsDir + "dotmod/collections/"
 
   val sourceDir = "./src/"
   val dottyDir  = sourceDir + "dotty/"
@@ -62,6 +63,7 @@ class tests extends CompilerTest {
 
   // Tests that DotMod failed in the past. Collected here for easy retesting.
   @Test def dotmod_failed_tests() = {
+    tasty_dotty
     cyclic_reference_tests()
     dotc_transform_PostTyper()
     pos_Map()
@@ -81,23 +83,21 @@ class tests extends CompilerTest {
     pos_t2698()
     pos_t2435()
   }
-  @Test def dotc_core_Symbols() = compileFile(dotcDir + "core/", "Symbols")
-  @Test def dotc_transform_PostTyper() = compileFile(dotcDir + "transform/", "PostTyper")
+  @Test def dotc_core_Symbols() = compileFile(dotcDir + "core/", "Symbols", twice)
+  @Test def dotc_transform_PostTyper() = compileFile(dotcDir + "transform/", "PostTyper", twice)
   @Test def neg_traitParamsMixin() = compileFile(negDir, "traitParamsMixin")  // requires a phase later that erasure to generate needed errors
-  @Test def pos_t758() = compileFile(posDir, "t758")
-  @Test def pos_t2698() = compileFile(posDir, "t2698")
-  @Test def pos_t2435() = compileFile(posDir, "t2435")
-  @Test def pos_t1123() = compileFile(posDir, "t1123")
-  @Test def pos_Iter2() = compileFile(posDir, "Iter2")
-  @Test def pos_Map() = compileFile(posDir, "Map")
+  @Test def pos_t758() = compileFile(posDir, "t758", twice)
+  @Test def pos_t2698() = compileFile(posDir, "t2698", twice)
+  @Test def pos_t2435() = compileFile(posDir, "t2435", twice)
+  @Test def pos_t1123() = compileFile(posDir, "t1123", twice)
+  @Test def pos_Iter2() = compileFile(posDir, "Iter2", twice)
+  @Test def pos_Map() = compileFile(posDir, "Map", twice)
   @Test def neg_zoo() = compileFile(negDir, "zoo")
   @Test def neg_i1050a() = compileFile(negDir, "i1050a")
   @Test def pos_checkInstantiable() = compileFile(posDir, "checkInstantiable", twice)
   @Test def pos_autoTupling() = compileFile(posDir, "autoTuplingTest", twice)
   @Test def neg_cycles() = compileFile(negDir, "cycles")
 
-
-  @Test def dotmod_empty_object() = compileFile(dotmodPosDir, "empty_object", twice)
   @Test def dotmod_simple_readonly() = compileFile(dotmodNegDir, "simple_readonly")
   @Test def dotmod_simple_viewpoint() = compileFile(dotmodNegDir, "simple_viewpoint")
   @Test def dotmod_mutability_of() = compileFile(dotmodNegDir, "mutability_of")
@@ -108,10 +108,15 @@ class tests extends CompilerTest {
   @Test def dotmod_assignable_mutability_of() = compileFile(dotmodNegDir, "assignable_mutability_of")
   @Test def dotmod_as_instance_of() = compileFile(dotmodNegDir, "as_instance_of")
   @Test def dotmod_exprs() = compileFile(dotmodNegDir, "exprs")
+  @Test def dotmod_result_override() = compileFile(dotmodNegDir, "result_override")
+  @Test def dotmod_receiver_override() = compileFile(dotmodNegDir, "receiver_override")
+  @Test def all_dotmod_neg() = compileFiles(dotmodNegDir, verbose = true, compileSubDirs = false)
 
+  @Test def dotmod_empty_object() = compileFile(dotmodPosDir, "empty_object", twice)
+  @Test def dotmod_coll_Iter2() = compileFile(dotmodCollDir, "Iter2", twice)
+  @Test def dotmod_coll_Map() = compileFile(dotmodCollDir, "Map")  // no "twice" until Dotty bug fixed
   @Test def dotmod_iterator() = compileFile(dotmodPosDir, "iterator", twice)
 
-  @Test def all_dotmod_neg() = compileFiles(dotmodNegDir, verbose = true, compileSubDirs = false)
 
 
   @Test def pickle_pickleOK = compileDir(testsDir, "pickling", testPickling)

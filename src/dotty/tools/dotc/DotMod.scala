@@ -13,11 +13,17 @@ import core.Symbols._
 import core.SymDenotations._
 import core.TypeOpHooks
 import core.Types._
-import dotty.tools.dotc.util.Positions.Position
+import transform.OverridingPairs
+import transform.TreeTransforms.TransformerInfo
 import typer._
 import typer.ErrorReporting._
 import util.NameTransformer
+import util.Positions.Position
 
+
+/*
+ TODO: Purity. What purity implementation means practically is that closed-over variables will be readonly when seen from within a pure method.
+ */
 
 object DotMod {
 
@@ -63,48 +69,9 @@ object DotMod {
   }
 
   implicit class TypeDecorator(val tp: Type) extends AnyVal {
-    /*//dep
-    def adaptWith(pre: Type)(implicit ctx: Context): Type = {
-      // Find prefix mutability.
-      val preMut = mutabilityOf(pre)
-
-      // Do a viewpoint adaptation only if the prefix is non-mutable.
-      if (preMut ne defn.MutableAnnotType) {
-        // Find mutability underlying target
-        val underMutDenot = tp.member(MutabilityMemberName)
-        val underMutBounds = if (underMutDenot.exists) underMutDenot.info.bounds else MutableType
-
-        // Do viewpoint adaptation
-        val targetMutBounds = underMutBounds match {
-          case tp: TypeAlias =>
-            tp.derivedTypeAlias(preMut | tp.alias)
-          case tp: TypeBounds =>
-            tp.derivedTypeBounds(preMut | tp.lo, preMut | tp.hi)
-        }
-        var tp1 = refineResultMember(tp, MutabilityMemberName, targetMutBounds, otherMembersToDrop = List(PrefixMutabilityName))
-
-        // Assignability
-        tp1 = refineResultMember(tp, PrefixMutabilityName, TypeAlias(preMut, 1))
-        tp1
-      }
-      else
-        tp
-    }*/
   }
 
   implicit class TreeDecorator(val tree: tpd.Tree) extends AnyVal {
-    /** */
-    /*def defaultedReceiverAdaptation(methodSym: Symbol, prefix: Type): tpd.Tree = {
-      if (methodNamesDefaultingToPolyreadResult.contains(methodSym.name)) {
-        val resMut = mutabilityOf(methodSym.denot.info.finalResultType)
-        if (resMut.exists)
-          tree
-        else
-          tree.withType(tree.tpe)
-      }
-      else
-        tree
-    }*/
   }
 
 
@@ -291,7 +258,8 @@ object DotMod {
       case tpw: ThisType =>
         mutabilityOfThis(tpw)
       case tpw: SuperType =>
-        mutabilityOfThis(tpw.thistpe.asInstanceOf[ThisType])
+        // The mutability of super is the same as the mutability of this. See <DISCUSSION: SUPER_THIS_MUT> in the notes.
+        mutabilityOf(tpw.thistpe)
       case NoPrefix =>
         defn.MutableAnnotType
       case _ =>
@@ -395,7 +363,8 @@ object DotMod {
     case NoDenotation =>
       tp  // mutability member doesn't exist. No substitution necessary.
     case d =>
-      val m = d.info.asInstanceOf[TypeAlias].alias   // assume mutability info is an alias (not type bounds)
+      // Find the mutability of the denotation. (We take the upper bound here. See <DISCUSSION: MUT_BOUNDS> in notes.)
+      val m = d.info.bounds.hi
       // Replace a recursive this-mutability with its equivalent in the current context.
       // If we did not do this, then the mutability may not match the current this-mutability.
       m match {
@@ -415,7 +384,8 @@ object DotMod {
       case NoDenotation =>
         defn.MutableAnnotType
       case d =>
-        d.info.asInstanceOf[TypeAlias].alias   // assume mutability info is an alias (not type bounds)
+        // Find the mutability of the denotation. (We take the upper bound here. See <DISCUSSION: MUT_BOUNDS> in notes.)
+        d.info.bounds.hi
     }
     val finalMut = preMut | tpMut  // upper bound of prefix and target mutabilities
 
@@ -727,12 +697,45 @@ object DotMod {
     * REFCHECKS *
     **************
     * This phase runs the regular Scala RefChecks with the DotMod type comparer to enforce necessary
-    * subtyping relationships among symbols.
+    * subtyping relationships among symbols. This phase should either be run as its own phase
+    * so that the type comparer can be changed, or otherwise the root context should have the
+    * correct type comparer set.
     */
   class DotModRefChecks extends RefChecks {
+    override def phaseName: String = "dotmodrefchecks"
+    override val treeTransform = new MyTransform
+
     override def run(implicit ctx: Context): Unit = {
       super.run(ctx.fresh.setTypeComparerFn(new DotModTypeComparer(_)))
     }
-    override def phaseName: String = "dotmodrefchecks"
+
+    class MyTransform extends Transform {
+
+      /*
+        Really, the only thing we've got to check here is that overridden receiver mutabilities match overriding mutabilities.
+        Incompatible mutabilities of parameters and result types are caught automatically due to the custom type comparer.
+       */
+
+      def customOverrideCheck(overriding: Symbol, overridden: Symbol)(implicit ctx: Context): Unit = {
+        val riddenMut = declaredReceiverType(overridden, overridden.effectiveOwner.thisType)
+            .substThis(overridden.effectiveOwner.asClass, overriding.effectiveOwner.thisType)
+        val ridingMut = declaredReceiverType(overriding, overriding.effectiveOwner.thisType)
+        if (!(riddenMut <:< ridingMut))
+          ctx.error(d"Cannot override $overridden due to receiver mutability.\n" +
+            d"   Overridden mutability: $riddenMut\n" +
+            d"   Overriding mutability: $ridingMut", overriding.pos)
+      }
+
+      override def transformTemplate(tree: tpd.Template)(implicit ctx: Context, info: TransformerInfo) = {
+        val cls = ctx.owner
+        val opc = new OverridingPairs.Cursor(cls)
+        while (opc.hasNext) {
+          customOverrideCheck(opc.overriding, opc.overridden)
+          opc.next()
+        }
+        super.transformTemplate(tree)
+      }
+    }
+
   }
 }

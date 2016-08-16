@@ -1046,3 +1046,50 @@ The following fail:
 			at dotty.tools.dotc.DotMod$.viewpointAdapt(DotMod.scala:412)
 			at dotty.tools.dotc.DotMod$DotModTypeOpHooks.denotInfoAsSeenFrom(DotMod.scala:464)
 			...
+<DISCUSSION: MUT_BOUNDS>
+The last error is due to an attempt to compile the src/dotty/mutableOf file. It seems that none of the other
+tests actually catch files in the top-level src/dotty directory. The issue is the declaration
+	val ref: { type __MUTABILITY__ <: readonly }
+which is a type bounds rather than a type alias.
+What this really is is a way to express covariance in code. Since the internal representation of mutability
+is a covariant type alias (see the earlier discussions of the problems of using type bounds internally to represent
+mutability), it is probably correct to take the upper bound of the mutability member as the mutability.
+SUCCESS: test tasty_dotty passes.
+
+<DISCUSSION: SUPER_THIS_MUT>
+For the dotc_transform error, the error shows up when trying to compile the following line in PostTyper.scala:
+	superAcc.transformSelect(super.transform(tree), targs)
+The supertype's this-type is somehow a TermRef(NoPrefix,$this) rather than an actual ThisType.
+Is this a problem? Not necessarily... I can easily take the mutability of a TermRef as well as a ThisType.
+There is, however, a question in my head about whether it is appropriate to do this.
+Under what circumstances is a val $this created in lieu of a ThisType?
+In any case, super and this refer to the same object. Regardless of what the underlying "this"-type is,
+its mutability should be the same as the mutability of super.
+SUCCESS: test dotc_transform passes.
+
+DOTTY BUG discovered: Running some positive tests twice generates a stale symbol error during the erasure phase,
+in an attempt to find the outer-accessor parameter of the class MapCanBuildFrom.
+This error was not discovered earlier because the "twice" option is not enabled on batch tests (e.g., pos_all).
+Notably, the following tests are known to fail:
+	dotc/transform/PostTyper
+	pos/Map
+The output for pos/Map with "twice" is:
+	dotty.tools.dotc.core.Denotations$StaleSymbol: stale symbol; method scala$collection$generic$GenMapFactory$MapCanBuildFrom$$$outer#22048 in class MapCanBuildFrom, defined in Period(20..34, run = 2), is referred to in run Period(34..34, run = 3)
+		at dotty.tools.dotc.core.Denotations$SingleDenotation.staleSymbolError(Denotations.scala:830)
+		at dotty.tools.dotc.core.Denotations$SingleDenotation.bringForward(Denotations.scala:646)
+		at dotty.tools.dotc.core.Denotations$SingleDenotation.currentIfExists(Denotations.scala:675)
+		...
+This is possibly a Dotty bug.
+It has been replicated on the Dotty master branch.
+
+New feature: Receiver mutability checking. (During RefChecks phase.)
+Note: It looks like it may be possible to run the custom RefChecks phase as a miniphase instead of a standalone phase.
+
+Problem with ThisType comparisons: When running the receiver_override test, the following error is improperly triggered:
+	./tests/dotmod/neg/receiver_override.scala:16: error: Cannot override method n due to receiver mutability.
+	   Overridden mutability: C.this.__MUTABILITY__
+	   Overriding mutability: E.this.__MUTABILITY__
+	    @polyread override def n(): Unit = ???  // ok
+Probably, the type comparer does not make use of the fact that E is a subclass of C.
+SOLUTION: There needed to be a substitution of E.this for C.this.
+(See discussion of declared receiver types and substThis above.)
