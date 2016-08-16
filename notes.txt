@@ -861,3 +861,188 @@ Currently, all method names I find in Any and most in AnyRef are defaulted to po
 All methods in class AnyVal are also defaulted this way. AnyVal is a strange case because it's not a
 reference type, but Scala allows it to be inherited.
 
+
+DEFAULTING OF METHOD RESULTS:
+	The only method that seems like it should be viewpoint-adapted by default is asInstanceOf[T].
+	But even then, the result should be adapted only if the type T does not have a declared mutability.
+	If T does have a declared mutability, can asInstanceOf[T] be used to force a the result to have
+	a particular mutability?
+	Actually, asInstanceOf is an ExprType, so viewpoint adaptation should already occur where other
+	viewpoint adaptation is being done. However, the result of asInstanceOf is:
+		PolyType(List(T0), List(TypeBounds(TypeRef(ThisType(TypeRef(NoPrefix,scala)),Nothing), TypeRef(ThisType(TypeRef(NoPrefix,scala)),Any))), PolyParam(T0))
+	How do I adapt this kind of result?
+		What we've got here is a polymorphic expression, which is a PolyType with an ExprType result.
+	SUCCESS: asInstanceOf is now a safe method to call. Now, what about matching?
+
+TYPE ERASURE AND MUTABILITY:
+	What happens if I only remove __PREFIX_MUTABILITY__ members, and leave __MUTABILITY__members as they are?
+	Do I get runtime mutability information, or more problems?
+
+
+Problem: Defaulting parameterless methods to @polyread seems to be causing some errors,e.g.:
+	./tests/pos/t2435.scala:9: error: type mismatch:
+	 found   : String{__MUTABILITY__ =+ FConstant.this.__MUTABILITY__; __PREFIX_MUTABILITY__ =+ FConstant.this.__MUTABILITY__}(FConstant.this.constant)
+	 required: String
+	  case class FConstant[E <: FChain](constant:String, tail:E) extends FChain {
+Perhaps there's a parameterless method call buried in the desugaring of the case class?
+(There was a similar-looking error in pos/Map which I fixed by forcing a method receiver to be mutable.)
+New information:
+	When I disable the receiver defaulting for parameterless methods, I get a different error at about the same place:
+	java.lang.AssertionError: assertion failed: error at ./tests/pos/t2435.scala:10
+	type mismatch:
+	 found   : String{__MUTABILITY__ =+ FConstant.this.__MUTABILITY__; __PREFIX_MUTABILITY__ =+ FConstant.this.__MUTABILITY__}(FConstant.this.constant)
+	 required: Any
+	tree = Ident(constant)
+		at scala.Predef$.assert(Predef.scala:165)
+		at dotty.tools.dotc.transform.TreeChecker$Checker.adapt(TreeChecker.scala:430)
+		at dotty.tools.dotc.typer.ProtoTypes$FunProto.typedArg(ProtoTypes.scala:205)
+		...
+This looks like a bounds-checking error, where a non-mutable reference is not compatible with Any.
+I did a search for all uses of defn.AnyType in dotc outside of dotmod, and got 30 results.
+Possibly, I will need to make Any a readonly thing. Not sure what implications this has for asInstanceOf and matching,
+but Any doesn't have any non-mutable-receiver methods, so at least method calls on Any in existing code should be OK.
+
+New information:
+Changed Any to be readonly in the type comparer, and the t2435 error went away.
+ But now there is a remarkably similar error in Iter2:
+	java.lang.AssertionError: assertion failed: error at ./tests/pos/Iter2.scala:206
+	type mismatch:
+	 found   : Int{__MUTABILITY__ =+ ArrayIterator.this.__MUTABILITY__; __PREFIX_MUTABILITY__ =+ ArrayIterator.this.__MUTABILITY__}(ArrayIterator.this.len)
+	 required: Int
+	tree = Ident(len)
+		at scala.Predef$.assert(Predef.scala:165)
+		at dotty.tools.dotc.transform.TreeChecker$Checker.adapt(TreeChecker.scala:430)
+		...
+This time, the required type is Int. Again, it involves a case class. The specific method causing the error is synthetic:
+  override def hashCode(): Int = {
+    var acc: Int = -889275714
+    acc = scala.runtime.Statics$#mix(acc, scala.runtime.Statics$#anyHash(ArrayIterator.this.elems))
+    acc = scala.runtime.Statics$#mix(acc, ArrayIterator.this.len)
+    scala.runtime.Statics$#finalizeHash(acc, 2)
+  }
+The type mismatch is at the call to Statics$#mix(acc, ArrayIterator.this.len).
+hashCode is considered to have a polymorphic receiver mutability, but the parameters to mix are mutable.
+Perhaps the best solution here is to stop defaulting receiver mutabilities by name.
+I could default these mutabilities by class (e.g., only for methods of Any/AnyRef/AnyVal/Object),
+which would require overriding methods to be explicit about their receiver mutabilities.
+Perhaps a different, more practical, solution would be to simply not check the receiver mutabilities
+for these methods. Such a solution would allow mutating overrides of these methods, which means that
+overriders would have to be careful not to introduce mutations.
+
+Attempted to make @mutabilityOf(this) the default receiver and result mutability for parameterless methods.
+However, this seems to break a lot of stuff (particularly in collections code--see pos/Iter2 test).
+
+Perhaps in the interests of practicality, I should
+1. leave the default receiver mutability for all methods as @mutable.
+2. continue to viewpoint-adapt parameterless methods by default.
+	Such methods can only be called on mutable receivers, unless otherwise annotated.
+	Such methods can be safely overridden by vals (but not the reverse).
+    (Viewpoint adaptation of an explicitly receiver-polymorphic result-mutability has no effect
+    on the adapted result. The receiver this-type is substituted by the prefix type
+    when the method is applied; the subsequent union of prefix mutability with result mutability
+    produces no additional change in mutability.)
+4. introduce a @fresh annotation for method definitions that indicates that:
+	- The result of the method is not viewpoint-adapted.
+	- The receiver and all other closed-over variables are non-mutable.
+
+PROBLEM: When a method is called like an expression, a call to realApply is not generated. E.g.:
+
+	def em(): C = ???
+	def fm(): C = em()  // generates a call to realApply
+	def gm(): C = em    // does not generate a call to realApply
+
+Probably, the solution here is to check receiver mutabilities and adapt result mutabilities
+at the time the method is selected (rather than at the time the method is applied).
+The framing of this approach is: A method selection is valid only if receiver types are compatible.
+(Rather than: A method application is valid only if ...)
+This would ensure that receivers are checked and the correct result type is observed even if realApply is not called.
+
+Update: It seems that the receiver-mutability check needs to happen after a tree is typed, but before
+default tree adaptation logic occurs. The default adaptation logic may silently resolve parameterless-method
+selections to their results, making it impossible to reliably check their receivers.
+
+PROBLEM: Viewpoint adaptation is not correctly resolving the following:
+		val g:D = dm.asInstanceOf[D @readonly]
+	where dm is mutable. It does not produce an error here, but it should.
+Upon closer examination, what's happening is that the selection of "asInstanceOf" sees an
+underlying PolyType with an uninstantiated type parameter. Since the uninstantiated result
+does not report having a mutability member (uninstantiated PolyParams return their origins?),
+this points to a larger problem that could affect any viewpoint-adapted polymorphic method.
+Interpolation happens in Typer#apply.
+Perhaps the solution here is to extend adaptInterpolated rather than adapt, and do the
+viewpoint adaptation there.
+
+Update: The problem actually seems to be that the viewpoint adaptation code was refining
+the uninstantiated PolyParam result with __MUTABILITY__ = mutable. When the PolyParam was
+instantiated, the outermost mutable was still present, causing the type to be interpreted
+as mutable regardless of the underlying type. The current implementation now refines the
+mutability member only if the adapted mutability is different from the underlying.
+
+All dotmod tests (including some new ones) now pass again.
+
+Error: No errors being reported for tests/neg/i1050a.
+Problem with refchecks extension maybe?
+Fixed: As it turns out, the refchecks phase wasn't running. Now it is, and the test works correctly.
+
+All positive Dotty tests now pass except for these three, which all seem to share a specific
+kind of cyclic reference error:
+    pos_t758()
+    pos_t2698()
+    pos_t2435()
+Notably: the neg/i1240a test requires the erasure phase to be executing.
+The following Dotty tests are now passing:
+	pos_all  (with the exception of "illegal cyclic reference"-generating tests)
+	neg_all
+	new_all
+	repl_all
+	pickle_*
+	compileStdLib
+	compileMixed
+	compileIndexedSeq
+	dotc_ast
+	dotc_config
+	dotc_parsing
+	dotc_printing
+	dotc_reporting
+	dotc_typer
+	dotc_util
+	tools_io
+	java_all
+	tasty_new_all
+	tasty_runtime
+	tasty_runtime_vc
+	tasty_tools
+	tasty_backend_jvm  (pre-existing caveat noted in tests file: "issue with ./src/dotty/tools/backend/jvm/DottyBackendInterface.scala")
+	tasty_backend_sjs
+	tasty_dotc
+	tasty_dotc_ast
+	tasty_dotc_config
+	tasty_classfile
+	tasty_tasty
+	tasty_unpickleScala2
+	tasty_dotc_parsing  (pre-existing caveat noted in tests file: "issue with ./src/dotty/tools/dotc/parsing/Parsers.scala")
+	tasty_dotc_printing
+	tasty_dotc_repl
+	tasty_dotc_rewrite
+	tasty_dotc_transform  (pre-existing caveat noted in tests file: "issues with LazyVals.scala, PatternMatcher.scala")
+	tasty_typer  (pre-existing caveat noted in tests file: "issue with ./src/dotty/tools/dotc/typer/Namer.scala")
+	tasty_dotc_util
+	tasty_tools_io
+	tasty_tests
+The following fail:
+	dotc_core, with the error (same for dotc_core_nocheck, tasty_core):
+		./src/dotty/tools/dotc/core/Symbols.scala:562: error: illegal cyclic reference: alias ErrorSymbol.this.underlying.ThisName of type ThisName refers back to the type itself
+		    type ThisName = underlying.ThisName
+		         ^
+	dotc_transform, with the error (in transform/PostTyper.scala):
+		java.lang.ClassCastException: dotty.tools.dotc.core.Types$TermRefWithFixedSym cannot be cast to dotty.tools.dotc.core.Types$ThisType
+			at dotty.tools.dotc.DotMod$.mutabilityOf(DotMod.scala:294)
+			at dotty.tools.dotc.DotMod$.viewpointAdapt(DotMod.scala:413)
+			at dotty.tools.dotc.DotMod$DotModTypeOpHooks.denotInfoAsSeenFrom(DotMod.scala:464)
+			...
+	tasty_dotty, with the error:
+		java.lang.ClassCastException: dotty.tools.dotc.core.Types$RealTypeBounds cannot be cast to dotty.tools.dotc.core.Types$TypeAlias
+			at dotty.tools.dotc.DotMod$.substThisMutability(DotMod.scala:398)
+			at dotty.tools.dotc.DotMod$.viewpointAdapt(DotMod.scala:412)
+			at dotty.tools.dotc.DotMod$DotModTypeOpHooks.denotInfoAsSeenFrom(DotMod.scala:464)
+			...

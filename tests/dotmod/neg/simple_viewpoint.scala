@@ -4,7 +4,7 @@ object simple_viewpoint {
 
   class C {
     val x: Any = ???
-    def y: Any = ???
+    @readonly def y: Any = ???
   }
   val c: C @readonly = ???
   val c_x: Any = c.x  // error
@@ -16,7 +16,7 @@ object simple_viewpoint {
 
   class D {
     val x: C = ???
-    def y: C = ???
+    @readonly def y: C = ???
   }
   val d: D @readonly = ???
   val d_x_x: Any = d.x.x  // error
@@ -24,6 +24,6 @@ object simple_viewpoint {
   val d_y_x: Any = d.y.x  // error
   val d_y_y: Any = d.y.y  // error
 
-  val r: Any { type _M = mutable } { type _M = readonly } = ???
-  val s: Any { type _M = readonly } = r
+  val r: Any { type __MUTABILITY__ = mutable } { type __MUTABILITY__ <: readonly } = ???
+  val s: Any { type __MUTABILITY__ <: readonly } = r
 }

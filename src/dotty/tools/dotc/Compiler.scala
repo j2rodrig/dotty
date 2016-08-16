@@ -48,7 +48,8 @@ class Compiler {
       List(new Pickler),            // Generate TASTY info
       List(new FirstTransform,      // Some transformations to put trees into a canonical form
            new CheckReentrant),     // Internal use only: Check that compiled program has no data races involving global vars
-      List(new RefChecks,           // Various checks mostly related to abstract members and overriding
+      List(new DotMod.DotModRefChecks),
+      List(//new RefChecks,           // Various checks mostly related to abstract members and overriding
            new CheckStatic,         // Check restrictions that apply to @static members
            new ElimRepeated,        // Rewrite vararg parameters and arguments
            new NormalizeFlags,      // Rewrite some definition flags
@@ -71,8 +72,8 @@ class Compiler {
            new ElimByName,          // Expand by-name parameters and arguments
            new AugmentScala2Traits, // Expand traits defined in Scala 2.11 to simulate old-style rewritings
            new ResolveSuper,        // Implement super accessors and add forwarders to trait methods
-           new ArrayConstructors)  // Intercept creation of (non-generic) arrays and intrinsify.
-      /*List(new Erasure),            // Rewrite types to JVM model, erasing all type parameters, abstract types and refinements.
+           new ArrayConstructors),  // Intercept creation of (non-generic) arrays and intrinsify.
+      List(new Erasure),            // Rewrite types to JVM model, erasing all type parameters, abstract types and refinements.
       List(new ElimErasedValueType, // Expand erased value types to their underlying implmementation types
            new VCElideAllocations,  // Peep-hole optimization to eliminate unnecessary value class allocations
            new Mixin,               // Expand trait fields and trait initializers
@@ -96,7 +97,7 @@ class Compiler {
            new MoveStatics,         // Move static methods to companion classes
            new LabelDefs),          // Converts calls to labels to jumps
       List(new GenSJSIR),           // Generate .js code
-      List(new GenBCode)            // Generate JVM bytecode*/
+      List(new GenBCode)            // Generate JVM bytecode
     )
 
   var runId = 1

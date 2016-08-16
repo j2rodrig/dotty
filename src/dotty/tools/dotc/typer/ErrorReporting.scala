@@ -21,7 +21,7 @@ object ErrorReporting {
     tree withType errorType(msg, tree.pos)
 
   def errorType(msg: => String, pos: Position)(implicit ctx: Context): ErrorType = {
-    ctx.error(msg, pos)
+    ctx.error(msg, sourcePos(pos))
     ErrorType
   }
 

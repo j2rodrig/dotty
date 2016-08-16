@@ -62,21 +62,34 @@ class tests extends CompilerTest {
 
   // Tests that DotMod failed in the past. Collected here for easy retesting.
   @Test def dotmod_failed_tests() = {
+    cyclic_reference_tests()
+    dotc_transform_PostTyper()
     pos_Map()
-    pos_t2435()
     pos_t1123()
     pos_Iter2()
     neg_zoo()
     neg_i1050a()
+    neg_traitParamsMixin()
     pos_checkInstantiable()
     neg_cycles()
     pos_autoTupling()
     neg_autoTupling
   }
-  @Test def pos_Map() = compileFile(posDir, "Map")
+  @Test def cyclic_reference_tests() = {
+    dotc_core_Symbols()
+    pos_t758()
+    pos_t2698()
+    pos_t2435()
+  }
+  @Test def dotc_core_Symbols() = compileFile(dotcDir + "core/", "Symbols")
+  @Test def dotc_transform_PostTyper() = compileFile(dotcDir + "transform/", "PostTyper")
+  @Test def neg_traitParamsMixin() = compileFile(negDir, "traitParamsMixin")  // requires a phase later that erasure to generate needed errors
+  @Test def pos_t758() = compileFile(posDir, "t758")
+  @Test def pos_t2698() = compileFile(posDir, "t2698")
   @Test def pos_t2435() = compileFile(posDir, "t2435")
   @Test def pos_t1123() = compileFile(posDir, "t1123")
   @Test def pos_Iter2() = compileFile(posDir, "Iter2")
+  @Test def pos_Map() = compileFile(posDir, "Map")
   @Test def neg_zoo() = compileFile(negDir, "zoo")
   @Test def neg_i1050a() = compileFile(negDir, "i1050a")
   @Test def pos_checkInstantiable() = compileFile(posDir, "checkInstantiable", twice)
@@ -93,6 +106,8 @@ class tests extends CompilerTest {
   @Test def dotmod_receiver() = compileFile(dotmodNegDir, "receiver")
   @Test def dotmod_polymorphic_mut() = compileFile(dotmodNegDir, "polymorphic_mut")
   @Test def dotmod_assignable_mutability_of() = compileFile(dotmodNegDir, "assignable_mutability_of")
+  @Test def dotmod_as_instance_of() = compileFile(dotmodNegDir, "as_instance_of")
+  @Test def dotmod_exprs() = compileFile(dotmodNegDir, "exprs")
 
   @Test def dotmod_iterator() = compileFile(dotmodPosDir, "iterator", twice)
 
