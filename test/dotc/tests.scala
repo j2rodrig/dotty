@@ -110,6 +110,7 @@ class tests extends CompilerTest {
   @Test def dotmod_exprs() = compileFile(dotmodNegDir, "exprs")
   @Test def dotmod_result_override() = compileFile(dotmodNegDir, "result_override")
   @Test def dotmod_receiver_override() = compileFile(dotmodNegDir, "receiver_override")
+  @Test def dotmod_value_override() = compileFile(dotmodNegDir, "value_override")
   @Test def all_dotmod_neg() = compileFiles(dotmodNegDir, verbose = true, compileSubDirs = false)
 
   @Test def dotmod_empty_object() = compileFile(dotmodPosDir, "empty_object", twice)

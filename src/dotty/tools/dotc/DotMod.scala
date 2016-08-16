@@ -193,6 +193,9 @@ object DotMod {
     }
    */
 
+  def polymorphicMutability(cls: Symbol)(implicit ctx: Context) =
+    TypeRef(cls.thisType, MutabilityMemberName)
+
   def canHaveAnnotations(tp: Type)(implicit ctx: Context): Boolean = tp match {
     case tp: TypeRef if !tp.symbol.isValueClass => true  // don't do annotations on value classes
     case _: RefinedOrRecType => true
@@ -717,9 +720,15 @@ object DotMod {
        */
 
       def customOverrideCheck(overriding: Symbol, overridden: Symbol)(implicit ctx: Context): Unit = {
-        val riddenMut = declaredReceiverType(overridden, overridden.effectiveOwner.thisType)
+        var riddenMut = declaredReceiverType(overridden, overridden.effectiveOwner.thisType)
             .substThis(overridden.effectiveOwner.asClass, overriding.effectiveOwner.thisType)
-        val ridingMut = declaredReceiverType(overriding, overriding.effectiveOwner.thisType)
+        var ridingMut = declaredReceiverType(overriding, overriding.effectiveOwner.thisType)
+
+        // Where a field is overriding a method, readjust its receiver to @mutabilityOf(C.this) where C is the overriding symbol's class.
+        // (See <DISCUSSION: OVERRIDE_VAL_DEF> in notes.)
+        if ((overridden is Method) && !(overriding is Method))
+          ridingMut = polymorphicMutability(overriding.effectiveOwner)
+
         if (!(riddenMut <:< ridingMut))
           ctx.error(d"Cannot override $overridden due to receiver mutability.\n" +
             d"   Overridden mutability: $riddenMut\n" +

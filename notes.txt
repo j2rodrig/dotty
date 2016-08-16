@@ -1093,3 +1093,27 @@ Problem with ThisType comparisons: When running the receiver_override test, the 
 Probably, the type comparer does not make use of the fact that E is a subclass of C.
 SOLUTION: There needed to be a substitution of E.this for C.this.
 (See discussion of declared receiver types and substThis above.)
+
+Information:
+As it turns out, dotty does not let you override vals with defs.
+The following code in RefChecks prevents it:
+	if (other.isStable && !member.isStable) // (1.4)
+		overrideError("needs to be a stable, immutable value")
+The basic provision in this check is this:
+	Unstable things cannot override stable things.
+	(Purity may be similar: Impure things cannot override pure things.)
+I suppose this provision allows the compiler to know that a field read is always a
+field read, and not a method call.
+
+<DISCUSSION: OVERRIDE_VAL_DEF>
+On overriding: An adjustment needs to be done when checking receiver mutabilities during
+overriding of a method/expr with a field. Specifically, a field's receiver is polyread (or mutabilityOf(this)),
+which allows a value def to override a parameterless method def:
+    @polyread def u: Any @mutabilityOf(this)
+    ...
+    override val u: Any   // should be OK
+The result type comparison does not need adjustment because the result of val u is interpreted
+as @mutable, which is a subtype of @mutabilityOf(this). Furthermore, vals can override vals without
+problem (their receivers and result types evaluate to @mutable, which is technically incorrect,
+but the point is that they are found to be compatible).
+The opposite case, where a def overrides a val, is not supported here.
