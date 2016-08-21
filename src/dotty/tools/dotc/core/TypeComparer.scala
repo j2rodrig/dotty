@@ -6,7 +6,6 @@ import Types._, Contexts._, Symbols._, Flags._, Names._, NameOps._, Denotations.
 import Decorators._
 import StdNames.{nme, tpnme}
 import collection.mutable
-import printing.Disambiguation.disambiguated
 import util.{Stats, DotClass, SimpleMap}
 import config.Config
 import config.Printers._
@@ -165,7 +164,13 @@ class TypeComparer(initctx: Context) extends DotClass with ConstraintHandling {
                     // However the original judgment should be true.
                 case _ =>
               }
-              val sym1 = tp1.symbol
+              val sym1 =
+                if (tp1.symbol.is(ModuleClass) && tp2.symbol.is(ModuleVal))
+                  // For convenience we want X$ <:< X.type
+                  // This is safe because X$ self-type is X.type
+                  tp1.symbol.companionModule
+                else
+                  tp1.symbol
               if ((sym1 ne NoSymbol) && (sym1 eq tp2.symbol))
                 ctx.erasedTypes ||
                 sym1.isStaticOwner ||
@@ -520,14 +525,10 @@ class TypeComparer(initctx: Context) extends DotClass with ConstraintHandling {
       /** if `tp2 == p.type` and `p: q.type` then try `tp1 <:< q.type` as a last effort.*/
       def comparePaths = tp2 match {
         case tp2: TermRef =>
-          tp2.info match {
-            case tp2i: TermRef =>
-              isSubType(tp1, tp2i)
-            case ExprType(tp2i: TermRef) if (ctx.phase.id > ctx.gettersPhase.id) =>
-              // After getters, val x: T becomes def x: T
-              isSubType(tp1, tp2i)
-            case _ =>
-              false
+          tp2.info.widenExpr match {
+            case tp2i: SingletonType =>
+              isSubType(tp1, tp2i) // see z1720.scala for a case where this can arise even in typer.
+            case _ => false
           }
         case _ =>
           false
@@ -575,7 +576,7 @@ class TypeComparer(initctx: Context) extends DotClass with ConstraintHandling {
    */
   def compareHkApply2(tp1: Type, tp2: HKApply, tycon2: Type, args2: List[Type]): Boolean = {
     val tparams = tycon2.typeParams
-    assert(tparams.nonEmpty)
+    if (tparams.isEmpty) return false // can happen for ill-typed programs, e.g. neg/tcpoly_overloaded.scala
 
     /** True if `tp1` and `tp2` have compatible type constructors and their
      *  corresponding arguments are subtypes relative to their variance (see `isSubArgs`).
@@ -1463,7 +1464,7 @@ class TypeComparer(initctx: Context) extends DotClass with ConstraintHandling {
 
   /** Show subtype goal that led to an assertion failure */
   def showGoal(tp1: Type, tp2: Type)(implicit ctx: Context) = {
-    println(disambiguated(implicit ctx => s"assertion failure for ${tp1.show} <:< ${tp2.show}, frozen = $frozenConstraint"))
+    println(ex"assertion failure for $tp1 <:< $tp2, frozen = $frozenConstraint")
     def explainPoly(tp: Type) = tp match {
       case tp: PolyParam => ctx.echo(s"polyparam ${tp.show} found in ${tp.binder.show}")
       case tp: TypeRef if tp.symbol.exists => ctx.echo(s"typeref ${tp.show} found in ${tp.symbol.owner.show}")

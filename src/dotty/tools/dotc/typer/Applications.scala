@@ -543,17 +543,29 @@ trait Applications extends Compatibility { self: Typer with Dynamic =>
 
   def typedApply(tree: untpd.Apply, pt: Type)(implicit ctx: Context): Tree = {
 
-    def realApply(implicit ctx: Context): Tree = track("realApply") {
-      var proto = new FunProto(tree.args, IgnoredProto(pt), this)(argCtx(tree))
-      val fun1 = typedExpr(tree.fun, proto)
+    /** Try same application with an implicit inserted around the qualifier of the function
+     *  part. Return an optional value to indicate success.
+     */
+    def tryWithImplicitOnQualifier(fun1: Tree, proto: FunProto)(implicit ctx: Context): Option[Tree] =
+      tryInsertImplicitOnQualifier(fun1, proto) flatMap { fun2 =>
+        tryEither { implicit ctx =>
+          Some(typedApply(
+            cpy.Apply(tree)(untpd.TypedSplice(fun2), proto.typedArgs map untpd.TypedSplice),
+            pt)): Option[Tree]
+        } { (_, _) => None }
+     }
 
-      // Warning: The following line is dirty and fragile. We record that auto-tupling was demanded as
+    def realApply(implicit ctx: Context): Tree = track("realApply") {
+      val originalProto = new FunProto(tree.args, IgnoredProto(pt), this)(argCtx(tree))
+      val fun1 = typedExpr(tree.fun, originalProto)
+
+      // Warning: The following lines are dirty and fragile. We record that auto-tupling was demanded as
       // a side effect in adapt. If it was, we assume the tupled proto-type in the rest of the application.
       // This crucially relies on he fact that `proto` is used only in a single call of `adapt`,
       // otherwise we would get possible cross-talk between different `adapt` calls using the same
       // prototype. A cleaner alternative would be to return a modified prototype from `adapt` together with
       // a modified tree but this would be more convoluted and less efficient.
-      if (proto.isTupled) proto = proto.tupled
+      val proto = if (originalProto.isTupled) originalProto.tupled else originalProto
 
       // If some of the application's arguments are function literals without explicitly declared
       // parameter types, relate the normalized result type of the application with the
@@ -582,13 +594,11 @@ trait Applications extends Compatibility { self: Typer with Dynamic =>
               val result = adaptApplyResult(funRef, app.result)
               convertNewGenericArray(ConstFold(result))
             } { (failedVal, failedState) =>
-              val fun2 = tryInsertImplicitOnQualifier(fun1, proto)
-              if (fun1 eq fun2) {
-                failedState.commit()
-                failedVal
-              } else typedApply(
-                cpy.Apply(tree)(untpd.TypedSplice(fun2), proto.typedArgs map untpd.TypedSplice), pt)
-            }
+              def fail = { failedState.commit(); failedVal }
+              tryWithImplicitOnQualifier(fun1, originalProto).getOrElse(
+                if (proto eq originalProto) fail
+                else tryWithImplicitOnQualifier(fun1, proto).getOrElse(fail))
+             }
           case _ =>
             handleUnexpectedFunType(tree, fun1)
         }
@@ -779,9 +789,9 @@ trait Applications extends Compatibility { self: Typer with Dynamic =>
             maximizeType(unapplyArgType) match {
               case Some(tvar) =>
                 def msg =
-                  d"""There is no best instantiation of pattern type $unapplyArgType
-                     |that makes it a subtype of selector type $selType.
-                     |Non-variant type variable ${tvar.origin} cannot be uniquely instantiated.""".stripMargin
+                  ex"""There is no best instantiation of pattern type $unapplyArgType
+                      |that makes it a subtype of selector type $selType.
+                      |Non-variant type variable ${tvar.origin} cannot be uniquely instantiated."""
                 if (fromScala2x) {
                   // We can't issue an error here, because in Scala 2, ::[B] is invariant
                   // whereas List[+T] is covariant. According to the strict rule, a pattern
@@ -803,7 +813,7 @@ trait Applications extends Compatibility { self: Typer with Dynamic =>
             unapp.println("Neither sub nor super")
             unapp.println(TypeComparer.explained(implicit ctx => unapplyArgType <:< selType))
             errorType(
-              d"Pattern type $unapplyArgType is neither a subtype nor a supertype of selector type $selType",
+              ex"Pattern type $unapplyArgType is neither a subtype nor a supertype of selector type $selType",
               tree.pos)
           }
 
@@ -824,7 +834,7 @@ trait Applications extends Compatibility { self: Typer with Dynamic =>
           case _ => args
         }
         if (argTypes.length != bunchedArgs.length) {
-          ctx.error(d"wrong number of argument patterns for $qual; expected: ($argTypes%, %)", tree.pos)
+          ctx.error(em"wrong number of argument patterns for $qual; expected: ($argTypes%, %)", tree.pos)
           argTypes = argTypes.take(args.length) ++
             List.fill(argTypes.length - args.length)(WildcardType)
         }

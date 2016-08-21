@@ -205,6 +205,7 @@ object untpd extends Trees.Instance[Untyped] with UntypedTreeInfo {
   def rootDot(name: Name) = Select(Ident(nme.ROOTPKG), name)
   def scalaDot(name: Name) = Select(rootDot(nme.scala_), name)
   def scalaUnit = scalaDot(tpnme.Unit)
+  def scalaAny = scalaDot(tpnme.Any)
 
   def makeConstructor(tparams: List[TypeDef], vparamss: List[List[ValDef]], rhs: Tree = EmptyTree)(implicit ctx: Context): DefDef =
     DefDef(nme.CONSTRUCTOR, tparams, vparamss, TypeTree(), rhs)
@@ -280,6 +281,11 @@ object untpd extends Trees.Instance[Untyped] with UntypedTreeInfo {
     def ModuleDef(tree: Tree)(name: TermName, impl: Template) = tree match {
       case tree: ModuleDef if (name eq tree.name) && (impl eq tree.impl) => tree
       case _ => untpd.ModuleDef(name, impl).withPos(tree.pos)
+    }
+    def ParsedTry(tree: Tree)(expr: Tree, handler: Tree, finalizer: Tree) = tree match {
+      case tree: ParsedTry
+        if (expr eq tree.expr) && (handler eq tree.handler) && (finalizer eq tree.finalizer) => tree
+      case _ => untpd.ParsedTry(expr, handler, finalizer).withPos(tree.pos)
     }
     def PolyTypeDef(tree: Tree)(name: TypeName, tparams: List[TypeDef], rhs: Tree) = tree match {
       case tree: PolyTypeDef if (name eq tree.name) && (tparams eq tree.tparams) && (rhs eq tree.rhs) => tree
@@ -359,6 +365,8 @@ object untpd extends Trees.Instance[Untyped] with UntypedTreeInfo {
     override def transform(tree: Tree)(implicit ctx: Context): Tree = tree match {
       case ModuleDef(name, impl) =>
         cpy.ModuleDef(tree)(name, transformSub(impl))
+      case ParsedTry(expr, handler, finalizer) =>
+        cpy.ParsedTry(tree)(transform(expr), transform(handler), transform(finalizer))
       case SymbolLit(str) =>
         cpy.SymbolLit(tree)(str)
       case InterpolatedString(id, strings, elems) =>
@@ -404,6 +412,8 @@ object untpd extends Trees.Instance[Untyped] with UntypedTreeInfo {
     override def foldOver(x: X, tree: Tree)(implicit ctx: Context): X = tree match {
       case ModuleDef(name, impl) =>
         this(x, impl)
+      case ParsedTry(expr, handler, finalizer) =>
+        this(this(this(x, expr), handler), finalizer)
       case SymbolLit(str) =>
         x
       case InterpolatedString(id, strings, elems) =>
@@ -445,6 +455,11 @@ object untpd extends Trees.Instance[Untyped] with UntypedTreeInfo {
       case _ =>
         super.foldOver(x, tree)
     }
+  }
+
+  /** Fold `f` over all tree nodes, in depth-first, prefix order */
+  class UntypedDeepFolder[X](f: (X, Tree) => X) extends UntypedTreeAccumulator[X] {
+    def apply(x: X, tree: Tree)(implicit ctx: Context): X = foldOver(f(x, tree), tree)
   }
 
   override def rename(tree: NameTree, newName: Name)(implicit ctx: Context): tree.ThisTree[Untyped] = tree match {
