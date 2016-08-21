@@ -393,7 +393,7 @@ MUTABILITY EXTRACTION
 
 	Where is the definition of mutabilityOf getting typed?
 
-	Definition is loaded by: requiredClass("dotty.mutabilityOf").typeRef
+	Definition is loaded by: requiredClass("dotty.mutabilityOfRef").typeRef
 	Def. of requiredClass: base.staticRef(path.toTypeName).requiredSymbol(_.isClass).asClass
 	Def. of typeRef: TypeRef(owner.thisType, name.asTypeName, this)
 
@@ -1117,3 +1117,129 @@ as @mutable, which is a subtype of @mutabilityOf(this). Furthermore, vals can ov
 problem (their receivers and result types evaluate to @mutable, which is technically incorrect,
 but the point is that they are found to be compatible).
 The opposite case, where a def overrides a val, is not supported here.
+
+
+POLYMORPHISM, PART 2
+
+Consider the following generic collection-like class:
+
+  class C[T](elem: T) {
+    @mutabilityOf[T] def get: T = elem
+  }
+
+The @mutabilityOf[T] here means that the receiver (this) has the mutability T#__MUTABILITY__.
+(To avoid a name clash, the @mutabilityOf annotation above has been renamed @mutabilityOfRef.)
+
+PROBLEM: Stack overflow.
+	Overflow occurs when attempting to type the tree Ident(T) inside the @mutabilityOf annotation.
+Cause:
+	(in DotModTyper) adaptInterpolated is calling preChecks which is calling mutabilityOfThis
+	on C.this in preparation for calling checkedReceiver.
+	mutabilityOfThis is calling declaredReceiverType, which tries to type method annotations,
+	causing a circular reference chain.
+Diagnosis:
+	checkedReceiver really only cares about selections of method symbols.
+	So why are we finding prefix mutability for selections of non-methods (e.g., selection of named types,
+	which we are doing here)?
+SOLVED:
+	Before asking for the mutability of anything, check whether the tree symbol really should have its
+	receiver checked.
+
+PROBLEM:
+	The type argument T in @mutabilityOf[T] is not showing up in the arguments list.
+CANDIDATE SOLUTION:
+	Added a typedArguments method to the Annotation class that returns trees of type args.
+NEXT PROBLEM:
+	The argument T, when typed, triggers the following assertion in Typer#typedTypeTree:
+		assert(isFullyDefined(pt, ForceDegree.none))
+	According to the isFullyDefined documentation, false is returned if pt is a wildcard or uninstantiated type.
+	Is there a way to get the type of the type argument without trying to type it directly?
+SOLUTION:
+	The type of @mutabilityOf[T] actually resolves to a RefinedType after typing.
+	The refinedInfo of this type is a TypeAlias to the type we want.
+
+Possibly need to rewrite the mutabilityOf method.
+
+<DISCUSSION: POLYMORPHIC_2>
+PROBLEM:
+	Type comparer error:
+	N#__MUTABILITY__ | T#__MUTABILITY__ is resolving to just T#__MUTABILITY__.
+	Appears to involve defaulting these types to mutable in the type comparer.
+SOLUTION:
+	When finding mutability, don't use findMember right away.
+	Instead, do a widenDealias, then see if the result is a TypeRef to an abstract/uninstantiated type member.
+	If so, then make the mutability T#__MUTABILITY__ (where T is the uninstantiated type member).
+
+	Also needed to add a special case to the type comparer.
+	The case is similar to what had to be done for this-mutability.
+
+	Also needed to loosen the refinement condition in viewpoint adaptation from
+		if (finalMut ne tpMut)
+	to
+		if (finalMut ne defn.MutableAnnotType)
+	Although logically it makes sense that we only need to change the mutability if it is different from
+	what's already there, right now the type comparer doesn't always call mutabilityOf,
+	so it doesn't always know that a type T should be understood to have mutability T#__MUTABILITY__.
+FAILURE:
+	Loosening the refinement condition in viewpoint adaptation causes Dotty tests to fail, notably
+	dotc/core/Symbols, which reports 8 errors (of various types) instead of the previous 1.
+NEW SOLUTION:
+	Add a condition in the type comparer that any type T is assumed to have mutability T#__MUTABILITY__,
+	unless overridden by another mutability. What this means practically is:
+	In the type comparer, when tp2 is a mutability refinement with refinedInfo T#__MUTABILITY__, and tp1 is T,
+	then the mutability check passes.
+	Also, when tp1 is a mutability refinement with refinedInfo T#__MUTABILITY__, and tp2 is T,
+    then the mutability check passes.
+
+    Alternatively, if tp1 is a mutability refinement, compare its refinedInfo with mutabilityOf(tp2).
+    Previously, the mutability of tp2 was approximated by a simple findMember with default to @mutable.
+    Similarly, if tp2 is a mutability refinement, compare its refinedInfo with mutabilityOf(tp1).
+    However, the type comparer has a case for special-casing Any to readonly when checking the tp2 refinement.
+    Perhaps this special case should go into mutabilityOf instead?
+
+SUCCESS: DotMod neg tests all pass again.
+
+FAILURE in dotc/transform/PostTyper test:
+	./src/dotty/tools/dotc/transform/PostTyper.scala:123: error: Incompatible receiver mutability in call to method tpe:
+	  Expected: dotty.mutable
+	  Got: T#__MUTABILITY__
+	  private def fixSignature[T <: Tree](tree: T)(implicit ctx: Context): T = tree.tpe match {
+	                                                                                ^
+	./src/dotty/tools/dotc/transform/PostTyper.scala:125: error: Incompatible receiver mutability in call to method tpe:
+	  Expected: dotty.mutable
+	  Got: T#__MUTABILITY__
+	      typr.println(i"fixing $tree with type ${tree.tpe.widen.toString} with sig ${tpe.signature} to ${tpe.widen.signature}")
+	                                                   ^
+	./src/dotty/tools/dotc/transform/PostTyper.scala:126: error: Incompatible receiver mutability in call to method withType:
+	  Expected: dotty.mutable
+	  Got: T#__MUTABILITY__
+	      tree.withType(TermRef.withSig(tpe.prefix, tpe.name, tpe.widen.signature)).asInstanceOf[T]
+	           ^
+	./src/dotty/tools/dotc/transform/PostTyper.scala:126: error: value asInstanceOf does not take type parameters
+	      tree.withType(TermRef.withSig(tpe.prefix, tpe.name, tpe.widen.signature)).asInstanceOf[T]
+	                                                                                            ^
+Perhaps what I've got to do here is expand T#__MUTABILITY__ to its upper-bound mutability (which should be mutable here).
+We'll also see if that does anything to the fourth error above.
+FIXED.
+
+<DISCUSSION: ITER2_ASINSTANCEOF>
+New errors in pos/Iter2:
+	./tests/pos/Iter2.scala:143: error: type mismatch:
+	 found   : AnyRef{__MUTABILITY__ =+ SA#__MUTABILITY__; __PREFIX_MUTABILITY__ =+ SA#__MUTABILITY__}
+	 required: AnyRef
+	        elems(i) = it.next.asInstanceOf[AnyRef]
+	                                       ^
+	./tests/pos/Iter2.scala:210: error: type mismatch:
+	 found   : AnyRef{__MUTABILITY__ =+ dotty.readonly; __PREFIX_MUTABILITY__ =+ dotty.readonly}
+	 required: AnyRef
+	    private def widen(x: Any): AnyRef = x.asInstanceOf[AnyRef]
+	                                                      ^
+These errors have to do with the semantics of asInstanceOf.
+I cannot determine whether these should or should not be errors -- more work on collection mutabilities is needed.
+
+PARTIAL SUCCESS: Passes at least:
+	all_dotmod_neg
+	dotmod_failed_tests
+	neg_all
+Fails at least:
+	tests/pos/annot-bootstrap

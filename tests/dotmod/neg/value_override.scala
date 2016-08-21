@@ -2,11 +2,11 @@ import dotty._
 
 object value_override {
   class C {
-    def t: Any = ???
-    @polyread def u: Any @mutabilityOf(this) = ???
+    def t: AnyRef = ???
+    @polyread def u: AnyRef @mutabilityOfRef(this) = ???
   }
   class D extends C {
-    override val t: Any @readonly = ???  // error
-    override val u: Any = ???  // ok
+    override val t: AnyRef @readonly = ???  // error
+    override val u: AnyRef = ???  // ok
   }
 }

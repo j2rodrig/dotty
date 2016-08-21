@@ -3,7 +3,7 @@ import dotty._
 object polymorphic_mut {
 
   class C {
-    @polyread def ident(): C @mutabilityOf(this) = this
+    @polyread def ident(): C @mutabilityOfRef(this) = this
   }
   val cm: C = ???
   val cr: C @readonly = ???

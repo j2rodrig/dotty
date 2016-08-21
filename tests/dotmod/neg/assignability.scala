@@ -1,4 +1,4 @@
-import dotty.{mutable, readonly, mutabilityOf}
+import dotty.{mutable, readonly, mutabilityOfRef}
 
 object assignability {
   class C {

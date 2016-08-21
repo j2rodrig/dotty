@@ -1,4 +1,4 @@
-import dotty.{readonly, mutabilityOf}
+import dotty.{readonly, mutabilityOfRef}
 
 object iterator {
 

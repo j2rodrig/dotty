@@ -459,6 +459,8 @@ class Definitions {
   def FreshAnnot(implicit ctx: Context) = FreshAnnotType.symbol.asClass
   lazy val MutableAnnotType = ctx.requiredClassRef("dotty.mutable")
   def MutableAnnot(implicit ctx: Context) = MutableAnnotType.symbol.asClass
+  lazy val MutabilityOfRefAnnotType = ctx.requiredClassRef("dotty.mutabilityOfRef")
+  def MutabilityOfRefAnnot(implicit ctx: Context) = MutabilityOfRefAnnotType.symbol.asClass
   lazy val MutabilityOfAnnotType = ctx.requiredClassRef("dotty.mutabilityOf")
   def MutabilityOfAnnot(implicit ctx: Context) = MutabilityOfAnnotType.symbol.asClass
 

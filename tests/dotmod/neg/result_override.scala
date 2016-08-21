@@ -2,11 +2,11 @@ import dotty._
 
 object result_override {
   class C {
-    def m(): Any = ???
-    @polyread def n(): Any @mutabilityOf(this) = ???
+    def m(): AnyRef = ???
+    @polyread def n(): AnyRef @mutabilityOfRef(this) = ???
   }
   class D extends C {
-    override def m(): Any @readonly = ???  // error
-    @polyread override def n(): Any @mutabilityOf(this) = ???  // ok
+    override def m(): AnyRef @readonly = ???  // error
+    @polyread override def n(): AnyRef @mutabilityOfRef(this) = ???  // ok
   }
 }

@@ -6,30 +6,30 @@ object exprs {
 
     def e: C = ???
     def f: C = e
-    def g: C @mutabilityOf(this) = e
+    def g: C @mutabilityOfRef(this) = e
     @polyread def h: C = e  // error: incompatible receiver mutability
-    @polyread def i: C @mutabilityOf(this) = e  // error: incompatible receiver mutability
+    @polyread def i: C @mutabilityOfRef(this) = e  // error: incompatible receiver mutability
     def j: C = g
     def k: C = h
     def l: C = i
 
     val ev: C = ???
     val fv: C = ev
-    val gv: C @mutabilityOf(this) = ev
+    val gv: C @mutabilityOfRef(this) = ev
     @polyread val hv: C = ev
-    @polyread val iv: C @mutabilityOf(this) = ev
+    @polyread val iv: C @mutabilityOfRef(this) = ev
     val jv: C = gv
     val kv: C = hv
     val lv: C = iv
 
     def em(): C = ???
     def fm(): C = em
-    def gm(): C @mutabilityOf(this) = em
-    def gm2(): C @mutabilityOf(this) = em()
+    def gm(): C @mutabilityOfRef(this) = em
+    def gm2(): C @mutabilityOfRef(this) = em()
     @polyread def hm(): C = em()  // error: incompatible receiver mutability
     @polyread def hm2(): C = em   // error: incompatible receiver mutability
-    @polyread def im(): C @mutabilityOf(this) = em()  // error: incompatible receiver mutability
-    @polyread def im2(): C @mutabilityOf(this) = em   // error: incompatible receiver mutability
+    @polyread def im(): C @mutabilityOfRef(this) = em()  // error: incompatible receiver mutability
+    @polyread def im2(): C @mutabilityOfRef(this) = em   // error: incompatible receiver mutability
     def jm(): C = gm
     def km(): C = hm
     def lm(): C = im

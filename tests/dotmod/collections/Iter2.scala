@@ -7,7 +7,7 @@ import dotty._
 object Iter2 {
 
   trait Iterator[+A] extends IterableOnce[A] {
-    def hasNext: Boolean
+    @readonly def hasNext: Boolean
     def next: A
     def iterator = this
     def foreach(f: A => Unit): Unit = ???
@@ -69,7 +69,7 @@ object Iter2 {
   }
 
   sealed trait List[+A] extends Seq[A] with FromIterator[List] {
-    def isEmpty: Boolean
+    @readonly def isEmpty: Boolean
     def head: A
     def tail: List[A]
     def iterator = new ListIterator[A](this)
@@ -91,7 +91,7 @@ object Iter2 {
   }
 
   case class Cons[+A](x: A, xs: List[A]) extends List[A] {
-    def isEmpty = false
+    @readonly def isEmpty = false
     def head = x
     def tail = xs
   }
@@ -159,18 +159,21 @@ object Iter2 {
   */
   case class ListIterator[+A](xs: List[A]) extends Iterator[A] {
     private[this] var current: List[A] = xs
-    def hasNext = !current.isEmpty
+    @readonly def hasNext = !current.isEmpty
     def next = { val res = current.head; current = current.tail; res }
   }
 
   case class ArrayIterator[+A](elems: Array[AnyRef], len: Int) extends Iterator[A] {
     import ArrayIterator._
 
-    private def elem(i: Int) = elems(i).asInstanceOf[A]
+    @polyread private def elem(i: Int) = {
+      val m: AnyRef @mutable = elems(i)
+      elems(i).asInstanceOf[A]
+    }
 
     private var cur = 0
 
-    def hasNext = cur < len
+    @readonly def hasNext = cur < len
     def next = { val res = elem(cur); cur += 1; res }
 
     override def foreach(f: A => Unit): Unit =
