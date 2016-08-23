@@ -10,4 +10,7 @@ object simple_readonly {
   val h: C @readonly @mutable = c  // ok
   val i: C = h  // ok
   val j: C @readonly @mutable = d  // error
+
+  val r: AnyRef { type __MUTABILITY__ = mutable } { type __MUTABILITY__ <: readonly } = ???
+  val s: AnyRef { type __MUTABILITY__ <: readonly } = r
 }

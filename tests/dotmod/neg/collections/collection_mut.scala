@@ -20,18 +20,16 @@ object collection_mut {
   val cd: C[D] = ???
   val cdr: C[D @readonly] = ???
   val crd: C[D] @readonly = ???
-  val crdr: C[D @readonly] @readonly = ???
 
+  val d0: D = cd.e       // ok
   val d1: D = cd.get     // ok
   val d2: D = cd.get2()  // ok
 
-  val dr0: D = cdr.e   // err
-  val dr1: D = cdr.get  // err
-  val dr2: D = cdr.get2()  // err
+  val dr0: D = cdr.e       // error: type mismatch
+  val dr1: D = cdr.get     // error: type mismatch
+  val dr2: D = cdr.get2()  // error: type mismatch
 
-  /*
-  val rd0: D = crd.e
-  val rd1: D = crd.get  // err
-  val rd2: D = crd.get2()  // err
-  */
+  val rd0: D = crd.e       // error: type mismatch
+  val rd1: D = crd.get     // error: incompatible receiver
+  val rd2: D = crd.get2()  // error: incompatible receiver
 }

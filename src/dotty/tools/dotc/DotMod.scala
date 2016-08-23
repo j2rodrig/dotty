@@ -5,7 +5,7 @@ import ast.{tpd, untpd}
 import core._
 import core.Annotations._
 import core.Contexts._
-import core.Decorators.sourcePos
+import core.Decorators._
 import core.Denotations._
 import core.Flags._
 import core.Names._
@@ -68,6 +68,16 @@ object DotMod {
   }
 
   implicit class TypeDecorator(val tp: Type) extends AnyVal {
+
+    def withoutMutabilityMembers(implicit ctx: Context): Type =
+      dropRefinementsNamed(tp, List(MutabilityMemberName, PrefixMutabilityName))
+
+    /** Finds a version of tp that's either a covariant alias, or a type bounds (if already a real type bounds). */
+    def covAlias(implicit ctx: Context): TypeBounds = tp match {
+      case tp: TypeAlias => tp.withVariance(1)
+      case tp: TypeBounds => tp
+      case _ => TypeAlias(tp, 1)
+    }
   }
 
   implicit class TreeDecorator(val tree: tpd.Tree) extends AnyVal {
@@ -104,18 +114,33 @@ object DotMod {
 
     override def isSubType(tp1: Type, tp2: Type): Boolean = {
 
+      /*
+      val show = (tp2 match {
+        case RefinedType(_, MutabilityMemberName, _) => true
+        case TypeRef(_, _) => true
+        case _ => false
+      }) || (tp1 match {
+        case RefinedType(_, MutabilityMemberName, _) => true
+        case TypeRef(_, _) => true
+        case _ => false
+      })
+      if (show) System.err.println(em"comparing $tp1 to $tp2...")
+      */
+
       // Pass basic cases. We assume that Any is a readonly type.
-      if ((tp1 eq tp2) || (tp2 eq defn.AnyType) || (tp2 eq WildcardType))
+      if ((tp1 eq tp2) || (tp2 eq defn.AnyType) || (tp2 eq WildcardType) || (tp1 eq defn.NothingType))
         return true
 
       // Since we do custom logic for term types only, pass the prototypes, class infos, bounds, wilds, and errors to the default subtype logic.
       if ((tp2 eq NoType) || tp2.isInstanceOf[ProtoType] || tp2.isInstanceOf[TypeType] || tp2.isInstanceOf[WildcardType] || tp2.isError)
         return super.isSubType(tp1, tp2)
 
+
       // Special case logic any time tp1 (or its widening) refines the mutability member.
       // We need to check this here because otherwise the ordinary subtyping logic may
       // assume that tp2 does not contain this member, and discard it from tp1.
-      tp1.widen match {
+      // We use a widenDealias here -- see <DISCUSSION: WIDEN-DEALIAS> in notes.
+      tp1.widenDealias.stripAnnots match {
         case tp1w: RefinedType =>
           val denot1 = tp1w.member(MutabilityMemberName)
           if (denot1.exists) {
@@ -130,6 +155,7 @@ object DotMod {
           }
         case _ =>
       }
+
 
       // Special case logic any time tp2 refines the mutability member, but tp1 does not.
       // If tp1 does not have the mutability member, we default it to mutable.
@@ -207,6 +233,16 @@ object DotMod {
     }
    */
 
+  /** If tp has an immediate refinement of the mutability member, return its info. otherwise, NoType. */
+  def findRefinedMutabilityInfo(tp: Type)(implicit ctx: Context): Type = tp match {
+    case tp: RefinedType if tp.refinedName eq MutabilityMemberName =>
+      tp.refinedInfo
+    case tp: RefinedType =>
+      findRefinedMutabilityInfo(tp.parent)
+    case _ =>
+      NoType
+  }
+
   /**
     * If tpe is a refinement of a type parameter, returns the refinedInfo's alias type.
     * Note: We shouldn't be getting a type bounds here. (I'm assuming an instantiated type argument is always a TypeAlias because it should be fully defined.)
@@ -216,7 +252,7 @@ object DotMod {
     case RefinedType(_, _, TypeAlias(tp)) =>
       tp
     case RefinedType(_, _, TypeBounds(_, _)) =>
-      assert(false, d"Unexpected TypeBounds in refinedInfo of $tpe")
+      assert(false, em"Unexpected TypeBounds in refinedInfo of $tpe")
       NoType
     case _ =>
       NoType
@@ -238,8 +274,9 @@ object DotMod {
 
   def isViewpointAdaptable(tp: Type)(implicit ctx: Context): Boolean = canHaveAnnotations(tp) || (tp match {
     // We automatically adapt (possibly polymorphic) ExprTypes (but not MethodTypes).
-    case tp: ExprType => isViewpointAdaptable(tp.resultType)
-    case tp: PolyType => isViewpointAdaptable(tp.resultType)
+    // OR NOT - see <DISCUSSION: EXPR-ADAPTATION> in notes.
+    //case tp: ExprType => isViewpointAdaptable(tp.resultType)
+    //case tp: PolyType => isViewpointAdaptable(tp.resultType)
     case tp: AnnotatedType => isViewpointAdaptable(tp.underlying)
     case tp: TypeAlias => isViewpointAdaptable(tp.alias)
     case tp: TypeBounds => isViewpointAdaptable(tp.hi)
@@ -279,13 +316,16 @@ object DotMod {
   def dropRefinementsNamed(tp: Type, names: List[Name])(implicit ctx: Context): Type = tp match {
     case tp: RefinedType if names.contains(tp.refinedName) =>
       dropRefinementsNamed(tp.underlying, names)
+    case tp: RefinedType =>
+      tp.derivedRefinedType(dropRefinementsNamed(tp.underlying, names), tp.refinedName, tp.refinedInfo)
     case _ =>
       tp
   }
 
   /** Returns the mutability of the given type. */
   def mutabilityOf(tp: Type)(implicit ctx: Context): Type = {
-    tp.widenIfUnstable.stripAnnots match {
+    val tpstable = tp.widenIfUnstable.stripAnnots
+    tpstable match {
 
       // tp is C.this for some C - look for a declared receiver mutability
       case tp: ThisType =>
@@ -298,7 +338,8 @@ object DotMod {
       //   In such cases, we want tp's mutability to depend directly on that type member,
       //     not default to @mutable. See <DISCUSSION: POLYMORPHIC_2> in notes.
       case tpw =>
-        tpw.widenDealias.stripAnnots match {
+        val tpwd = tpw.widenDealias.stripAnnots
+        tpwd match {
 
           // tp widens to an abstract type member - return tp#__MUTABILITY__
           case tp: TypeRef if !tp.symbol.isClass =>
@@ -308,12 +349,6 @@ object DotMod {
           case tp: PolyParam =>
             TypeRef(tp, MutabilityMemberName)
 
-          // RefinedType - check if we've got a mutability right here, otherwise check parent
-          case tp: RefinedType if tp.refinedName eq MutabilityMemberName => // got a mutability right here
-            tp.refinedInfo.bounds.hi
-          case tp: RefinedType =>
-            mutabilityOf(tp.parent)
-
           // tp refers to a specific class for which we have an unusual default
           case tp: TypeRef if tp.symbol eq defn.AnyClass =>  // Any is assumed to be readonly
             defn.ReadonlyAnnotType
@@ -321,7 +356,7 @@ object DotMod {
           case tp1 =>  // got something else - look for mutability member - default to mutable
             val mutDenot = tp1.member(MutabilityMemberName)
             if (mutDenot.exists)
-              mutDenot.info.bounds.hi
+              mutDenot.info.bounds.hi  // (We take the upper bound here. See <DISCUSSION: MUT_BOUNDS> in notes.)
             else
               defn.MutableAnnotType
         }
@@ -385,7 +420,7 @@ object DotMod {
     // @polyread - same as @mutabilityOfRef(this)
     else if (annot.symbol eq defn.PolyreadAnnot) {
       if (!methodSym.effectiveOwner.isClass)
-        errorType(d"Only class/trait members may be annotated @polyread (owner ${methodSym.effectiveOwner} is not a class/trait)", symbol.pos)
+        errorType(em"Only class/trait members may be annotated @polyread (owner ${methodSym.effectiveOwner} is not a class/trait)", symbol.pos)
       else
         TypeRef(methodSym.effectiveOwner.thisType, MutabilityMemberName)
     }
@@ -431,8 +466,8 @@ object DotMod {
       m match {
         case TypeRef(thisTpe, MutabilityMemberName) if thisTpe.isInstanceOf[ThisType] =>
           // Also, we don't just replace the ThisType of the nearest enclosing class. We replace any ThisType.
-          val thisMut1 = mutabilityOf(thisTpe)
-          refineResultMember(tp, MutabilityMemberName, TypeAlias(thisMut1, 1), otherMembersToDrop = List(PrefixMutabilityName))
+          val thisMut = mutabilityOf(thisTpe)
+          refineResultMember(tp, MutabilityMemberName, TypeAlias(thisMut, 1), otherMembersToDrop = List(PrefixMutabilityName))
           // We don't bother keeping the __PREFIX_MUTABILITY__ (or assignability) member.
           // It only matters during assignment, and it should be put back if this method is followed by a viewpoint adaptation.
         case _ =>
@@ -443,7 +478,7 @@ object DotMod {
   def viewpointAdapt(prefix: Type, target: Type)(implicit ctx: Context): Type = {
     val preMut = mutabilityOf(prefix)
     val tpMut = mutabilityOf(target)
-    val finalMut = preMut | tpMut  // upper bound of prefix and target mutabilities
+    val finalMut = preMut | tpMut
 
     // refine the mutability if the final mutability is different than target mutability
     val tp1 = if (finalMut ne tpMut)
@@ -467,13 +502,19 @@ object DotMod {
 
     /** The info of the given denotation, as viewed from the given prefix. */
     override def denotInfoAsSeenFrom(pre: Type, denot: Denotation): Type = {
+
       val target = substThisMutability(denot.info)
 
-      // do viewpoint adaption for terms only, and not during erasure phase
-      if (!ctx.erasedTypes && denot.isTerm && !(denot.symbol is Module) && isViewpointAdaptable(target))
-        viewpointAdapt(pre, target)
-      else
-        target
+      val result =
+        // do viewpoint adaption for terms only, and not during erasure phase.
+        // Note: Changed to canHaveAnnotations from isViewpointAdaptable.
+        //   Current theory is that only non-methodic types should be adapted - see <DISCUSSION: EXPR-ADAPTATION> in notes.
+        if (!ctx.erasedTypes && denot.isTerm && !(denot.symbol is Module) && canHaveAnnotations(target)) {
+          viewpointAdapt(pre, target)
+        } else
+          target
+
+      result
     }
 
     /** A new object of the same type as this one, using the given context. */
@@ -494,9 +535,9 @@ object DotMod {
       // which would not otherwise compare equal to the receiver mutability.
       val declared2 = if (prefix ne NoPrefix) declaredMut.substThis(tree.symbol.effectiveOwner.asClass, prefix) else declaredMut
       if (!(preMut <:< declared2)) {
-        errorTree(tree, d"Incompatible receiver mutability in call to method ${tree.symbol.name}:\n" +
-          d"  Expected: $declaredMut\n" +
-          d"  Got: $preMut")
+        errorTree(tree, em"Incompatible receiver mutability in call to method ${tree.symbol.name}:\n" +
+          em"  Expected: $declaredMut\n" +
+          em"  Got: $preMut")
       } else
         tree
     }
@@ -511,7 +552,7 @@ object DotMod {
           case TermRef(prefix, underlying) =>
             checkedReceiver(prefix, tree)
           case _ =>
-            System.err.println(d"WEIRD WARNING: Selection of ${tree.symbol} does not have a TermRef type. Type is: ${tree.tpe}")
+            System.err.println(em"WEIRD WARNING: Selection of ${tree.symbol} does not have a TermRef type. Type is: ${tree.tpe}")
             tree
         }
       case _ => tree
@@ -521,13 +562,18 @@ object DotMod {
       * customChecks: Checks the following:
       *  - Assignability.
       */
-    def customChecks(tree: tpd.Tree)(implicit ctx: Context): tpd.Tree = tree match {
+    def customChecks(tree: tpd.Tree, pt: Type)(implicit ctx: Context): tpd.Tree = tree match {
+      case tree: tpd.ValDef =>
+        tree
+
       case tree: tpd.Assign =>
         if (isAssignable(tree.lhs.tpe))
           tree
         else
-          errorTree(tree, d"Cannot assign to unassignable type ${tree.lhs.tpe}")
-      case _ => tree
+          errorTree(tree, em"Cannot assign to unassignable type ${tree.lhs.tpe}")
+
+      case _ =>
+        tree
     }
 
     /**
@@ -578,7 +624,7 @@ object DotMod {
           tp
       }
 
-      customChecks(tree.withType(tpe1))
+      customChecks(tree.withType(tpe1), pt)
     }
 
     override def newLikeThis: Typer = new DotModTyper
@@ -619,9 +665,9 @@ object DotMod {
           ridingMut = polymorphicMutability(overriding.effectiveOwner)
 
         if (!(riddenMut <:< ridingMut))
-          ctx.error(d"Cannot override $overridden due to receiver mutability.\n" +
-            d"   Overridden mutability: $riddenMut\n" +
-            d"   Overriding mutability: $ridingMut", overriding.pos)
+          ctx.error(em"Cannot override $overridden due to receiver mutability.\n" +
+            em"   Overridden mutability: $riddenMut\n" +
+            em"   Overriding mutability: $ridingMut", overriding.pos)
       }
 
       override def transformTemplate(tree: tpd.Template)(implicit ctx: Context, info: TransformerInfo) = {

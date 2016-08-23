@@ -1,10 +1,10 @@
-import dotty.{readonly, mutable}
+import dotty._
 
 object simple_viewpoint {
 
   class C {
     val x: AnyRef = ???
-    @readonly def y: AnyRef = ???
+    @polyread def y = x
   }
   val c: C @readonly = ???
   val c_x: AnyRef = c.x  // error
@@ -16,7 +16,7 @@ object simple_viewpoint {
 
   class D {
     val x: C = ???
-    @readonly def y: C = ???
+    @polyread def y = x
   }
   val d: D @readonly = ???
   val d_x_x: AnyRef = d.x.x  // error
@@ -24,6 +24,4 @@ object simple_viewpoint {
   val d_y_x: AnyRef = d.y.x  // error
   val d_y_y: AnyRef = d.y.y  // error
 
-  val r: AnyRef { type __MUTABILITY__ = mutable } { type __MUTABILITY__ <: readonly } = ???
-  val s: AnyRef { type __MUTABILITY__ <: readonly } = r
 }

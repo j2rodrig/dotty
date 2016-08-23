@@ -68,7 +68,7 @@ class tests extends CompilerTest {
     dotc_transform_PostTyper_single()
     pos_Map_single()
     pos_t1123()
-    //pos_Iter2()  // see <DISCUSSION: ITER2_ASINSTANCEOF> in notes.
+    pos_Iter2()  // see <DISCUSSION: ITER2_ASINSTANCEOF> in notes.
     neg_zoo()
     neg_i1050a()
     neg_traitParamsMixin()
@@ -91,7 +91,7 @@ class tests extends CompilerTest {
   @Test def pos_t2698() = compileFile(posDir, "t2698", twice)
   @Test def pos_t2435() = compileFile(posDir, "t2435", twice)
   @Test def pos_t1123() = compileFile(posDir, "t1123", twice)
-  @Test def pos_Iter2() = compileFile(posDir, "Iter2", twice)
+  @Test def pos_Iter2() = compileFile(posDir, "Iter2", twice)  // temporarily moved
   @Test def pos_Map_single() = compileFile(posDir, "Map")
   @Test def pos_Map() = compileFile(posDir, "Map", twice)
   @Test def neg_zoo() = compileFile(negDir, "zoo")
@@ -116,6 +116,8 @@ class tests extends CompilerTest {
   @Test def all_dotmod_neg() = compileFiles(dotmodNegDir, verbose = true, compileSubDirs = false)
 
   @Test def dotmod_collection_mut() = compileFile(dotmodNegDir + "collections/", "collection_mut")
+  @Test def dotmod_extractor() = compileFile(dotmodNegDir + "collections/", "extractor")
+  @Test def dotmod_temp() = compileFile(dotmodNegDir + "collections/", "temp")
 
   @Test def dotmod_empty_object() = compileFile(dotmodPosDir, "empty_object", twice)
   @Test def dotmod_coll_Iter2() = compileFile(dotmodCollDir, "Iter2", twice)

@@ -6,10 +6,10 @@ object as_instance_of {
   val dm:C = ???
   val dr:C @readonly = ???
   val e:D = dm.asInstanceOf[D]  // ok
-  val f:D = dr.asInstanceOf[D]  // error
+  val f:D = dr.asInstanceOf[D]  // see <DISCUSSION: ASINSTANCEOF> in notes.
   val g:D = dm.asInstanceOf[D @readonly]  // error
 
-  val i:D = dr.asInstanceOf[D @mutable]  // error
+  val i:D = dr.asInstanceOf[D @mutable]  // see <DISCUSSION: ASINSTANCEOF> in notes.
   val j:D @readonly = dr.asInstanceOf[D @mutable]  // ok
 
   dr match {
