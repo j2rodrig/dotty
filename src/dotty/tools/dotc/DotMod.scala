@@ -42,8 +42,11 @@ object DotMod {
     def annotationsWithoutCompleting(implicit ctx: Context): List[Annotation] = sym.infoOrCompleter match {
       case inf: Typer#Completer =>
         // we've got a completer here, so look at the original untyped tree, and type the annotations directly
+        // See Namer#addAnnotations to see how Dotty types annotations. (Also Typer#completeAnnotations.)
         untpd.modsDeco(inf.original.asInstanceOf[untpd.MemberDef]).mods.annotations.map { annotTree =>
-          Annotation(ctx.typer.typedAnnotation(annotTree))
+          // We look up the typer/context of the completer to do the annotation typing.
+          // See <DISCUSSION:ANNOTATION-TYPER-CONTEXT> in notes.
+          Annotation(inf.originalOuterCtx.typer.typedAnnotation(annotTree))
         }
       case _ =>  // no completer, so return already-typed annotations.
         sym.annotations
@@ -380,7 +383,7 @@ object DotMod {
       else if (!currentOwner.exists) {
         // I'm still not convinced that this should be happening, or that returning mutable is the
         // right thing to do. So I'm showing a message so I can see when it happens.
-        //System.err.println(s"WEIRD WARNING: Mutability of ${tpe.cls.name}.this is being requested from outside of ${tpe.cls}. Assuming @mutable.")
+        System.err.println(s"WEIRD WARNING: Mutability of ${cls.name}.this is being requested from outside of $cls. Assuming @mutable.")
         defn.MutableAnnotType
       }
 
@@ -422,20 +425,27 @@ object DotMod {
       if (!methodSym.effectiveOwner.isClass)
         errorType(em"Only class/trait members may be annotated @polyread (owner ${methodSym.effectiveOwner} is not a class/trait)", symbol.pos)
       else
-        TypeRef(methodSym.effectiveOwner.thisType, MutabilityMemberName)
+        TypeRefUnlessNoPrefix(methodSym.effectiveOwner.thisType, MutabilityMemberName)
     }
 
     // @mutabilityOfRef(r) - generates type r.__MUTABILITY__
     else if (annot.symbol eq defn.MutabilityOfRefAnnot)
-      TypeRef(ctx.typer.typed(annot.arguments.head).tpe.widenIfUnstable, MutabilityMemberName)
+      //TypeRefUnlessNoPrefix(ctx.typer.typed(annot.arguments.head).tpe.widenIfUnstable, MutabilityMemberName)
+      TypeRefUnlessNoPrefix(annot.arguments.head.tpe.widenIfUnstable, MutabilityMemberName)
 
     // @mutabilityOf[T] - generates type T#__MUTABILITY__
     else if (annot.symbol eq defn.MutabilityOfAnnot)
-      TypeRef(getLastTypeArgOf(annot.tree.tpe), MutabilityMemberName)
+      TypeRefUnlessNoPrefix(getLastTypeArgOf(annot.tree.tpe), MutabilityMemberName)
 
     else
       NoType
   }
+
+  def TypeRefUnlessNoPrefix(prefix: Type, name: TypeName)(implicit ctx: Context) =
+    if ((prefix eq NoPrefix) || (prefix eq NoType) || prefix.isError)
+      NoType
+    else
+      TypeRef(prefix, name)
 
   def ignoreReceiverMutabilityWhenCalled(sym: Symbol)(implicit ctx: Context): Boolean = {
     val ownerClassIfExists = sym.effectiveOwner
@@ -478,7 +488,7 @@ object DotMod {
   def viewpointAdapt(prefix: Type, target: Type)(implicit ctx: Context): Type = {
     val preMut = mutabilityOf(prefix)
     val tpMut = mutabilityOf(target)
-    val finalMut = preMut | tpMut
+    val finalMut = substThisMutability(preMut | tpMut)
 
     // refine the mutability if the final mutability is different than target mutability
     val tp1 = if (finalMut ne tpMut)
@@ -503,18 +513,24 @@ object DotMod {
     /** The info of the given denotation, as viewed from the given prefix. */
     override def denotInfoAsSeenFrom(pre: Type, denot: Denotation): Type = {
 
-      val target = substThisMutability(denot.info)
+      var target = denot.info //substThisMutability(denot.info)
 
-      val result =
-        // do viewpoint adaption for terms only, and not during erasure phase.
+      // Don't do custom logic in a types-erased phase
+      if (!ctx.erasedTypes) {
+
+        // Do viewpoint adaption for terms only.
         // Note: Changed to canHaveAnnotations from isViewpointAdaptable.
         //   Current theory is that only non-methodic types should be adapted - see <DISCUSSION: EXPR-ADAPTATION> in notes.
-        if (!ctx.erasedTypes && denot.isTerm && !(denot.symbol is Module) && canHaveAnnotations(target)) {
-          viewpointAdapt(pre, target)
-        } else
-          target
+        if (denot.isTerm && !(denot.symbol is Module) && canHaveAnnotations(target))
+          target = viewpointAdapt(pre, target)
 
-      result
+        // Do a substitution of this-type mutabilities.
+        if ((denot.symbol is Method) && canHaveAnnotations(target.finalResultType))
+          target = substThisMutability(target)
+
+      }
+
+      target
     }
 
     /** A new object of the same type as this one, using the given context. */

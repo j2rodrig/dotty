@@ -2,22 +2,18 @@ import dotty._
 
 object extractor {
 
-  class C[T](elem: T) {
+  class C {
+    var e: AnyRef = ???
+
     class Extractor {
-      val e: T = elem
-      @mutabilityOf[T] def get: T = elem
-      @mutabilityOf[T] def get2(): T = elem
+      @mutabilityOfRef(C.this) def get = e
+      def set(_1: AnyRef): Unit = e = _1
     }
+
   }
 
-  class D
-  val cd: C[D] = ???
-  val cdr: C[D @readonly] = ???
-  val crd: C[D] @readonly = ???
-  val crdr: C[D @readonly] @readonly = ???
+  val cr: C @readonly = ???
 
-  val xrd: D = (new crd.Extractor).e  // need to set type of (new crd.Extractor) to not be able to call mutate
-
-  val xrdr: D = (new crdr.Extractor).e  // error
-
+  val x: AnyRef = (new cr.Extractor).get
+  (new cr.Extractor).set(???)
 }

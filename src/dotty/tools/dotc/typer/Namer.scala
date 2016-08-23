@@ -496,6 +496,8 @@ class Namer { typer: Typer =>
   /** The completer of a symbol defined by a member def or import (except ClassSymbols) */
   class Completer(val original: Tree)(implicit ctx: Context) extends LazyType {
 
+    val originalOuterCtx: Context = ctx
+
     protected def localContext(owner: Symbol) = ctx.fresh.setOwner(owner).setTree(original)
 
     protected def typeSig(sym: Symbol): Type = original match {

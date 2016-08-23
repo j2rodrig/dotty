@@ -1550,3 +1550,77 @@ Known-passing tests:
 	dotmod_failed_tests (except for cyclic reference tests)
 	pos/Iter2 now passes due to no longer viewpoint-adapting asInstanceOf
 	neg_all
+
+<DISCUSSION:ANNOTATION-TYPER-CONTEXT>
+PROBLEM with annotation typing:
+Consider:
+  class C {
+    class Extractor {
+      @mutabilityOfRef(C.this) def get = ???
+    }
+  }
+  val cr: C @readonly = ???
+  val x: AnyRef = (new cr.Extractor).get
+When typing the last line, we look up the annotation on Extractor#get, which contains the argument C.this.
+Currently, the argument C.this is getting typed at the call to get, which means that dotty searches
+for class C starting at the context that is current at the call to get. What we really want is to
+type C.this at the original/creation context of method get.
+
+dotmod_extractor test now triggers the following exception:
+	dotty.tools.dotc.core.Denotations$NotDefinedHere: demanding denotation of class Extractor at phase patternMatcher(19) outside defined interval: defined periods are Period(21..24, run = 2)
+		at dotty.tools.dotc.core.Denotations$SingleDenotation.currentNoDefinedHere(Denotations.scala:753)
+		at dotty.tools.dotc.core.Denotations$SingleDenotation.current(Denotations.scala:746)
+		at dotty.tools.dotc.core.Types$NamedType.computeDenot(Types.scala:1426)
+		at dotty.tools.dotc.core.Types$NamedType.denotAt(Types.scala:1408)
+		at dotty.tools.dotc.core.Types$NamedType.denot(Types.scala:1396)
+		at dotty.tools.dotc.core.Types$Type.go$1(Types.scala:420)
+		at dotty.tools.dotc.core.Types$Type.findMember(Types.scala:568)
+		at dotty.tools.dotc.core.Types$Type.memberExcluding(Types.scala:405)
+		at dotty.tools.dotc.core.Types$Type$$anonfun$member$1.apply(Types.scala:389)
+		at dotty.tools.dotc.core.Types$Type$$anonfun$member$1.apply(Types.scala:389)
+		at dotty.tools.dotc.util.Stats$.track(Stats.scala:36)
+		at dotty.tools.dotc.core.Types$Type.member(Types.scala:388)
+		at dotty.tools.dotc.DotMod$.substThisMutability(DotMod.scala:466)
+		at dotty.tools.dotc.DotMod$DotModTypeOpHooks.denotInfoAsSeenFrom(DotMod.scala:514)
+		...
+Can this problem be fixed by moving substThisMutability elsewhere (e.g., inside viewpoint adaptation?)
+SOLUTION:
+	This problem is not really with substThisMutability at all.
+	The problem is that when we try to type the annotation, we were using the current context's typer,
+	not the typer/context that was in effect at the symbol where the annotation is used.
+	So I added a field originalOuterContext to the Completer class, which allows me to type the
+	annotations in the same context that defines the symbol.
+
+	But what happens if the annotation uses a type or term parameter of the method itself?
+	This does not seem to be a problem. Two examples of such dependence:
+	    class Extractor {
+          @mutabilityOf[T] def c[T](n: T) = ???
+          @mutabilityOfRef(n) def c[T](n: T) = ???
+        }
+	The first (using @mutabilityOf[T]) triggers a "T not found" error.
+	The error seems reasonable because the annotation is not really part of the method signature,
+	 so it isn't clear to me whether it even makes sense for T to mean c's type parameter here.
+	 (Would we be saying that an application of c would cause a substitution of T in
+	 the annotation? That would make sense if we used @mutabilityOf[T] as a type annotation,
+	 but as a symbol annotation it doesn't make sense.)
+	The second compiles without problems.
+TESTS:
+	all_dotmod_neg passes.
+	dotmod_failed_tests passes (again, except for cyclic-reference tests).
+	pos_all passes.
+	neg_all passes.
+		Also turned all WEIRD WARNINGs back on. The following warnings exist:
+
+		testing ./tests/pos/class-dependent-extension-method.scala
+		WEIRD WARNING: Mutability of C.this is being requested from outside of class C. Assuming @mutable.
+
+		testing ./tests/pos/valueclasses
+		WEIRD WARNING: Mutability of ValueClass.this is being requested from outside of class ValueClass. Assuming @mutable.
+
+		testing ./tests/neg/i1050a.scala
+		WEIRD WARNING: Mutability of V.this is being requested from outside of class V. Assuming @mutable.
+
+		testing ./tests/neg/i1050c.scala
+		WEIRD WARNING: Mutability of V.this is being requested from outside of class V. Assuming @mutable.
+
+		This is a notable drop in frequency of such warnings.
