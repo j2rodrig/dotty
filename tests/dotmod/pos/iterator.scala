@@ -8,7 +8,7 @@ object iterator {
 
   abstract class List[+E](val head: E, val tail: List[E]) {
 
-    def iter() = new Iterator[E] {
+    @readonly def iter() = new Iterator[E] {  // constrain recevier wrt. outer references?
       private var list: List[E] = List.this
       def next(): E = {
         val h: E = list.head

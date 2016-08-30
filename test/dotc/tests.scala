@@ -63,8 +63,9 @@ class tests extends CompilerTest {
 
   // Tests that DotMod failed in the past. Collected here for easy retesting.
   @Test def dotmod_failed_tests() = {
+    pos_rbtree()
     tasty_dotty
-    //cyclic_reference_tests()  // temporarily disabled until cyclic reference errors on type members are fixed
+    cyclic_reference_tests()
     dotc_transform_PostTyper_single()
     pos_Map_single()
     pos_t1123()
@@ -83,6 +84,8 @@ class tests extends CompilerTest {
     pos_t2698()
     pos_t2435()
   }
+  @Test def pos_weird() = compileFile(posDir, "class-dependent-extension-method", twice)
+  @Test def pos_rbtree() = compileFile(posDir, "rbtree", twice)
   @Test def dotc_core_Symbols() = compileFile(dotcDir + "core/", "Symbols", twice)
   @Test def dotc_transform_PostTyper_single() = compileFile(dotcDir + "transform/", "PostTyper")
   @Test def dotc_transform_PostTyper() = compileFile(dotcDir + "transform/", "PostTyper", twice)
@@ -91,7 +94,7 @@ class tests extends CompilerTest {
   @Test def pos_t2698() = compileFile(posDir, "t2698", twice)
   @Test def pos_t2435() = compileFile(posDir, "t2435", twice)
   @Test def pos_t1123() = compileFile(posDir, "t1123", twice)
-  @Test def pos_Iter2() = compileFile(posDir, "Iter2", twice)  // temporarily moved
+  @Test def pos_Iter2() = compileFile(posDir, "Iter2", twice)
   @Test def pos_Map_single() = compileFile(posDir, "Map")
   @Test def pos_Map() = compileFile(posDir, "Map", twice)
   @Test def neg_zoo() = compileFile(negDir, "zoo")
@@ -113,6 +116,7 @@ class tests extends CompilerTest {
   @Test def dotmod_result_override() = compileFile(dotmodNegDir, "result_override")
   @Test def dotmod_receiver_override() = compileFile(dotmodNegDir, "receiver_override")
   @Test def dotmod_value_override() = compileFile(dotmodNegDir, "value_override")
+  @Test def dotmod_class_immutability() = compileFile(dotmodNegDir, "class_immutability")
   @Test def all_dotmod_neg() = compileFiles(dotmodNegDir, verbose = true, compileSubDirs = false)
 
   @Test def dotmod_collection_mut() = compileFile(dotmodNegDir + "collections/", "collection_mut")

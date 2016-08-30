@@ -1623,4 +1623,106 @@ TESTS:
 		testing ./tests/neg/i1050c.scala
 		WEIRD WARNING: Mutability of V.this is being requested from outside of class V. Assuming @mutable.
 
-		This is a notable drop in frequency of such warnings.
+		This is a notable drop in the frequency of such warnings.
+
+	Fixed weird warnings: Instead of always starting the search for this-types from the current context owner,
+	 I now pass a starting symbol to mutabilityOfThis.
+
+	Cyclic reference tests now pass!
+
+PROBLEM: dotmod_simple_viewpoint is broken.
+FIXED: Prefix mutability during viewpoint adaptation now (again) starts from the current context owner,
+	rather than the referred-to symbol. Mutability of the underlying type still starts from the referred-to symbol.
+
+STUB warnings in the following tests:
+	testing ./tests/dotmod/neg/mutability_of.scala
+	STUB: Looking for outer-environment mutability at method o -- mutability_of.type(mutability_of) mutability was requested
+
+	testing ./tests/dotmod/neg/polymorphic_mut.scala
+	STUB: Looking for outer-environment mutability at package <root> -- polymorphic_mut.type(polymorphic_mut) mutability was requested
+
+	testing ./tests/dotmod/neg/result_override.scala
+	STUB: Looking for outer-environment mutability at class C -- result_override.C(C.this) mutability was requested
+	STUB: Looking for outer-environment mutability at class D -- result_override.D(D.this) mutability was requested
+
+	testing ./tests/dotmod/neg/value_override.scala
+	STUB: Looking for outer-environment mutability at class C -- value_override.C(C.this) mutability was requested
+	STUB: Looking for outer-environment mutability at class D -- value_override.D(D.this) mutability was requested
+
+	Possibly, the first two of these tests reflect a failure to find the correct enclosing class due to
+	use of effectiveOwner, which skips module/package classes. Perhaps we don't want to skip these classes?
+
+	The second pair of these tests probably represents a failure to search the correct ownership chain.
+
+New Information:
+	Changing "effectiveOwner" to "lexicallyEnclosingClass" in the first ThisType case of mutabilityOf
+	doesn't seem to change anything.
+New information, in the polymorphic_mut test:
+	1. There is an attempt to viewpoint-adapt the type TermRef(ThisType(TypeRef(ThisType(TypeRef(NoPrefix,<empty>)),polymorphic_mut$)),cr).
+	2. The request happens from the context owned by <root>.
+	3. The request appears to happen from a search for matching implicits.
+	   The original context owner before the implicit search is "val j".
+	   The implicit search seems to be happening in an attempt to resolve a type mismatch caused by the assignment "val j = cr.ident()".
+	4. Inside the implicit search, there is a call to namedPartsWith with context owner <root> on the type:
+		ViewProto(RefinedType(TypeRef(ThisType(TypeRef(ThisType(TypeRef(NoPrefix,<empty>)),polymorphic_mut$)),C), __MUTABILITY__, TypeAlias(TypeRef(TermRef(ThisType(TypeRef(ThisType(TypeRef(NoPrefix,<empty>)),polymorphic_mut$)),cr),__MUTABILITY__), 1)),TypeRef(ThisType(TypeRef(ThisType(TypeRef(NoPrefix,<empty>)),polymorphic_mut$)),C))
+	EXPECTED SOLUTION:
+		Just return @mutable if looking from the <root> context.
+New information, in the mutability_of test:
+	1. The stub warning occurs when trying to widen the type of "d" in the line ""@polyread def o(): C @mutabilityOfRef(this) = d".
+	2. The widen operation is called inside "adapt" on tree Ident(d). The type being widened is:
+		TermRef(ThisType(TypeRef(ThisType(TypeRef(NoPrefix,<empty>)),mutability_of$)),d)
+	The problem seems to be that the method o (which is the current context owner) is owned by class D,
+	 not class mutability_of$. This points to some key unresolved issue with resolving mutability of ThisTypes.
+Notes:
+	We've got to rewrite how this-mutability is resolved. (This is a separate issue from purity and generalized outer-environment access.)
+	Basically, the following needs to happen when determining the mutability @mutabilityOf(C.this):
+	- If C.this is not being used as a prefix type (it is a standalone "this"), complete these steps with the context owner as the symbol.
+	  Otherwise, complete these steps with the referred-to symbol.
+	- CORRECTION: The mutability of C.this should always be computed from the current context.
+	- Search for a pair of symbols that meets the following criteria:
+	  1. The first element of the pair is a method. (Or other non-weak owner.)
+	  2. The second element of the pair is a class.
+	  3. The class is a base class of C.
+	  4. The class is an owner of the method.
+	  5. There are no non-weak owners of the method that are also owned by the class.
+	- If the method has receiver-mutability annotations, return the mutability of the first annotation.
+	  Otherwise, return @mutable.
+	Edge cases:
+	- The mutability of C.this is being requested from a primary constructor.
+	  This should be OK, since primary constructors are methods named "<init>" (for classes) or "$init$" (for traits).
+	  Although constructor method definitions are synthetic (not literally named in the source program),
+	  they are methods nonetheless, and should be found by the above criteria.
+	- CORRECTION: it is possible for searches to start directly at the class C's symbol (example: when looking for
+		the mutability of PostTyperTransformer.this.parentNews, the context owner is PostTyperTransformer, not <init>.)
+	Failure conditions:
+	- Requesting the mutability of C.this inside C, but outside any method definitions.
+	  This should not happen because all code inside the definition of C is assumed to be inside C's
+	  primary constructor. In my current understanding, base-type declarations are already "outside"
+	  C, so not referring to C; arguments to base types are resolved during construction, so will
+	  have their types queried inside C's primary constructor. I'm putting in an assertion in case I'm wrong about this.
+	- Requesting the mutability of a standalone C.this from lexically outside the the definition of C.
+	  This should never happen. In source code, a "C.this" outside C causes an undefined-name error outside of C.
+	  It should be an assertion if this happens.
+
+
+<DISCUSSION: OUTER-PURITY>
+
+Introducing a new bit of information: __OUTER_MUTABILITY__,
+which defines the default mutability of all variables outside the nearest enclosing class definition.
+See dotmod/neg/collections/extractor test.
+
+
+<side topic>
+mutabilityOf and translation of ordinary annotations:
+1. receiver annotations should NOT call mutabilityOf, since mutabilityOf needs to query receiver annotations.
+2. viewpoint adaptation calls mutabilityOf.
+3. is there an issue with making sure annotation translations are consistent regardless of receiver vs. ordinary annotations?
+4. should ordinary annotation translation call mutabilityOf, or generate annotations some other way?
+Conclusion:
+We don't need to call mutabilityOf directly during annotation translation.
+We need to call something to parse the annotation itself, however.
+Is there common code between ordinary annotation parsing and receiver-annotation parsing?
+It looks the receiver-annotation code can be reused -- but special handling of @polyread is required.
+	In particular, we need to define what @polyread means in arbitrary positions (not just in receiver-annotation positions).
+	What I think needs to be done here is a search (in the current context) for the lexically enclosing class,
+	and base the meaning of @polyread on the receiver of that class.

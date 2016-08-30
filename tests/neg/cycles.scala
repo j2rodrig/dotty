@@ -25,7 +25,7 @@ class E {
   //lazy val x: F#T = ???
   class F {
     type T <: x.type // error: cyclic reference involving lazy value x
-    val z: x.type = ???
+    val z: x.type = ??? // old-error: not stable
   }
   //if x is defined here, there is no error, which seems incorrect
   lazy val x: F#T = ???

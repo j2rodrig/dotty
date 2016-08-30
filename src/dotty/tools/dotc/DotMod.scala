@@ -91,6 +91,7 @@ object DotMod {
 
   val MutabilityMemberName = typeName("__MUTABILITY__")
   val PrefixMutabilityName = typeName("__PREFIX_MUTABILITY__")
+  val OuterMutabilityName  = typeName("__OUTER_MUTABILITY__")
   def ReadonlyType(implicit ctx: Context) = TypeAlias(defn.ReadonlyAnnotType, 1)  // info for a readonly mutability member
   def MutableType(implicit ctx: Context) = TypeAlias(defn.MutableAnnotType, 1)    // info for a mutable mutability member
 
@@ -102,10 +103,6 @@ object DotMod {
     "==", "!=", "asInstanceOf", "isInstanceOf",
     "clone", "eq", "equals", "finalize", "getClass", "hashCode", "ne", "toString"
   ).map(termName).map(NameTransformer.encode)
-
-  //def newMutabilityOf(tp: Type): Type = tp match {
-
-  //}
 
   /******************
     * TYPE COMPARER *
@@ -236,14 +233,48 @@ object DotMod {
     }
    */
 
-  /** If tp has an immediate refinement of the mutability member, return its info. otherwise, NoType. */
-  def findRefinedMutabilityInfo(tp: Type)(implicit ctx: Context): Type = tp match {
-    case tp: RefinedType if tp.refinedName eq MutabilityMemberName =>
-      tp.refinedInfo
-    case tp: RefinedType =>
-      findRefinedMutabilityInfo(tp.parent)
-    case _ =>
-      NoType
+  /// Mutability type reduction.
+  def reduceMut(m: Type)(implicit ctx: Context): Type = m match {
+    case m: NamedType if m.name eq MutabilityMemberName =>
+      // We've got a mutability member selection.
+      // Reduce by doing a mutabilityOf on the prefix.
+      mutabilityOf(m.prefix)
+    case _ => m
+  }
+
+  /// The mutability of "this" when used by itself in the source program (not as part of a member selection.
+  final def findStandaloneThisMutability(tp: ThisType)(implicit ctx: Context): Type =
+    findThisMutability(ctx.owner, tp.cls)
+
+  /// The mutability of "this" when used as a prefix, selecting refSym.
+  final def findPrefixThisMutability(tp: ThisType, refSym: Symbol)(implicit ctx: Context): Type =
+    findThisMutability(refSym, tp.cls)
+
+  /*
+  Algorithm:
+    First, Search for a pair of symbols that meets the following criteria:
+      1. The first element of the pair is a method. (Or other non-weak owner.)
+      2. The second element of the pair is a class.
+      3. The class is a base class of C.
+      4. The class is an owner of the method.
+      5. There are no non-weak owners of the method that are also owned by the class.
+    Second, find and return the receiver mutability declared on the first element of the pair.
+   */
+  final def findThisMutability(refSym: Symbol, ofClass: Symbol)(implicit ctx: Context): Type = {
+    assert(refSym.exists, em"Attempt to find the mutability of ${ofClass.name}.this outside of $ofClass")
+    assert(ofClass.isClass, em"Expected a class in findThisMutability, got $ofClass")
+    if (ofClass derivesFrom refSym)  // if we're already at the class we're looking for, return @mutable
+      return defn.MutableAnnotType
+
+    // Find the owning class of refSym
+    def skipWeakNonClassOwners(s: Symbol): Symbol = if (!s.isClass && s.isWeakOwner) skipWeakNonClassOwners(s.owner) else s
+    val classOfSym = skipWeakNonClassOwners(refSym.owner)
+    if (!classOfSym.isClass) return findThisMutability(classOfSym, ofClass)   // owner isn't a class, so look at the owner of the owner
+
+    if (ofClass.derivesFrom(classOfSym))  // is the owning class a base of the class we're looking for?
+      declaredReceiverType(refSym)   // found it!
+    else
+      findThisMutability(classOfSym, ofClass)   // keep looking... starting at fromSym's owner
   }
 
   /**
@@ -325,17 +356,47 @@ object DotMod {
       tp
   }
 
-  /** Returns the mutability of the given type. */
-  def mutabilityOf(tp: Type)(implicit ctx: Context): Type = {
+  /**
+    * Returns the mutability of the given type. Optionally, takes the referred-to symbol (assuming tp is a prefix type).
+    */
+  def mutabilityOf(tp: Type, origSym: Symbol = NoSymbol)(implicit ctx: Context): Type = {
     val tpstable = tp.widenIfUnstable.stripAnnots
     tpstable match {
 
-      // tp is C.this for some C - look for a declared receiver mutability
+      // tp is C.this for some class C
       case tp: ThisType =>
-        mutabilityOfThis(tp.cls)
+        // If we're starting from a static symbol, default to @mutable
+        if (origSym.exists && origSym.isStatic || ctx.owner.isStatic)
+          defn.MutableAnnotType
+        else
+          findStandaloneThisMutability(tp)
+
+        /*
+      // tp is C.this for some C - look for a declared receiver mutability.
+      case tp: ThisType if origSym.exists && (tp.cls.baseClasses contains origSym.lexicallyEnclosingClass) =>
+        // We're searching for an ordinary receiver mutability declared on origSym.
+        // Since origSym may be mixed into the present class (rather than directly owned by the present class),
+        //  we had to check whether any base classes of the present class was the effective owner of origSym.
+        mutabilityOfThis(origSym.lexicallyEnclosingClass, origSym)
+      case tp: ThisType if origSym.exists =>
+        // We're looking for an outer-environment mutability, not an immediate receiver mutability.
+        // TODO: we're going to need a better enclosing-environment search than this.
+        if (origSym.isStatic)   // We're looking from a static viewpoint, so default to @mutable.
+          defn.MutableAnnotType
+        else {
+          val bases = tp.cls.baseClasses
+          val encl = origSym.lexicallyEnclosingClass
+          System.err.println(em"STUB: Looking for outer-environment mutability at $origSym -- $tp mutability was requested")
+          defn.MutableAnnotType // todo: implement
+        }
+      case tp: ThisType =>
+        // We haven't been given a starting symbol, so start with the current context owner.
+        mutabilityOf(tp, ctx.owner)
+        */
+
       case tp: SuperType =>
         // The mutability of super is the same as the mutability of this. See <DISCUSSION: SUPER_THIS_MUT> in the notes.
-        mutabilityOf(tp.thistpe)
+        mutabilityOf(tp.thistpe, origSym)
 
       // Basically, we want to avoid doing a member query if tp depends on an abstract/uninstantiated type member.
       //   In such cases, we want tp's mutability to depend directly on that type member,
@@ -366,21 +427,25 @@ object DotMod {
     }
   }
 
-  /** Finds the declared mutability of C.this for class C in the current context */
-  def mutabilityOfThis(cls: Symbol)(implicit ctx: Context): Type = {
+  /** Finds the declared receiver-mutability of cls.this for the given class cls.
+    * If startSym is given, startSym is assumed to be inside the definition of cls.
+    * If startSym is not given, the current context owner is assumed to be within cls.
+    */
+  /*
+  def mutabilityOfThis(cls: Symbol, startSym: Symbol = NoSymbol)(implicit ctx: Context): Type = {
     def rec(sym: Symbol): Type = {
-      val currentOwner = sym.effectiveOwner
-
       // If sym is non-weak, and its immediate non-weak owner is the class we're looking for,
       // then sym may contain annotations describing the receiver type.
-      if (currentOwner eq cls)
+      // We check both the immediate owner and the effective owner --
+      // e.g., if cls is a module class, we check it directly because effectiveOwner may skip it.
+      if (sym.effectiveOwner eq cls)
         declaredReceiverType(sym)
 
       // It is entirely possible that the current context owner is not inside the class
       // symbol we're looking for. In such cases, we will just return mutable.
       // See test neg/i1050a for an example where mutabilityOfThis is called inside a
       // viewpoint adaptation, which results from a symbol completion that is triggered during a type comparison.
-      else if (!currentOwner.exists) {
+      else if (!sym.effectiveOwner.exists) {
         // I'm still not convinced that this should be happening, or that returning mutable is the
         // right thing to do. So I'm showing a message so I can see when it happens.
         System.err.println(s"WEIRD WARNING: Mutability of ${cls.name}.this is being requested from outside of $cls. Assuming @mutable.")
@@ -388,23 +453,27 @@ object DotMod {
       }
 
       else
-        rec(currentOwner)
+        rec(sym.effectiveOwner)
     }
-
-    if (ctx.owner.isPackageObject || ctx.owner.isEffectiveRoot || (ctx.owner.skipWeakOwner eq cls))
-      defn.MutableAnnotType  // we're inside a static module or the class constructor
+    // If no starting symbol is given, use the current context owner
+    val startingSymbol = (if (startSym.exists) startSym else ctx.owner).skipWeakOwner
+    if (cls.isPackageObject || (startingSymbol eq cls))
+      defn.MutableAnnotType  // we're looking for a package object or we're already at the required class
     else
-      rec(ctx.owner.skipWeakOwner)
+      rec(startingSymbol)
   }
+  */
 
   /**
     * Returns the mutability of a symbol's declared receiver-mutability type.
     * If no RI annotations are present on the symbol, defaults to @mutable.
     */
   def declaredReceiverType(sym: Symbol)(implicit ctx: Context): Type = {
+    if (!(sym is Method))  // ignore annotations on field symbols
+      return defn.MutableAnnotType   // todo: not sure if filtering for methods is the right thing to do here (what I want to make sure of is that RI annotations on fields don't get processed in the same way as method annotations)
     // Return the first annotation declared on the symbol
     sym.annotationsWithoutCompleting.foreach { annot =>
-      val mut = receiverAnnotationToMutabilityType(annot, sym)
+      val mut = annotationToMutabilityType(annot, sym.lexicallyEnclosingClass)
       if (mut ne NoType)
         return mut
     }
@@ -412,8 +481,8 @@ object DotMod {
     defn.MutableAnnotType
   }
 
-  def receiverAnnotationToMutabilityType(annot: Annotation, methodSym: Symbol)(implicit ctx: Context): Type = {
-    //assert(methodSym.effectiveOwner.isClass, d"Expected the effective owner of $methodSym to be a class")
+  def annotationToMutabilityType(annot: Annotation, classSym: Symbol)(implicit ctx: Context): Type = {
+    assert(classSym.isClass, em"Expected a class, got $classSym")
     val symbol = annot.symbol
 
     // @readonly and @mutable
@@ -422,15 +491,14 @@ object DotMod {
 
     // @polyread - same as @mutabilityOfRef(this)
     else if (annot.symbol eq defn.PolyreadAnnot) {
-      if (!methodSym.effectiveOwner.isClass)
-        errorType(em"Only class/trait members may be annotated @polyread (owner ${methodSym.effectiveOwner} is not a class/trait)", symbol.pos)
+      if (!classSym.isClass)
+        errorType(em"Only class/trait members may be annotated @polyread (owner $classSym is not a class/trait)", symbol.pos)
       else
-        TypeRefUnlessNoPrefix(methodSym.effectiveOwner.thisType, MutabilityMemberName)
+        TypeRefUnlessNoPrefix(classSym.thisType, MutabilityMemberName)
     }
 
     // @mutabilityOfRef(r) - generates type r.__MUTABILITY__
     else if (annot.symbol eq defn.MutabilityOfRefAnnot)
-      //TypeRefUnlessNoPrefix(ctx.typer.typed(annot.arguments.head).tpe.widenIfUnstable, MutabilityMemberName)
       TypeRefUnlessNoPrefix(annot.arguments.head.tpe.widenIfUnstable, MutabilityMemberName)
 
     // @mutabilityOf[T] - generates type T#__MUTABILITY__
@@ -474,20 +542,22 @@ object DotMod {
       // Replace a recursive this-mutability with its equivalent in the current context.
       // If we did not do this, then the mutability may not match the current this-mutability.
       m match {
+        // Also, we don't just replace the ThisType of the nearest enclosing class. We replace any ThisType.
         case TypeRef(thisTpe, MutabilityMemberName) if thisTpe.isInstanceOf[ThisType] =>
-          // Also, we don't just replace the ThisType of the nearest enclosing class. We replace any ThisType.
-          val thisMut = mutabilityOf(thisTpe)
+          //System.err.println(em"$thisTpe")
+          // tp.termSymbol is passed to mutabilityOf because any this-types we want to replace refer to classes enclosing the method symbol.
+          val thisMut = mutabilityOf(thisTpe, tp.termSymbol)
           refineResultMember(tp, MutabilityMemberName, TypeAlias(thisMut, 1), otherMembersToDrop = List(PrefixMutabilityName))
           // We don't bother keeping the __PREFIX_MUTABILITY__ (or assignability) member.
-          // It only matters during assignment, and it should be put back if this method is followed by a viewpoint adaptation.
+          // It only matters during assignment, and it should be put back automatically if this method is followed by a viewpoint adaptation.
         case _ =>
           tp  // mutability member is not a ThisType. No substitution necessary. (Unless we allow more complicated mutability types that contain this-types!)
       }
   }
 
-  def viewpointAdapt(prefix: Type, target: Type)(implicit ctx: Context): Type = {
-    val preMut = mutabilityOf(prefix)
-    val tpMut = mutabilityOf(target)
+  def viewpointAdapt(prefix: Type, target: Type, origSym: Symbol)(implicit ctx: Context): Type = {
+    val preMut = mutabilityOf(prefix, origSym)
+    val tpMut = mutabilityOf(target, ctx.owner)
     val finalMut = substThisMutability(preMut | tpMut)
 
     // refine the mutability if the final mutability is different than target mutability
@@ -513,7 +583,7 @@ object DotMod {
     /** The info of the given denotation, as viewed from the given prefix. */
     override def denotInfoAsSeenFrom(pre: Type, denot: Denotation): Type = {
 
-      var target = denot.info //substThisMutability(denot.info)
+      var target = denot.info
 
       // Don't do custom logic in a types-erased phase
       if (!ctx.erasedTypes) {
@@ -522,7 +592,7 @@ object DotMod {
         // Note: Changed to canHaveAnnotations from isViewpointAdaptable.
         //   Current theory is that only non-methodic types should be adapted - see <DISCUSSION: EXPR-ADAPTATION> in notes.
         if (denot.isTerm && !(denot.symbol is Module) && canHaveAnnotations(target))
-          target = viewpointAdapt(pre, target)
+          target = viewpointAdapt(pre, target, denot.symbol)
 
         // Do a substitution of this-type mutabilities.
         if ((denot.symbol is Method) && canHaveAnnotations(target.finalResultType))
@@ -545,7 +615,16 @@ object DotMod {
   class DotModTyper extends Typer {
 
     def checkedReceiver(prefix: Type, tree: tpd.Tree)(implicit ctx: Context): tpd.Tree = {
-      val (preMut, declaredMut) = (mutabilityOf(prefix), declaredReceiverType(tree.symbol))
+      if (tree.symbol.isConstructor)  // it's always OK to call a constructor (regardless of receiver mutability) because the receiver reference is unique
+        return tree
+      // When asking for mutabilityOf(prefix) here, we search from the current context owner (rather than tree.symbol).
+      // The reason is that when checkedReceiver is called, this-types are valid with respect to the current
+      //  context, but the called method may be in a different tree. E.g., see core/Symbols,
+      //  where a search for method Symbols.this.ctx is performed from within Symbols, although ctx is
+      //  defined in Contexts (Symbols and Contexts are mixed together).
+      // todo: we're still getting notifications that the prefix is a this-type that is not the effective owner of the given symbol, regardless of whether we use ctx.owner, tree.symbol, or prefix.termSymbol.
+      val (preMut, declaredMut) = (mutabilityOf(prefix, tree.symbol /*ctx.owner*/), declaredReceiverType(tree.symbol))
+      //val (preMut, declaredMut) = (mutabilityOf(prefix, prefix.termSymbol), declaredReceiverType(tree.symbol))
       // Make sure to do a this-substitution on the declared receiver type.
       // Before substitution, @polyread methods have a declared mutability like C.this.__MUTABILITY__,
       // which would not otherwise compare equal to the receiver mutability.
@@ -592,22 +671,12 @@ object DotMod {
         tree
     }
 
-    /**
-      * TODO: deprecate this method in favour of mutabilityOf method.
-      */
-    def convertAnnotationToRefinement(tp: Type)(implicit ctx: Context): Type = tp match {
-      case tp: AnnotatedType =>
-        if (tp.annot.symbol eq defn.ReadonlyAnnot)
-          refineResultMember(tp.underlying, MutabilityMemberName, ReadonlyType)
-        else if (tp.annot.symbol eq defn.MutableAnnot)
-          refineResultMember(tp.underlying, MutabilityMemberName, MutableType)
-        else if (tp.annot.symbol eq defn.MutabilityOfRefAnnot) {
-          val argMutability = mutabilityOf(typed(tp.annot.arguments.head).tpe)
-          refineResultMember(tp.underlying, MutabilityMemberName, TypeAlias(argMutability, 1))
-        } else
-          tp
-      case _ =>
-        tp
+    def convertAnnotationToRefinement(tp: AnnotatedType)(implicit ctx: Context): Type = {
+      val mut = reduceMut(annotationToMutabilityType(tp.annot, ctx.owner.lexicallyEnclosingClass))
+      if (mut eq NoType)
+        tp   // not a valid RI annotation - return type unchanged
+      else
+        refineResultMember(tp.underlying, MutabilityMemberName, TypeAlias(mut, 1))  // strip annotation, replace with refinement
     }
 
     override def adaptInterpolated(tree0: tpd.Tree, pt: Type, original: untpd.Tree)(implicit ctx: Context): tpd.Tree = {
