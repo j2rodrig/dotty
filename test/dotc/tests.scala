@@ -117,6 +117,7 @@ class tests extends CompilerTest {
   @Test def dotmod_receiver_override() = compileFile(dotmodNegDir, "receiver_override")
   @Test def dotmod_value_override() = compileFile(dotmodNegDir, "value_override")
   @Test def dotmod_class_immutability() = compileFile(dotmodNegDir, "class_immutability")
+  @Test def dotmod_as_final() = compileFile(dotmodNegDir, "as_final")
   @Test def all_dotmod_neg() = compileFiles(dotmodNegDir, verbose = true, compileSubDirs = false)
 
   @Test def dotmod_collection_mut() = compileFile(dotmodNegDir + "collections/", "collection_mut")

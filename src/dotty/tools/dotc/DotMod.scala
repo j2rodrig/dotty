@@ -38,16 +38,28 @@ object DotMod {
   // DECORATORS
 
   implicit class SymbolDecorator(val sym: Symbol) extends AnyVal {
-    /** Gets annotations on a symbol without forcing the symbol's completion. */
-    def annotationsWithoutCompleting(implicit ctx: Context): List[Annotation] = sym.infoOrCompleter match {
+    /**
+      * Gets annotations on a symbol without forcing the symbol's completion.
+      * @param filterByNamesIfUncompleted A list of annotation names to filter by -- if
+      *                                   the symbol is uncompleted, then only annotations
+      *                                   named in this list will be typed and returned.
+      */
+    def annotationsWithoutCompleting(filterByNamesIfUncompleted: List[TypeName])(implicit ctx: Context): List[Annotation] = sym.infoOrCompleter match {
       case inf: Typer#Completer =>
         // we've got a completer here, so look at the original untyped tree, and type the annotations directly
         // See Namer#addAnnotations to see how Dotty types annotations. (Also Typer#completeAnnotations.)
-        untpd.modsDeco(inf.original.asInstanceOf[untpd.MemberDef]).mods.annotations.map { annotTree =>
-          // We look up the typer/context of the completer to do the annotation typing.
-          // See <DISCUSSION:ANNOTATION-TYPER-CONTEXT> in notes.
-          Annotation(inf.originalOuterCtx.typer.typedAnnotation(annotTree))
-        }
+        untpd.modsDeco(inf.original.asInstanceOf[untpd.MemberDef]).mods.annotations
+          .filter(filterByNamesIfUncompleted contains _.annotationClassName)
+          .map { annotTree =>
+            // We look up the typer/context of the completer to do the annotation typing.
+            // See <DISCUSSION:ANNOTATION-TYPER-CONTEXT> in notes.
+            val typeInContext = inf.originalOuterCtx.outer  // We also type in the next-outer context. See <DISCUSSION: CONTEXT-FOR-ANNOT-TYPING> in notes.
+            Annotation(typeInContext.typer.typedAnnotation(annotTree))
+          }
+      case inf: LazyType =>
+        // See <DISCUSSION:LAZY-NON-COMPLETER> in notes.
+        assert(!(sym is Method) && !sym.isClass, em"Unexpected LazyType as completer for $sym")
+        Nil // if I really do want to process annotations on fields or variables, I maybe should force completions here (instead of returning Nil).
       case _ =>  // no completer, so return already-typed annotations.
         sym.annotations
     }
@@ -83,7 +95,16 @@ object DotMod {
     }
   }
 
-  implicit class TreeDecorator(val tree: tpd.Tree) extends AnyVal {
+  implicit class UntypedTreeDecorator(val tree: untpd.Tree) extends AnyVal {
+    // Finds the class name of an annotation application tree.
+    def annotationClassName: Name = untpd.methPart(tree) match {
+      case tr: untpd.Ident => tr.name
+      case tr: untpd.New => tr.tpt.annotationClassName
+      case tr: untpd.Select => tr.qualifier.annotationClassName
+      case _ =>
+        assert(false, s"Expected an annotation-class application tree, got $tree")
+        typeName("<none>")
+    }
   }
 
 
@@ -363,6 +384,11 @@ object DotMod {
     val tpstable = tp.widenIfUnstable.stripAnnots
     tpstable match {
 
+      //
+      //case NoPrefix =>
+      //  assert(origSym.exists, em"Attempt to find the mutability of")
+      //  findStandaloneSymbolMutability(origSym)
+
       // tp is C.this for some class C
       case tp: ThisType =>
         // If we're starting from a static symbol, default to @mutable
@@ -370,30 +396,6 @@ object DotMod {
           defn.MutableAnnotType
         else
           findStandaloneThisMutability(tp)
-
-        /*
-      // tp is C.this for some C - look for a declared receiver mutability.
-      case tp: ThisType if origSym.exists && (tp.cls.baseClasses contains origSym.lexicallyEnclosingClass) =>
-        // We're searching for an ordinary receiver mutability declared on origSym.
-        // Since origSym may be mixed into the present class (rather than directly owned by the present class),
-        //  we had to check whether any base classes of the present class was the effective owner of origSym.
-        mutabilityOfThis(origSym.lexicallyEnclosingClass, origSym)
-      case tp: ThisType if origSym.exists =>
-        // We're looking for an outer-environment mutability, not an immediate receiver mutability.
-        // TODO: we're going to need a better enclosing-environment search than this.
-        if (origSym.isStatic)   // We're looking from a static viewpoint, so default to @mutable.
-          defn.MutableAnnotType
-        else {
-          val bases = tp.cls.baseClasses
-          val encl = origSym.lexicallyEnclosingClass
-          System.err.println(em"STUB: Looking for outer-environment mutability at $origSym -- $tp mutability was requested")
-          defn.MutableAnnotType // todo: implement
-        }
-      case tp: ThisType =>
-        // We haven't been given a starting symbol, so start with the current context owner.
-        mutabilityOf(tp, ctx.owner)
-        */
-
       case tp: SuperType =>
         // The mutability of super is the same as the mutability of this. See <DISCUSSION: SUPER_THIS_MUT> in the notes.
         mutabilityOf(tp.thistpe, origSym)
@@ -427,52 +429,15 @@ object DotMod {
     }
   }
 
-  /** Finds the declared receiver-mutability of cls.this for the given class cls.
-    * If startSym is given, startSym is assumed to be inside the definition of cls.
-    * If startSym is not given, the current context owner is assumed to be within cls.
-    */
-  /*
-  def mutabilityOfThis(cls: Symbol, startSym: Symbol = NoSymbol)(implicit ctx: Context): Type = {
-    def rec(sym: Symbol): Type = {
-      // If sym is non-weak, and its immediate non-weak owner is the class we're looking for,
-      // then sym may contain annotations describing the receiver type.
-      // We check both the immediate owner and the effective owner --
-      // e.g., if cls is a module class, we check it directly because effectiveOwner may skip it.
-      if (sym.effectiveOwner eq cls)
-        declaredReceiverType(sym)
-
-      // It is entirely possible that the current context owner is not inside the class
-      // symbol we're looking for. In such cases, we will just return mutable.
-      // See test neg/i1050a for an example where mutabilityOfThis is called inside a
-      // viewpoint adaptation, which results from a symbol completion that is triggered during a type comparison.
-      else if (!sym.effectiveOwner.exists) {
-        // I'm still not convinced that this should be happening, or that returning mutable is the
-        // right thing to do. So I'm showing a message so I can see when it happens.
-        System.err.println(s"WEIRD WARNING: Mutability of ${cls.name}.this is being requested from outside of $cls. Assuming @mutable.")
-        defn.MutableAnnotType
-      }
-
-      else
-        rec(sym.effectiveOwner)
-    }
-    // If no starting symbol is given, use the current context owner
-    val startingSymbol = (if (startSym.exists) startSym else ctx.owner).skipWeakOwner
-    if (cls.isPackageObject || (startingSymbol eq cls))
-      defn.MutableAnnotType  // we're looking for a package object or we're already at the required class
-    else
-      rec(startingSymbol)
-  }
-  */
-
   /**
     * Returns the mutability of a symbol's declared receiver-mutability type.
     * If no RI annotations are present on the symbol, defaults to @mutable.
     */
   def declaredReceiverType(sym: Symbol)(implicit ctx: Context): Type = {
-    if (!(sym is Method))  // ignore annotations on field symbols
+    if (!(sym is Method) && !sym.isClass)  // ignore annotations on field symbols
       return defn.MutableAnnotType   // todo: not sure if filtering for methods is the right thing to do here (what I want to make sure of is that RI annotations on fields don't get processed in the same way as method annotations)
     // Return the first annotation declared on the symbol
-    sym.annotationsWithoutCompleting.foreach { annot =>
+    sym.annotationsWithoutCompleting(receiverAnnotationNames).foreach { annot =>
       val mut = annotationToMutabilityType(annot, sym.lexicallyEnclosingClass)
       if (mut ne NoType)
         return mut
@@ -480,6 +445,7 @@ object DotMod {
     // No RI annotations found.
     defn.MutableAnnotType
   }
+  val receiverAnnotationNames = List("polyread", "readonly", "mutable", "mutabilityOf", "mutabilityOfRef").map(typeName)
 
   def annotationToMutabilityType(annot: Annotation, classSym: Symbol)(implicit ctx: Context): Type = {
     assert(classSym.isClass, em"Expected a class, got $classSym")
@@ -573,6 +539,52 @@ object DotMod {
       tp1
   }
 
+  def isViewedAsFinal(sym: Symbol, fromSym: Symbol)(implicit ctx: Context): Boolean = {
+    assert(sym.isTerm && !(sym is Method), em"Expected a value term in isViewedAsFinal")
+    if (fromSym is Package) return false
+
+    // Look through annotations on fromSym.
+    // If there is an @asFinal(ref) present, and the symbol of ref is the given symbol, return true.
+    fromSym.annotationsWithoutCompleting(namelist_asFinal).foreach { annot =>
+      if ((annot.symbol eq defn.AsFinalAnnot) && (annot.arguments.head.symbol eq sym))
+        return true
+    }
+
+    // Look up the ownership chain for more annotations.
+    isViewedAsFinal(sym, fromSym.owner)
+  }
+  val namelist_asFinal = List("asFinal").map(typeName)
+
+  def findViewedType(sym: Symbol, fromSym: Symbol)(implicit ctx: Context): Type = {
+    if (fromSym is Package) return NoType
+
+    // Get annotations. Remember that we've got a viewfind in process while we type those annotations.
+    val annots = fromSym.annotationsWithoutCompleting(namelist_asType)
+
+    // Look through annotations on fromSym.
+    // If there is an @asType[T](ref) present, and the symbol of ref is the given symbol, return T.
+    annots.foreach { annot =>
+      if ((annot.symbol eq defn.AsTypeAnnot) && (annot.arguments.head.symbol eq sym))
+        return getLastTypeArgOf(annot.tree.tpe)
+    }
+
+    // Look up the ownership chain for more annotations.
+    findViewedType(sym, fromSym.owner)
+  }
+  val namelist_asType = List("asType").map(typeName)
+
+  def viewedTypeOf(sym: Symbol, origType: Type)(implicit ctx: Context): Type = {
+    val viewedTp = findViewedType(sym, ctx.owner)
+    if (viewedTp eq NoType)
+      origType
+    else
+      viewedTp
+  }
+
+  def isFinalDueToView(sym: Symbol)(implicit ctx: Context): Boolean = {
+    isViewedAsFinal(sym, ctx.owner) || !(viewedTypeOf(sym, sym.info) <:< sym.info)
+  }
+
   def isAssignable(tp: Type)(implicit ctx: Context): Boolean = {
     val prefixMutDenot = tp.member(PrefixMutabilityName)
     !prefixMutDenot.exists || (prefixMutDenot.info <:< MutableType)
@@ -591,8 +603,10 @@ object DotMod {
         // Do viewpoint adaption for terms only.
         // Note: Changed to canHaveAnnotations from isViewpointAdaptable.
         //   Current theory is that only non-methodic types should be adapted - see <DISCUSSION: EXPR-ADAPTATION> in notes.
-        if (denot.isTerm && !(denot.symbol is Module) && canHaveAnnotations(target))
-          target = viewpointAdapt(pre, target, denot.symbol)
+        if (denot.isTerm && !(denot.symbol is Module) && canHaveAnnotations(target)) {
+          target = viewedTypeOf(denot.symbol, target)         // handle @asType[T](ref) annotations
+          target = viewpointAdapt(pre, target, denot.symbol)  // viewpoint-adapt a prefixed term reference
+        }
 
         // Do a substitution of this-type mutabilities.
         if ((denot.symbol is Method) && canHaveAnnotations(target.finalResultType))
@@ -622,8 +636,7 @@ object DotMod {
       //  context, but the called method may be in a different tree. E.g., see core/Symbols,
       //  where a search for method Symbols.this.ctx is performed from within Symbols, although ctx is
       //  defined in Contexts (Symbols and Contexts are mixed together).
-      // todo: we're still getting notifications that the prefix is a this-type that is not the effective owner of the given symbol, regardless of whether we use ctx.owner, tree.symbol, or prefix.termSymbol.
-      val (preMut, declaredMut) = (mutabilityOf(prefix, tree.symbol /*ctx.owner*/), declaredReceiverType(tree.symbol))
+      val (preMut, declaredMut) = (mutabilityOf(prefix, tree.symbol), declaredReceiverType(tree.symbol))
       //val (preMut, declaredMut) = (mutabilityOf(prefix, prefix.termSymbol), declaredReceiverType(tree.symbol))
       // Make sure to do a this-substitution on the declared receiver type.
       // Before substitution, @polyread methods have a declared mutability like C.this.__MUTABILITY__,
@@ -656,16 +669,19 @@ object DotMod {
     /**
       * customChecks: Checks the following:
       *  - Assignability.
+      *  // TODO: check that variable types are compatible with types given in @asType (DefDef and TypeDef trees)
       */
     def customChecks(tree: tpd.Tree, pt: Type)(implicit ctx: Context): tpd.Tree = tree match {
       case tree: tpd.ValDef =>
         tree
 
       case tree: tpd.Assign =>
-        if (isAssignable(tree.lhs.tpe))
-          tree
-        else
+        if (!isAssignable(tree.lhs.tpe))
           errorTree(tree, em"Cannot assign to unassignable type ${tree.lhs.tpe}")
+        else if (isFinalDueToView(tree.lhs.symbol))
+          errorTree(tree, em"Cannot perform assignment; ${tree.lhs.symbol} is effectively final due to an @asFinal or @asType annotation.")
+        else
+          tree
 
       case _ =>
         tree
@@ -760,6 +776,7 @@ object DotMod {
         val opc = new OverridingPairs.Cursor(cls)
         while (opc.hasNext) {
           customOverrideCheck(opc.overriding, opc.overridden)
+          // TODO: check overrides of @asType annotations
           opc.next()
         }
         super.transformTemplate(tree)

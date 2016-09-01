@@ -1704,14 +1704,6 @@ Notes:
 	  This should never happen. In source code, a "C.this" outside C causes an undefined-name error outside of C.
 	  It should be an assertion if this happens.
 
-
-<DISCUSSION: OUTER-PURITY>
-
-Introducing a new bit of information: __OUTER_MUTABILITY__,
-which defines the default mutability of all variables outside the nearest enclosing class definition.
-See dotmod/neg/collections/extractor test.
-
-
 <side topic>
 mutabilityOf and translation of ordinary annotations:
 1. receiver annotations should NOT call mutabilityOf, since mutabilityOf needs to query receiver annotations.
@@ -1726,3 +1718,177 @@ It looks the receiver-annotation code can be reused -- but special handling of @
 	In particular, we need to define what @polyread means in arbitrary positions (not just in receiver-annotation positions).
 	What I think needs to be done here is a search (in the current context) for the lexically enclosing class,
 	and base the meaning of @polyread on the receiver of that class.
+
+SUCCESS: ALL TESTS PASS!!
+
+
+<DISCUSSION: OUTER-PURITY>
+
+Introducing a new bit of information: __OUTER_MUTABILITY__,
+which defines the default mutability of all variables outside the nearest enclosing class definition.
+See dotmod/neg/collections/extractor test.
+
+OR:
+class setMutability[T <: Annotation](ref: Any @readonly) extends Annotation
+as a method or class annotation.
+Sets the mutability of ref to T when seen from inside the method/class. The given mutability must be a supertype of the original mutability of ref.
+ALT:
+class setTypeView[T](ref: Any @readonly) extends Annotation
+Sets the type of ref to T when seen from inside the method/class. T must be a supertype of the original type of ref.
+
+ASSIGNABILITY OF VARIABLES:
+@setTypeView only covers mutability of variables, not assignability.
+Assignability requires another annotation class. One possibility would have been to set the assignability
+member (__PREFIX_MUTABILITY__) to be the same as the mutability member (__MUTABILITY__), but then we would lose
+the option of making a viewpoint-adapted variable type both assignable and readonly (which could be very useful
+if manipulating a reference to some non-owned object).
+
+An issue with the generality of @setTypeView:
+We can set T as an arbitrary supertype of ref.type only if ref is not assignable inside the setViewType-annotated method.
+Otherwise, it would be possible to assign a type to ref that is not compatible with ref.
+BUT: The fact that we can arbitrarily view ref with a super-mutability is OK --
+ what's the difference? Does it have something to do with assignability? Or static vs. dynamic types?
+THOUGHT EXPERIMENT:
+	Think of each variable as an object with a single private field, a getter, and a setter.
+	class V {
+		private var v: T
+		@polyread def getV = v
+		@mutable def setV(_v: T): Unit = v = _v
+	}
+	The receiver type is the assignability (prefix) member.
+	Say T is @mutable.
+	If T were allowed to be upcast to @readonly, calling setV (assigning) to a @readonly member would be allowed.
+	However: since it is possible to view v from a position where its type is @mutable, which would be a violation of mutability.
+	So the mutability type is no different from the ordinary type.
+	Possibly, assignment is a hole in the current implementation.
+	However, ordinarily the only way to assign to a member with a non-original mutability is if its prefix type
+	is non-mutable, and a non-mutable prefix causes assignment to be disallowed. So in the mutability space,
+	this problem takes care of itself.
+
+What the foregoing means for the assignability of a prefix-less type:
+- A variable cannot remain assignable if its viewed type is not compatible with its original type.
+- If a variable's viewed type is compatible with its original type, it may optionally be made unassignable.
+
+An annotation for limiting assignability:
+@asFinal(ref)     // for limiting assignability -- ref must be symbolic (a TermRef)
+@asType[T](ref)   // for changing viewed type -- ref must be symbolic (a TermRef) -- (renamed from @setTypeView)
+
+-->>> The use of @asType implies @asFinal if the given type T is not compatible with the original type of ref.
+
+Where to perform viewpoint adjustment:
+- One place to do viewpoint adaptation is where I've been doing it so far, which is when the type of a symbol is requested (Denotation#info).
+- An alternative method of viewpoint adaptation is to insert asInstanceOf calls during adaptInterpolated.
+  However, there are two things against this alternative method:
+  1. Widenings are pervasive throughout the Dotty compiler (including inside member lookup, type comparison,
+     and default tree adaptation). In my current understanding of the compiler, merely inserting asInstanceOf
+     calls at certain trees would not do viewpoint adaptation on all places where widenings are performed.
+  2. Doing viewpoint adaptation during the widening process itself is already implemented and debugged (at least to
+     the extent that existing tests can catch bugs).
+  Therefore, my first choice is to do viewpoint adaptation of variable types in the same place that I do viewpoint adaptation
+  of receiver types.
+Which means the following: Viewpoint adaptation of variable types ought to be done inside the mutabilityOf method,
+since this is the same place that viewpoint adaptation of receiver references is done.
+A special case needs to be made for NoPrefix reference types.
+
+STACK OVERFLOW when attempting to compile neg/as_final test:
+  var a: AnyRef = ???
+  @asFinal(a) def m() = {
+    a = ???  // error
+  }
+The unwanted recursion happens when typing @asFinal(a) itself.
+Typing the argument "a" produces a widening in Typer#adapt, which triggers a call to findViewedType, which
+attempts to find the annotations on the owner symbol "m", which triggers a recursive typing of @asFinal(a).
+The problem here is that the context owner while typing annotations on m is m itself,
+ which leads to recursion if an annotation has an argument whose type depends on annotations in the enclosing context.
+ So why doesn't this happen with receiver-mutability annotations?
+ Possible Answer:
+ - It might happen now, because (e.g.) typing the @mutabilityOf(ref) annotation would trigger a call to findViewedType
+   (whereas it didn't before).
+TOWARD A SOLUTION:
+What do we know about an annotation tree prior to typing? Answer: Not a lot -- syntax and names of things
+	are in the tree, but prior to typing we don't have denotations or symbol info.
+Can we do lazy typing for viewed types? YES!!!
+	Now trying to cache lazy version of the viewed types.
+Doesn't work.
+	The real actual problem seems to be that the annotations are typed during widening.
+POSSIBLE SOLUTION:
+	Keep track of recursive calls to findViewedType on the same pair of (symbol, owner).
+	Where a recursion is detected, return the symbol's original type (as if no annotations were present).
+	FAILED: now a recursion happens when getting annotations inside declaredReceiverType.
+NEXT SOLUTION:
+	Track recursion in annotationsWithoutCompleting.
+	If a recursive call to annotationsWithoutCompleting for the same completer is detected,
+	then an empty annotation list is returned.
+FAILED CHECK:
+	exception occurred while compiling ./tests/dotmod/neg/as_final.scala
+	java.lang.AssertionError: assertion failed: data race? overwriting symbol of type (()Unit)(D.this.m),
+	long form = TermRef(ThisType(TypeRef(ThisType(TypeRef(ThisType(TypeRef(NoPrefix,<empty>)),as_final$)),D)),m) of class class dotty.tools.dotc.core.Types$TermRefWithSignature,
+	last sym id = 4676, new sym id = 4677,
+	last owner = class D, new owner = class D,
+	period = frontend at run 2
+		at scala.Predef$.assert(Predef.scala:165)
+		at dotty.tools.dotc.core.Types$NamedType.checkSymAssign(Types.scala:1481)
+		...
+As it turns out, the assertion happens when method m is declared twice, but somehow is not caught by ordinary error checking:
+  class D {
+    def m() = {
+    }
+    def m() = {
+    }
+  }
+I'm not going to worry about this now, since it's not a valid program anyway.
+But the illegal cyclic reference is also back:
+	./src/dotty/tools/dotc/core/Symbols.scala:563: error: illegal cyclic reference: alias ErrorSymbol.this.underlying.ThisName of type ThisName refers back to the type itself
+	    type ThisName = underlying.ThisName
+	         ^
+Temporarily disabling the search for @asType annotations -- @asFresh left intact.
+
+What if I stopped typing annotations eagerly?  <DISCUSSION: CONTEXT-FOR-ANNOT-TYPING>
+The reason is that (in all cases we currently care about) we really want to type method/class annotations not
+under the enclosing context (the method/class itself) but under the enclosing's outer context.
+The only reason I haven't done this already is that annotations unrelated to RI are not necessarily typed
+this way, so I can't just type all annotations in the outer context. (I would risk incorrectly generating
+errors in unrelated annotations.)
+BUT -- if I could first extract the name of an annotation before attempting to type it, I could at least
+make sure I don't inadvertently type an annotation with an unrecognized name. This is not quite a 100%-proof
+situation, since it is possible for someone to create different (incompatible) annotations with the same names as mine,
+but the chances seem vanishingly small, since all of the following would have to be simultaneously true:
+- my DotMod extension would have to be active.
+- the source program would have to use an annotation with the same name as an annotation recognized by DotMod.
+- the source program would have to supply an argument to that annotation that must be typed in the immediate
+  context (e.g., the argument would have to be a parameter of the immediate class/method).
+By not typing in the immediate context, giving arguments that refer to a parameter in the immediate context
+would generate errors. However, this shouldn't be a problem -- if the programmer wants to declare something
+about a parameter, the parameter is immediately present. Parameters are always final (so asFinal is not
+relevant), and named parameters in class/method definitions are always given a type (so asType is not
+relevant).
+
+<DISCUSSION:LAZY-NON-COMPLETER>
+If I re-enable @asType annotations during viewpoint adaptation, I get cyclic reference errors again in dotc/core/Symbols.
+Does this error have to do with denotations? I.e., how are cyclic references detected?
+(Note: The cyclic reference seems to be happening inside the Scala2x unpickler.)
+NEW INFORMATION: Looks like we're getting a LazyType that's not a Typer#Completer from SymDenotations#infoOrCompleter,
+and so we inadvertently force completion.
+NEW INFORMATION: We are getting a LazyType, which is not a Completer but an anonymous class.
+This presents a problem because LazyType does not provide a way to get at the original creation context.
+POSSIBILITY:
+Is the context given to the SymDenotations#SymDenotation method the original creation context?
+(The SymDenotation method is the only way given to create instances of the SymDenotation class.)
+If so, maybe we can store this context as a field in SymDenotation (rather than reaching into a LazyType).
+Unfortunately, it looks like the context we get when calling SymDenotation is the context _containing_ the
+symbol, not the context created _for_ the symbol, which means that there is not an easily accessible tree
+that we can look at to find the uncompleted annotations.
+A DISCOURSE ON TREES AND SYMBOLS
+Not all symbols have trees. (E.g., symbols that are loaded from classfiles.) This may seem to present
+problems with getting annotations, but since we always search for annotations starting from the current
+context, it's actually not an issue. Although we can look at symbols from other files, all
+annotations that pertain to the symbol are always in current/enclosing contexts (i.e., annotations
+that may be present in other files never change how the symbol is interpreted in the present context).
+SOLUTION:
+If we get a LazyType that's not a Completer, we always return an empty annotation list.
+I am assuming that the only annotations we ever ask for are from current or
+enclosing context owners. I am also assuming that all such owners are either method or class
+definitions, which always use a Completer if incomplete. Which means the following:
+- RI annotations on type members are disallowed.
+- If I get a LazyType that's not a Completer, then the symbol cannot be a method or class.
+- If I want to get annotations on fields/variables, I _should_ force completion. (But I don't define any annotations that are meaningful on fields/variables.)
