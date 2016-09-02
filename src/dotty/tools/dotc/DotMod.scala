@@ -53,8 +53,8 @@ object DotMod {
           .map { annotTree =>
             // We look up the typer/context of the completer to do the annotation typing.
             // See <DISCUSSION:ANNOTATION-TYPER-CONTEXT> in notes.
-            val typeInContext = inf.originalOuterCtx.outer  // We also type in the next-outer context. See <DISCUSSION: CONTEXT-FOR-ANNOT-TYPING> in notes.
-            Annotation(typeInContext.typer.typedAnnotation(annotTree))
+            var typeInContext = inf.originalOuterCtx.outer  // We also type in the next-outer context. See <DISCUSSION: CONTEXT-FOR-ANNOT-TYPING> in notes.
+            Annotation(typeInContext.typer.typedAnnotation(annotTree)(typeInContext))
           }
       case inf: LazyType =>
         // See <DISCUSSION:LAZY-NON-COMPLETER> in notes.
@@ -124,6 +124,11 @@ object DotMod {
     "==", "!=", "asInstanceOf", "isInstanceOf",
     "clone", "eq", "equals", "finalize", "getClass", "hashCode", "ne", "toString"
   ).map(termName).map(NameTransformer.encode)
+
+  val receiverAnnotationNames = List("polyread", "readonly", "mutable", "mutabilityOf", "mutabilityOfRef").map(typeName)
+  val namelist_asFinal = List("asFinal").map(typeName)
+  val namelist_asType = List("asType").map(typeName)
+
 
   /******************
     * TYPE COMPARER *
@@ -384,11 +389,6 @@ object DotMod {
     val tpstable = tp.widenIfUnstable.stripAnnots
     tpstable match {
 
-      //
-      //case NoPrefix =>
-      //  assert(origSym.exists, em"Attempt to find the mutability of")
-      //  findStandaloneSymbolMutability(origSym)
-
       // tp is C.this for some class C
       case tp: ThisType =>
         // If we're starting from a static symbol, default to @mutable
@@ -445,7 +445,6 @@ object DotMod {
     // No RI annotations found.
     defn.MutableAnnotType
   }
-  val receiverAnnotationNames = List("polyread", "readonly", "mutable", "mutabilityOf", "mutabilityOfRef").map(typeName)
 
   def annotationToMutabilityType(annot: Annotation, classSym: Symbol)(implicit ctx: Context): Type = {
     assert(classSym.isClass, em"Expected a class, got $classSym")
@@ -553,17 +552,13 @@ object DotMod {
     // Look up the ownership chain for more annotations.
     isViewedAsFinal(sym, fromSym.owner)
   }
-  val namelist_asFinal = List("asFinal").map(typeName)
 
   def findViewedType(sym: Symbol, fromSym: Symbol)(implicit ctx: Context): Type = {
     if (fromSym is Package) return NoType
 
-    // Get annotations. Remember that we've got a viewfind in process while we type those annotations.
-    val annots = fromSym.annotationsWithoutCompleting(namelist_asType)
-
     // Look through annotations on fromSym.
     // If there is an @asType[T](ref) present, and the symbol of ref is the given symbol, return T.
-    annots.foreach { annot =>
+    fromSym.annotationsWithoutCompleting(namelist_asType).foreach { annot =>
       if ((annot.symbol eq defn.AsTypeAnnot) && (annot.arguments.head.symbol eq sym))
         return getLastTypeArgOf(annot.tree.tpe)
     }
@@ -571,7 +566,6 @@ object DotMod {
     // Look up the ownership chain for more annotations.
     findViewedType(sym, fromSym.owner)
   }
-  val namelist_asType = List("asType").map(typeName)
 
   def viewedTypeOf(sym: Symbol, origType: Type)(implicit ctx: Context): Type = {
     val viewedTp = findViewedType(sym, ctx.owner)
@@ -581,8 +575,22 @@ object DotMod {
       viewedTp
   }
 
-  def isFinalDueToView(sym: Symbol)(implicit ctx: Context): Boolean = {
-    isViewedAsFinal(sym, ctx.owner) || !(viewedTypeOf(sym, sym.info) <:< sym.info)
+  /*
+  def isFinalDueToView(sym: Symbol, rhsTp: Type)(implicit ctx: Context): Boolean = {
+    // Do a compatibility check: is tp compatible with the original type of sym (not the viewed type)?
+    // >>> Currently a bit hacky -- returns false if both: sym's type has been modified due a type view,
+    //     and the RHS type of the assignment is possibly incompatible with sym's original type.
+    isViewedAsFinal(sym, ctx.owner) || !(viewedTypeOf(sym, sym.info) <:< sym.info) && !(rhsTp <:< sym.info)
+  }
+  */
+
+  /** If tp is a named type, returns the non-viewpoint-adapted type of the symbol tp refers to. */
+  def nonViewedNamedType(tp: Type)(implicit ctx: Context): Type = tp match {
+    case tp: NamedType =>
+      tp.denot.info  // see <DISCUSSION:GETTING-ORIGINAL-SYMBOL-TYPE> in notes.
+    case _ =>
+      assert(false, em"Expected NamedType, got $tp")
+      tp
   }
 
   def isAssignable(tp: Type)(implicit ctx: Context): Boolean = {
@@ -677,9 +685,19 @@ object DotMod {
 
       case tree: tpd.Assign =>
         if (!isAssignable(tree.lhs.tpe))
-          errorTree(tree, em"Cannot assign to unassignable type ${tree.lhs.tpe}")
-        else if (isFinalDueToView(tree.lhs.symbol))
-          errorTree(tree, em"Cannot perform assignment; ${tree.lhs.symbol} is effectively final due to an @asFinal or @asType annotation.")
+          errorTree(tree.lhs, em"Cannot perform assignment; ${tree.lhs.symbol} is effectively final due to a non-mutable prefix type.")
+        else if (isViewedAsFinal(tree.lhs.symbol, ctx.owner))
+          errorTree(tree.lhs, em"Cannot perform assignment; ${tree.lhs.symbol} is effectively final due to an @asFinal annotation.")
+        // Make sure the RHS type is compatible with the original (non-viewed) LHS type.
+        // Essentially, even though the RHS is compatible with the viewed LHS, it is not necessarily legal to assign to the variable.
+        // In basic RI, we have a special case of this problem--namely, that a field cannot be assignable if
+        // if its viewed mutability type is greater than its original mutability type--but the only way a viewed mutability
+        // can be greater than the original mutability is if the prefix is @mutable. So for mere RI, making
+        // a @mutable prefix a necessary condition for assignment is sufficient to prevent problems.
+        // Here, however, we generalize--for maximal utility, we declare a variable unassignable only where
+        // there is a genuine incompatibility with the variable's original declared type.
+        else if (!(tree.rhs.tpe <:< nonViewedNamedType(tree.lhs.tpe)))
+          err.typeMismatch(tree.rhs, nonViewedNamedType(tree.lhs.tpe))
         else
           tree
 
@@ -693,6 +711,12 @@ object DotMod {
         tp   // not a valid RI annotation - return type unchanged
       else
         refineResultMember(tp.underlying, MutabilityMemberName, TypeAlias(mut, 1))  // strip annotation, replace with refinement
+    }
+
+    override def completeAnnotations(mdef: untpd.MemberDef, sym: Symbol)(implicit ctx: Context): Unit = {
+      // Complete annotations in the outer context (rather than current).
+      // See <DISCUSSION:LAZY-NON-COMPLETER> and <DISCUSSION:SYM-ANNOT-COMPLETER> in notes.
+      super.completeAnnotations(mdef, sym)(ctx.outer)
     }
 
     override def adaptInterpolated(tree0: tpd.Tree, pt: Type, original: untpd.Tree)(implicit ctx: Context): tpd.Tree = {

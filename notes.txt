@@ -1892,3 +1892,54 @@ definitions, which always use a Completer if incomplete. Which means the followi
 - RI annotations on type members are disallowed.
 - If I get a LazyType that's not a Completer, then the symbol cannot be a method or class.
 - If I want to get annotations on fields/variables, I _should_ force completion. (But I don't define any annotations that are meaningful on fields/variables.)
+
+<DISCUSSION:SYM-ANNOT-COMPLETER>
+Unfortunately, the standard annotation completer does not know about our custom typing rule for asFinal and asType
+(namely, that they should be typed in an outer context rather than the current context).
+The (at least temporary) solution here is to override Typer#completeAnnotations, and
+complete the annotations with ctx.outer rather than ctx. Although this move means that annotations
+with arguments that refer to immediate method/class parameters will no longer work, I have yet
+to see a convincing argument that such annotations are useful.
+(as_type and as_final tests now pass.)
+
+<DISCUSSION:GETTING-ORIGINAL-SYMBOL-TYPE>
+ERROR in dotty test:
+	./src/dotty/./tools/backend/sjs/ScopedVar.scala:20: error: Cannot perform assignment; variable value is effectively final due to an @asFinal or @asType annotation.
+	      scVar.value = value
+	                  ^
+	./src/dotty/./tools/backend/sjs/ScopedVar.scala:27: error: Cannot perform assignment; variable value is effectively final due to an @asFinal or @asType annotation.
+	      scVar.value = oldValue
+	                  ^
+The original type of scVar.value is the type parameter A, but in both instances here it is seen as type parameter T.
+Why is the subtype test failing?
+SOLUTION:
+	It's failing because I was finding the original type by sym.info,
+	where I should be using tpe.denot.info, where tpe is the LHS type of the assignment.
+	Simply: tpe.info gives the viewpoint-adapted denotation type, and tpe.denot.info gives the
+		unadapted denotation type (although with a possibly-adapted prefix).
+	Getting the raw sym.info does not compute the necessary asSeenFrom calls.
+
+<ISSUE:ANNOTATIONS-EARLY-TYPING-IN-METHODS>
+FAILURE on the following test case:
+  def M(): Unit = {
+    var y: AnyRef = ???
+    @asFinal(y)   // why can't we find y here?...
+    def n() = {
+      y = ???     // if we assign to to y here?
+    }
+  }
+Debugging, I find that the owner of completion context for y is M (which is what I expected).
+If I change M to a class (rather than a method), it works.
+If I wrap def n() in another method or class (so that y is 2 levels out), it works.
+If I give n() a result type (e.g., def n(): Unit), it works.
+If I change n to a class (rather than a method), it works.
+If I change y = ??? to just y, it works (but if I also add an @asType[T](y), it again complains that y cannot be found).
+SO: The only case that seems to be failing is where: n does not have a declared result type,
+n has an @asFinal(y), y is defined in the immediate enclosing context,
+and the owner of the immediately enclosing context is a method.
+POSSIBLE AVENUES OF EXPLORATION:
+- Does this error happen in vanilla Dotty? (Answer: Probably not... we don't get a problem unless we force
+  early typing of an annotation.)
+- Is there something I'm missing about how/when variables are registered in method contexts?
+IN ANY CASE: This doesn't seem like a critical issue -- in the worst case, adding annotations like
+these will also require adding result types.

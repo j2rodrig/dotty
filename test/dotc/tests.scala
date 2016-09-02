@@ -63,6 +63,7 @@ class tests extends CompilerTest {
 
   // Tests that DotMod failed in the past. Collected here for easy retesting.
   @Test def dotmod_failed_tests() = {
+    sjs_ScopedVar()
     pos_rbtree()
     tasty_dotty
     cyclic_reference_tests()
@@ -84,6 +85,7 @@ class tests extends CompilerTest {
     pos_t2698()
     pos_t2435()
   }
+  @Test def sjs_ScopedVar() = compileFile(backendDir + "sjs/", "ScopedVar", twice)
   @Test def pos_weird() = compileFile(posDir, "class-dependent-extension-method", twice)
   @Test def pos_rbtree() = compileFile(posDir, "rbtree", twice)
   @Test def dotc_core_Symbols() = compileFile(dotcDir + "core/", "Symbols", twice)
@@ -118,6 +120,7 @@ class tests extends CompilerTest {
   @Test def dotmod_value_override() = compileFile(dotmodNegDir, "value_override")
   @Test def dotmod_class_immutability() = compileFile(dotmodNegDir, "class_immutability")
   @Test def dotmod_as_final() = compileFile(dotmodNegDir, "as_final")
+  @Test def dotmod_as_type() = compileFile(dotmodNegDir, "as_type")
   @Test def all_dotmod_neg() = compileFiles(dotmodNegDir, verbose = true, compileSubDirs = false)
 
   @Test def dotmod_collection_mut() = compileFile(dotmodNegDir + "collections/", "collection_mut")
