@@ -10,4 +10,20 @@ object as_type {
     a = y  // error
   }
 
+  class C
+
+  @asType[C](a)   // error
+  def n() = {
+  }
+
+  @asType[Any](this)  // error
+  def n1() = {
+  }
+
+  @asType[Any](a) def o() = {
+    @asType[AnyRef](a)  // error
+    def o1() = {
+    }
+  }
+
 }

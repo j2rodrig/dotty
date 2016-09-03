@@ -56,7 +56,7 @@ object DotMod {
             var typeInContext = inf.originalOuterCtx.outer  // We also type in the next-outer context. See <DISCUSSION: CONTEXT-FOR-ANNOT-TYPING> in notes.
             Annotation(typeInContext.typer.typedAnnotation(annotTree)(typeInContext))
           }
-      case inf: LazyType =>
+      case _: LazyType =>
         // See <DISCUSSION:LAZY-NON-COMPLETER> in notes.
         assert(!(sym is Method) && !sym.isClass, em"Unexpected LazyType as completer for $sym")
         Nil // if I really do want to process annotations on fields or variables, I maybe should force completions here (instead of returning Nil).
@@ -64,7 +64,7 @@ object DotMod {
         sym.annotations
     }
 
-    /** Finds out whether a symbol is parameterless without forcing the symbol's completion. */
+    /** Finds out whether a symbol is a parameterless method (or not a method at all) without unnecessarily forcing the symbol's completion. */
     def isParameterless(implicit ctx: Context): Boolean = sym.infoOrCompleter match {
       case inf: Typer#Completer =>
         // we've got a completer here, so look at the original untyped tree, and check the value parameter list
@@ -74,11 +74,10 @@ object DotMod {
           case _ =>
             true
         }
-      case info: Type =>  // no completer, so look at the type.
-        info.isParameterless
-      case _ =>
-        assert(false, s"Expected Type or Completer when looking at info of $sym")
+      case _: LazyType if !(sym is Method) =>  // not sure if we need this case, but I put it here anyway to avoid forcing unnecessary completions (ref: case LazyType in annotationsWithoutCompleting)
         true
+      case inf =>  // no completer, so look at the type.
+        inf.isParameterless
     }
   }
 
@@ -538,6 +537,25 @@ object DotMod {
       tp1
   }
 
+  /** Returns a list of @asFinal annotation arguments on fromSym and all enclosing symbols. */
+  def allFinals(fromSym: Symbol)(implicit ctx: Context): List[tpd.Tree] = {
+    if (fromSym is Package) Nil
+    else
+      asFinalList(fromSym) ::: allFinals(fromSym.owner)
+  }
+
+  /** Returns a list of arguments found in @asFinal annotations on the given symbol. */
+  def asFinalList(onSym: Symbol)(implicit ctx: Context): List[tpd.Tree] = {
+    var tpes = List[tpd.Tree]()
+    onSym.annotationsWithoutCompleting(namelist_asFinal).foreach { annot =>
+      if (annot.symbol eq defn.AsFinalAnnot)
+        tpes ::= annot.arguments.head
+    }
+    tpes
+  }
+
+  /** Searches for an @asFinal annotation referring to sym. If no eligible @asFinal annotation is found, returns false.
+    * Searches the symbol ownership chain starting at fromSym. */
   def isViewedAsFinal(sym: Symbol, fromSym: Symbol)(implicit ctx: Context): Boolean = {
     assert(sym.isTerm && !(sym is Method), em"Expected a value term in isViewedAsFinal")
     if (fromSym is Package) return false
@@ -553,6 +571,26 @@ object DotMod {
     isViewedAsFinal(sym, fromSym.owner)
   }
 
+  /** Returns a list of @asType annotation arguments on fromSym and all enclosing symbols. */
+  def allTypeViews(fromSym: Symbol)(implicit ctx: Context): List[(tpd.Tree, Type)] = {
+    if (fromSym is Package) Nil
+    else
+      viewedTypeList(fromSym) ::: allTypeViews(fromSym.owner)
+  }
+
+  /** Returns a list of arguments found in @asType annotations on the given symbol.
+    * Use nonViewedNamedType to find original symbol type. */
+  def viewedTypeList(onSym: Symbol)(implicit ctx: Context): List[(tpd.Tree, Type)] = {
+    var tpes = List[(tpd.Tree, Type)]()
+    onSym.annotationsWithoutCompleting(namelist_asType).foreach { annot =>
+      if (annot.symbol eq defn.AsTypeAnnot)
+        tpes ::= (annot.arguments.head, getLastTypeArgOf(annot.tree.tpe))
+    }
+    tpes
+  }
+
+  /** Searches for an @asType annotation referring to sym. If no eligible @asType annotation is found, returns NoType.
+    * Searches the symbol ownership chain starting at fromSym. */
   def findViewedType(sym: Symbol, fromSym: Symbol)(implicit ctx: Context): Type = {
     if (fromSym is Package) return NoType
 
@@ -567,6 +605,8 @@ object DotMod {
     findViewedType(sym, fromSym.owner)
   }
 
+  /** Searches for an @asType annotation referring to sym in the current context.
+    * If no eligible @asType annotation is found, returns origType. */
   def viewedTypeOf(sym: Symbol, origType: Type)(implicit ctx: Context): Type = {
     val viewedTp = findViewedType(sym, ctx.owner)
     if (viewedTp eq NoType)
@@ -677,10 +717,35 @@ object DotMod {
     /**
       * customChecks: Checks the following:
       *  - Assignability.
-      *  // TODO: check that variable types are compatible with types given in @asType (DefDef and TypeDef trees)
+      *  - Legality of @asType and @asFinal annotation arguments.
       */
     def customChecks(tree: tpd.Tree, pt: Type)(implicit ctx: Context): tpd.Tree = tree match {
-      case tree: tpd.ValDef =>
+
+      case tree: tpd.MemberDef =>
+        // A symbol's type as viewed from outside a context must be compatible with its type as viewed within the context.
+        // We do this to prevent illegal downcasts.
+        // Basically, we can use @asType to force a more restrictive (greater/upcast) static type on a symbol,
+        // but we cannot use @asType to force arbitrary downcasts.
+        viewedTypeList(tree.symbol).foreach { case (arg, typeInside) =>
+          arg.tpe match {
+            case _: NamedType =>
+              val typeOutside = viewedTypeOf(arg.symbol, arg.denot.info)(ctx)
+              if (!(typeOutside <:< typeInside))
+                return errorTree(arg, em"Illegal type view for ${arg.symbol}:\n" +
+                  em" required at least: $typeOutside\n" +
+                  em" got: $typeInside")
+            case _ =>
+              return errorTree(arg, em"Illegal @asType annotation: Expected a field or variable, got $arg")
+          }
+        }
+        // Also check validity of @asFinal arguments.
+        asFinalList(tree.symbol).foreach { arg =>
+          arg.tpe match {
+            case _: NamedType =>  // nothing to do -- argument is OK
+            case _ =>
+              return errorTree(arg, em"Illegal @asFinal annotation: Expected a field or variable, got $arg")
+          }
+        }
         tree
 
       case tree: tpd.Assign =>
@@ -795,12 +860,51 @@ object DotMod {
             em"   Overriding mutability: $ridingMut", overriding.pos)
       }
 
+      def checkFinals(overriding: Symbol, overridden: Symbol)(implicit ctx: Context): Unit = {
+        // If the overridden method declares a symbol to be effectively final, then it must also be effectively final in the overriding method.
+        asFinalList(overridden).foreach { arg =>
+          if (!isViewedAsFinal(arg.symbol, overriding))
+            ctx.error(em"Cannot override $overridden: $arg must be declared @asFinal", overriding.pos)
+        }
+      }
+
+      def checkTypeViews(overriding: Symbol, overridden: Symbol)(implicit ctx: Context): Unit = {
+        // If the overridden method declares a type view, then the viewed type must be compatible with the viewed type in the overriding method.
+        viewedTypeList(overridden).foreach { case (arg, tpe) =>
+          val tpe2 = findViewedType(arg.symbol, overriding) match {
+            case NoType => arg.denot.info
+            case tp => tp
+          }
+          if (!(tpe <:< tpe2))
+            ctx.error(em"Cannot override $overridden: $arg is $tpe2 here, but must be at least $tpe", overriding.pos)
+        }
+      }
+
+      override def transformApply(tree: tpd.Apply)(implicit ctx: Context, info: TransformerInfo) = {
+        // Check that all @asFinal annotations in effect in current context are also in effect on called method.
+        allFinals(ctx.owner).foreach { arg =>
+          if (!isViewedAsFinal(arg.symbol, tree.fun.symbol))
+            ctx.error(em"Cannot call ${tree.fun.symbol}: $arg must be declared @asFinal", tree.pos)
+        }
+        // Check that all type views in the current context are compatible with all type views at the called method.
+        allTypeViews(ctx.owner).foreach { case (arg, tpe) =>
+          val tpe2 = findViewedType(arg.symbol, tree.fun.symbol) match {
+            case NoType => arg.denot.info
+            case tp => tp
+          }
+          if (!(tpe <:< tpe2))
+            ctx.error(em"Cannot call ${tree.fun.symbol}: $arg is $tpe2 here, but must be at least $tpe", tree.pos)
+        }
+        super.transformApply(tree)
+      }
+
       override def transformTemplate(tree: tpd.Template)(implicit ctx: Context, info: TransformerInfo) = {
         val cls = ctx.owner
         val opc = new OverridingPairs.Cursor(cls)
         while (opc.hasNext) {
           customOverrideCheck(opc.overriding, opc.overridden)
-          // TODO: check overrides of @asType annotations
+          checkFinals(opc.overriding, opc.overridden)
+          checkTypeViews(opc.overriding, opc.overridden)
           opc.next()
         }
         super.transformTemplate(tree)

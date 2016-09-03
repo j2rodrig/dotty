@@ -12,6 +12,10 @@ object as_final {
     a = ???  // error
   }
 
+  @asFinal(this)  // error
+  def n() = {
+  }
+
   class D {
     var x: AnyRef = ???
     @polyread def m() = {

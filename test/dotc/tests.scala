@@ -121,6 +121,8 @@ class tests extends CompilerTest {
   @Test def dotmod_class_immutability() = compileFile(dotmodNegDir, "class_immutability")
   @Test def dotmod_as_final() = compileFile(dotmodNegDir, "as_final")
   @Test def dotmod_as_type() = compileFile(dotmodNegDir, "as_type")
+  @Test def dotmod_as_final_override() = compileFile(dotmodNegDir, "as_final_override")
+  @Test def dotmod_as_type_override() = compileFile(dotmodNegDir, "as_type_override")
   @Test def all_dotmod_neg() = compileFiles(dotmodNegDir, verbose = true, compileSubDirs = false)
 
   @Test def dotmod_collection_mut() = compileFile(dotmodNegDir + "collections/", "collection_mut")
