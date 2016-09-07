@@ -258,6 +258,7 @@ object DotMod {
     }
    */
 
+  /*
   /// Mutability type reduction.
   def reduceMut(m: Type)(implicit ctx: Context): Type = m match {
     case m: NamedType if m.name eq MutabilityMemberName =>
@@ -266,14 +267,19 @@ object DotMod {
       mutabilityOf(m.prefix)
     case _ => m
   }
+  */
 
-  /// The mutability of "this" when used by itself in the source program (not as part of a member selection.
+  /// The mutability of "this" when used by itself in the source program (not as part of a member selection).
   final def findStandaloneThisMutability(tp: ThisType)(implicit ctx: Context): Type =
     findThisMutability(ctx.owner, tp.cls)
 
   /// The mutability of "this" when used as a prefix, selecting refSym.
   final def findPrefixThisMutability(tp: ThisType, refSym: Symbol)(implicit ctx: Context): Type =
     findThisMutability(refSym, tp.cls)
+
+  /// Finds the first owner of s that is either a class or non-weak. If s itself is a class or non-weak, returns s.
+  def skipWeakNonClassOwners(s: Symbol)(implicit ctx: Context): Symbol =
+    if (!s.isClass && s.isWeakOwner) skipWeakNonClassOwners(s.owner) else s
 
   /*
   Algorithm:
@@ -292,7 +298,6 @@ object DotMod {
       return defn.MutableAnnotType
 
     // Find the owning class of refSym
-    def skipWeakNonClassOwners(s: Symbol): Symbol = if (!s.isClass && s.isWeakOwner) skipWeakNonClassOwners(s.owner) else s
     val classOfSym = skipWeakNonClassOwners(refSym.owner)
     if (!classOfSym.isClass) return findThisMutability(classOfSym, ofClass)   // owner isn't a class, so look at the owner of the owner
 
@@ -506,14 +511,24 @@ object DotMod {
       // Replace a recursive this-mutability with its equivalent in the current context.
       // If we did not do this, then the mutability may not match the current this-mutability.
       m match {
-        // Also, we don't just replace the ThisType of the nearest enclosing class. We replace any ThisType.
         case TypeRef(thisTpe, MutabilityMemberName) if thisTpe.isInstanceOf[ThisType] =>
-          //System.err.println(em"$thisTpe")
-          // tp.termSymbol is passed to mutabilityOf because any this-types we want to replace refer to classes enclosing the method symbol.
-          val thisMut = mutabilityOf(thisTpe, tp.termSymbol)
-          refineResultMember(tp, MutabilityMemberName, TypeAlias(thisMut, 1), otherMembersToDrop = List(PrefixMutabilityName))
-          // We don't bother keeping the __PREFIX_MUTABILITY__ (or assignability) member.
-          // It only matters during assignment, and it should be put back automatically if this method is followed by a viewpoint adaptation.
+          // Also, we don't just replace the ThisType of the nearest enclosing class. We replace any ThisType.
+          // We want to replace the this-mutability only if it is different than what the this-mutability should
+          // be inside the current context. But no special case is actually needed here -- if the mutability
+          // really shouldn't be changed, then mutabilityOf(thisTpe) should be equivalent to thisTpe,
+          // producing a refinement that's identical to the original tp.
+          // UPDATE: I think we really do need to substitute only when we're in a method of class thisTpe.
+          // Otherwise, this-mutabilities referring to an outer class get unfairly reduced; we want to
+          // keep outer-class mutabilities in their original forms for as long as possible.
+          if (skipWeakNonClassOwners(ctx.owner.owner).derivesFrom(thisTpe.asInstanceOf[ThisType].cls)) {
+            // tp.termSymbol is passed to mutabilityOf because any this-types we want to replace refer to classes enclosing the method symbol.
+            val thisMut = mutabilityOf(thisTpe, ctx.owner)
+            //System.err.println(em"${tp.termSymbol}: substituting $m -> $thisMut")
+            refineResultMember(tp, MutabilityMemberName, TypeAlias(thisMut, 1), otherMembersToDrop = List(PrefixMutabilityName))
+            // We don't bother keeping the __PREFIX_MUTABILITY__ (or assignability) member.
+            // It only matters during assignment, and it should be put back automatically if this method is followed by a viewpoint adaptation.
+          } else
+            tp
         case _ =>
           tp  // mutability member is not a ThisType. No substitution necessary. (Unless we allow more complicated mutability types that contain this-types!)
       }
@@ -521,16 +536,17 @@ object DotMod {
 
   def viewpointAdapt(prefix: Type, target: Type, origSym: Symbol)(implicit ctx: Context): Type = {
     val preMut = mutabilityOf(prefix, origSym)
-    val tpMut = mutabilityOf(target, ctx.owner)
-    val finalMut = substThisMutability(preMut | tpMut)
+    val target1 = substThisMutability(target)   // translate this-mutabilities on the target
+    val tpMut = mutabilityOf(target1, ctx.owner)
+    val finalMut = preMut | tpMut
 
-    // refine the mutability if the final mutability is different than target mutability
+    // Refine the mutability if the final mutability is different than target mutability.
     val tp1 = if (finalMut ne tpMut)
-      refineResultMember(target, MutabilityMemberName, TypeAlias(finalMut, 1), otherMembersToDrop = List(PrefixMutabilityName))
+      refineResultMember(target1, MutabilityMemberName, TypeAlias(finalMut, 1), otherMembersToDrop = List(PrefixMutabilityName))
     else
-      target
+      target1
 
-    // set the assignability member if the prefix is non-mutable
+    // Set the assignability member if the prefix is non-mutable.
     if (preMut ne defn.MutableAnnotType)
       refineResultMember(tp1, PrefixMutabilityName, TypeAlias(preMut, 1))
     else
@@ -656,8 +672,8 @@ object DotMod {
           target = viewpointAdapt(pre, target, denot.symbol)  // viewpoint-adapt a prefixed term reference
         }
 
-        // Do a substitution of this-type mutabilities.
-        if ((denot.symbol is Method) && canHaveAnnotations(target.finalResultType))
+        // Do a substitution of this-type mutabilities on method results.
+        else if ((denot.symbol is Method) && canHaveAnnotations(target.finalResultType))
           target = substThisMutability(target)
 
       }
@@ -689,6 +705,10 @@ object DotMod {
       // Make sure to do a this-substitution on the declared receiver type.
       // Before substitution, @polyread methods have a declared mutability like C.this.__MUTABILITY__,
       // which would not otherwise compare equal to the receiver mutability.
+      // NOTE: I suppose another way to handle this problem is to have the type comparer
+      // pry open mutabilities of the form C.this.__MUTABILITY__ to see what those mutabilities actually
+      // evaluate to in the comparison context. There would be a cost in type comparer complexity,
+      // and I would have to make sure to open up these mutabilities by only one extra level to avoid infinite recursion.
       val declared2 = if (prefix ne NoPrefix) declaredMut.substThis(tree.symbol.effectiveOwner.asClass, prefix) else declaredMut
       if (!(preMut <:< declared2)) {
         errorTree(tree, em"Incompatible receiver mutability in call to method ${tree.symbol.name}:\n" +
@@ -771,7 +791,9 @@ object DotMod {
     }
 
     def convertAnnotationToRefinement(tp: AnnotatedType)(implicit ctx: Context): Type = {
-      val mut = reduceMut(annotationToMutabilityType(tp.annot, ctx.owner.lexicallyEnclosingClass))
+      // NOTE: We no longer do mutability-type reduction/simplification here.
+      // Eager simplification can reduce this-mutabilities to @mutable in places where they should be polymorphic.
+      val mut = annotationToMutabilityType(tp.annot, ctx.owner.lexicallyEnclosingClass)
       if (mut eq NoType)
         tp   // not a valid RI annotation - return type unchanged
       else

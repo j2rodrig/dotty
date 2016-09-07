@@ -22,7 +22,7 @@ object assignable_mutability_of {
 
     @readonly def p(): AnyRef @mutabilityOfRef(this) = {
       x = x    // error
-      x  // ok
+      x  // error: @mutabilityOfRef(this) is polymorphic, but the viewpoint-adapted x is @readonly
     }
   }
 }
