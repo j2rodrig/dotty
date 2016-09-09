@@ -123,6 +123,8 @@ class tests extends CompilerTest {
   @Test def dotmod_as_type() = compileFile(dotmodNegDir, "as_type")
   @Test def dotmod_as_final_override() = compileFile(dotmodNegDir, "as_final_override")
   @Test def dotmod_as_type_override() = compileFile(dotmodNegDir, "as_type_override")
+  @Test def dotmod_pure_basic() = compileFile(dotmodNegDir, "pure_basic")
+  @Test def dotmod_pure_refchecks() = compileFile(dotmodNegDir, "pure_refchecks")
   @Test def all_dotmod_neg() = {
     //compileFiles(dotmodNegDir, verbose = true, compileSubDirs = false)
     dotmod_simple_readonly()
@@ -143,6 +145,8 @@ class tests extends CompilerTest {
     dotmod_as_type()
     dotmod_as_final_override()
     dotmod_as_type_override()
+    dotmod_pure_basic()
+    dotmod_pure_refchecks()
   }
 
   @Test def dotmod_collection_mut() = compileFile(dotmodNegDir + "collections/", "collection_mut")

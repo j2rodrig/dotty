@@ -16,8 +16,8 @@ object exprs {
     val ev: C = ???
     val fv: C = ev
     val gv: C @mutabilityOfRef(this) = ev
-    @polyread val hv: C = ev
-    @polyread val iv: C @mutabilityOfRef(this) = ev
+    @polyread val hv: C = ev  // @polyread has no effect on non-methods
+    @polyread val iv: C @mutabilityOfRef(this) = ev  // @polyread has no effect on non-methods
     val jv: C = gv
     val kv: C = hv
     val lv: C = iv

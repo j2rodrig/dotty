@@ -79,6 +79,31 @@ object DotMod {
       case inf =>  // no completer, so look at the type.
         inf.isParameterless
     }
+
+    def isPure(implicit ctx: Context): Boolean =
+      annotationsWithoutCompleting(pureAnnotationNames).exists(_.symbol eq defn.PureAnnot)
+
+    /** Finds the innermost symbol that is annotated @pure in this symbol's ownership chain.
+      * NoSymbol if no @pure symbol exists in the ownership chain. */
+    def purityBoundary(implicit ctx: Context): Symbol = {
+      if ((sym eq NoSymbol) || (sym is Package)) NoSymbol
+      else if (isPure) sym
+      else sym.owner.purityBoundary
+    }
+
+    def isInside(boundary: Symbol)(implicit ctx: Context): Boolean = {
+      if (sym eq NoSymbol) false
+      else if ((sym is PackageClass) && !(boundary is PackageClass)) false
+      else if (sym eq boundary) true
+      else if (sym.derivesFrom(boundary)) true
+      else sym.owner.isInside(boundary)
+    }
+
+    def isContainedInPurityBoundaryOf(sym2: Symbol)(implicit ctx: Context): Boolean = {
+      val boundary = sym2.purityBoundary
+      if (boundary eq NoSymbol) true   // sym2 has no boundary (or alternatively, its boundary is infinitely high on the owners chain).
+      else isInside(boundary)
+    }
   }
 
   implicit class TypeDecorator(val tp: Type) extends AnyVal {
@@ -125,8 +150,9 @@ object DotMod {
   ).map(termName).map(NameTransformer.encode)
 
   val receiverAnnotationNames = List("polyread", "readonly", "mutable", "mutabilityOf", "mutabilityOfRef").map(typeName)
-  val namelist_asFinal = List("asFinal").map(typeName)
-  val namelist_asType = List("asType").map(typeName)
+  val finalAnnotationNames = List("asFinal").map(typeName)
+  val typeviewAnnotationNames = List("asType").map(typeName)
+  val pureAnnotationNames = List("pure").map(typeName)
 
 
   /******************
@@ -274,8 +300,9 @@ object DotMod {
     findThisMutability(ctx.owner, tp.cls)
 
   /// The mutability of "this" when used as a prefix, selecting refSym.
-  final def findPrefixThisMutability(tp: ThisType, refSym: Symbol)(implicit ctx: Context): Type =
-    findThisMutability(refSym, tp.cls)
+  /// NOTE: No longer used.
+  //final def findPrefixThisMutability(tp: ThisType, refSym: Symbol)(implicit ctx: Context): Type =
+  //  findThisMutability(refSym, tp.cls)
 
   /// Finds the first owner of s that is either a class or non-weak. If s itself is a class or non-weak, returns s.
   def skipWeakNonClassOwners(s: Symbol)(implicit ctx: Context): Symbol =
@@ -440,12 +467,18 @@ object DotMod {
   def declaredReceiverType(sym: Symbol)(implicit ctx: Context): Type = {
     if (!(sym is Method) && !sym.isClass)  // ignore annotations on field symbols
       return defn.MutableAnnotType   // todo: not sure if filtering for methods is the right thing to do here (what I want to make sure of is that RI annotations on fields don't get processed in the same way as method annotations)
-    // Return the first annotation declared on the symbol
+
+    // Return the first receiver-mutability annotation declared on the symbol.
     sym.annotationsWithoutCompleting(receiverAnnotationNames).foreach { annot =>
       val mut = annotationToMutabilityType(annot, sym.lexicallyEnclosingClass)
       if (mut ne NoType)
         return mut
     }
+
+    // If there's a @pure on the symbol, and the symbol is a member of a class, default to a polymorphic mutability.
+    if (sym.effectiveOwner.isClass && sym.isPure)
+      return TypeRefUnlessNoPrefix(sym.effectiveOwner.thisType, MutabilityMemberName)
+
     // No RI annotations found.
     defn.MutableAnnotType
   }
@@ -563,7 +596,7 @@ object DotMod {
   /** Returns a list of arguments found in @asFinal annotations on the given symbol. */
   def asFinalList(onSym: Symbol)(implicit ctx: Context): List[tpd.Tree] = {
     var tpes = List[tpd.Tree]()
-    onSym.annotationsWithoutCompleting(namelist_asFinal).foreach { annot =>
+    onSym.annotationsWithoutCompleting(finalAnnotationNames).foreach { annot =>
       if (annot.symbol eq defn.AsFinalAnnot)
         tpes ::= annot.arguments.head
     }
@@ -574,14 +607,27 @@ object DotMod {
     * Searches the symbol ownership chain starting at fromSym. */
   def isViewedAsFinal(sym: Symbol, fromSym: Symbol)(implicit ctx: Context): Boolean = {
     assert(sym.isTerm && !(sym is Method), em"Expected a value term in isViewedAsFinal")
-    if (fromSym is Package) return false
+
+    // Stop searching if we reach the package level or fromSym contains sym.
+    // The containment check is important -- we don't want a @pure annotation to apply to symbols inside the annotated method.
+    if ((fromSym is Package) || sym.isContainedIn(fromSym)) return false
 
     // Look through annotations on fromSym.
     // If there is an @asFinal(ref) present, and the symbol of ref is the given symbol, return true.
-    fromSym.annotationsWithoutCompleting(namelist_asFinal).foreach { annot =>
+    fromSym.annotationsWithoutCompleting(finalAnnotationNames).foreach { annot =>
       if ((annot.symbol eq defn.AsFinalAnnot) && (annot.arguments.head.symbol eq sym))
         return true
     }
+
+    // If the symbol is:
+    // either static or a bona fide variable (not a field),
+    // and there is a @pure annotation present,
+    // then the symbol should be viewed as final.
+    if (sym.isStatic || (sym.effectiveOwner is Method))
+      fromSym.annotationsWithoutCompleting(pureAnnotationNames).foreach { annot =>
+        if (annot.symbol eq defn.PureAnnot)
+          return true
+      }
 
     // Look up the ownership chain for more annotations.
     isViewedAsFinal(sym, fromSym.owner)
@@ -598,7 +644,7 @@ object DotMod {
     * Use nonViewedNamedType to find original symbol type. */
   def viewedTypeList(onSym: Symbol)(implicit ctx: Context): List[(tpd.Tree, Type)] = {
     var tpes = List[(tpd.Tree, Type)]()
-    onSym.annotationsWithoutCompleting(namelist_asType).foreach { annot =>
+    onSym.annotationsWithoutCompleting(typeviewAnnotationNames).foreach { annot =>
       if (annot.symbol eq defn.AsTypeAnnot)
         tpes ::= (annot.arguments.head, getLastTypeArgOf(annot.tree.tpe))
     }
@@ -606,29 +652,66 @@ object DotMod {
   }
 
   /** Searches for an @asType annotation referring to sym. If no eligible @asType annotation is found, returns NoType.
-    * Searches the symbol ownership chain starting at fromSym. */
-  def findViewedType(sym: Symbol, fromSym: Symbol)(implicit ctx: Context): Type = {
-    if (fromSym is Package) return NoType
+    * Searches the symbol ownership chain starting at fromSym.
+    * NOTE: We pass the original type of the symbol's denotation as a parameter.
+    *  The reason is: it seems that denot.info and denot.sym.info do not always yield the same type...
+    *  For example, in the sjs_ScopedVar test, there is a private field "value" whose denot.info
+    *  is a TypeRef, but whose denot.sym.info is an ExprType, which is a non-value type (that I do not expect here). */
+  def findViewedType(sym: Symbol, fromSym: Symbol, origType: Type)(implicit ctx: Context): Type = {
+    //assert(sym.isTerm && !sym.info.isInstanceOf[MethodicType], em"Expected a value term in findViewedType")
+    assert(origType.isInstanceOf[ValueType], em"Expected a value term in findViewedType")
+
+    // Stop searching if we reach the package level or fromSym contains sym.
+    // The containment check is important -- we don't want a @pure annotation to apply to symbols inside the annotated method.
+    if ((fromSym is Package) || sym.isContainedIn(fromSym)) return NoType
 
     // Look through annotations on fromSym.
     // If there is an @asType[T](ref) present, and the symbol of ref is the given symbol, return T.
-    fromSym.annotationsWithoutCompleting(namelist_asType).foreach { annot =>
+    fromSym.annotationsWithoutCompleting(typeviewAnnotationNames).foreach { annot =>
       if ((annot.symbol eq defn.AsTypeAnnot) && (annot.arguments.head.symbol eq sym))
         return getLastTypeArgOf(annot.tree.tpe)
     }
 
+    // If the symbol is:
+    // either static or a bona fide variable (not a field),
+    // and there is a @pure annotation present,
+    // and there is no @asType for the variable,
+    // then the viewed type is a @readonly version of the variable's type (as viewed from the owner of fromSym).
+    if (sym.isStatic || (sym.effectiveOwner is Method))
+      fromSym.annotationsWithoutCompleting(pureAnnotationNames).foreach { annot =>
+        if (annot.symbol eq defn.PureAnnot) {
+          val viewed = findViewedType(sym, fromSym.owner, origType) match {
+            case NoType => origType
+            case t => t
+          }
+          return refineResultMember(viewed, MutabilityMemberName, ReadonlyType, otherMembersToDrop = List(PrefixMutabilityName))
+        }
+      }
+
     // Look up the ownership chain for more annotations.
-    findViewedType(sym, fromSym.owner)
+    findViewedType(sym, fromSym.owner, origType)
   }
 
   /** Searches for an @asType annotation referring to sym in the current context.
     * If no eligible @asType annotation is found, returns origType. */
   def viewedTypeOf(sym: Symbol, origType: Type)(implicit ctx: Context): Type = {
-    val viewedTp = findViewedType(sym, ctx.owner)
+    val viewedTp = findViewedType(sym, ctx.owner, origType)
     if (viewedTp eq NoType)
       origType
     else
       viewedTp
+  }
+
+  /** Finds the innermost enclosing @pure-annotated symbol, if any. */
+  def pureOwner(sym: Symbol)(implicit ctx: Context): Symbol = {
+    if (sym is Package) return NoSymbol
+
+    sym.annotationsWithoutCompleting(pureAnnotationNames).foreach { annot =>
+      if (annot.symbol eq defn.PureAnnot)
+        return sym
+    }
+
+    pureOwner(sym.owner)
   }
 
   /*
@@ -772,7 +855,7 @@ object DotMod {
         if (!isAssignable(tree.lhs.tpe))
           errorTree(tree.lhs, em"Cannot perform assignment; ${tree.lhs.symbol} is effectively final due to a non-mutable prefix type.")
         else if (isViewedAsFinal(tree.lhs.symbol, ctx.owner))
-          errorTree(tree.lhs, em"Cannot perform assignment; ${tree.lhs.symbol} is effectively final due to an @asFinal annotation.")
+          errorTree(tree.lhs, em"Cannot perform assignment; ${tree.lhs.symbol} is effectively final due to a @pure or @asFinal annotation.")
         // Make sure the RHS type is compatible with the original (non-viewed) LHS type.
         // Essentially, even though the RHS is compatible with the viewed LHS, it is not necessarily legal to assign to the variable.
         // In basic RI, we have a special case of this problem--namely, that a field cannot be assignable if
@@ -893,7 +976,7 @@ object DotMod {
       def checkTypeViews(overriding: Symbol, overridden: Symbol)(implicit ctx: Context): Unit = {
         // If the overridden method declares a type view, then the viewed type must be compatible with the viewed type in the overriding method.
         viewedTypeList(overridden).foreach { case (arg, tpe) =>
-          val tpe2 = findViewedType(arg.symbol, overriding) match {
+          val tpe2 = findViewedType(arg.symbol, overriding, arg.denot.info) match {
             case NoType => arg.denot.info
             case tp => tp
           }
@@ -902,21 +985,40 @@ object DotMod {
         }
       }
 
+      def checkPurityEffects(overriding: Symbol, overridden: Symbol)(implicit ctx: Context): Unit = {
+        // Make sure the overriding method conforms to the purity of the overridden method.
+        // Conformance is present if either of the two following conditions holds:
+        // 1. The overriding method is @pure.
+        // 2. The overriding method is inside the purity boundary of the overridden method.
+        if (!(overriding.isPure || overriding.isContainedInPurityBoundaryOf(overridden)))
+          ctx.error(em"Cannot override with $overriding (in ${overriding.lexicallyEnclosingClass}): " +
+            em"It must be @pure due to the @pure on ${overridden.purityBoundary}.")
+      }
+
       override def transformApply(tree: tpd.Apply)(implicit ctx: Context, info: TransformerInfo) = {
-        // Check that all @asFinal annotations in effect in current context are also in effect on called method.
+        // Check that all @asFinal annotations in effect in the current context are also in effect on the called method.
         allFinals(ctx.owner).foreach { arg =>
           if (!isViewedAsFinal(arg.symbol, tree.fun.symbol))
             ctx.error(em"Cannot call ${tree.fun.symbol}: $arg must be declared @asFinal", tree.pos)
         }
+
         // Check that all type views in the current context are compatible with all type views at the called method.
         allTypeViews(ctx.owner).foreach { case (arg, tpe) =>
-          val tpe2 = findViewedType(arg.symbol, tree.fun.symbol) match {
+          val tpe2 = findViewedType(arg.symbol, tree.fun.symbol, arg.denot.info) match {
             case NoType => arg.denot.info
             case tp => tp
           }
           if (!(tpe <:< tpe2))
             ctx.error(em"Cannot call ${tree.fun.symbol}: $arg is $tpe2 here, but must be at least $tpe", tree.pos)
         }
+
+        // Check that the called method conforms to the purity of the caller (i.e., the purity of the current context owner).
+        // Conformance is present if either of the two following conditions holds:
+        // 1. The called method is @pure.
+        // 2. The called method is inside the purity boundary of the caller.
+        if (!(tree.fun.symbol.isPure || tree.fun.symbol.isContainedInPurityBoundaryOf(ctx.owner)))
+          ctx.error(em"Cannot call ${tree.fun.symbol}: It must be @pure due to the @pure on ${ctx.owner.purityBoundary}.")
+
         super.transformApply(tree)
       }
 
@@ -927,6 +1029,7 @@ object DotMod {
           customOverrideCheck(opc.overriding, opc.overridden)
           checkFinals(opc.overriding, opc.overridden)
           checkTypeViews(opc.overriding, opc.overridden)
+          checkPurityEffects(opc.overriding, opc.overridden)
           opc.next()
         }
         super.transformTemplate(tree)

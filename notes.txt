@@ -1943,3 +1943,64 @@ POSSIBLE AVENUES OF EXPLORATION:
 - Is there something I'm missing about how/when variables are registered in method contexts?
 IN ANY CASE: This doesn't seem like a critical issue -- in the worst case, adding annotations like
 these will also require adding result types.
+
+
+<DISCUSSION:PURE-ANNOTATIONS>
+@pure is related to @asFinal and @asType.
+If @pure is present on a method symbol s, then:
+- All local variables defined outside of s are effectively final inside s.
+- All local variables and method parameters defined outside of s are readonly inside s. (Except for variables that are explicitly annotated otherwise with @asType.)
+- The receiver of s has polymorphic mutability inside s. (Unless explicitly annotated otherwise.)
+- The this-mutabilities of all enclosing non-module classes have a polymorphic mutability inside s.
+- All static fields are effectively final and readonly inside s.
+
+@pure may be present on class symbols. If @pure is on a class symbol, then all of the same rules for
+mutability and assignability apply, except for the receiver rule -- classes don't have receivers.
+
+@pure does not say anything about parameters of the current method.
+To "really" be pure, all parameters must have non-mutable types.
+All parameters are already effectively final in Scala, so no provision needs to be made to restrict assignability of parameters.
+
+What does @pure mean for local variables that are neither inside nor outside a symbol s? E.g., in a method of a different file?
+One answer is that it does not matter what @pure means for these variables, since they are inaccessible inside s.
+However, this answer is wrong because it is possible to call other methods from within s, and it is possible to override s.
+@pure ought to treat all variables not inside s as being outside s.
+
+When calling a method, the called method must either be pure, or it must be inside the innermost-enclosing
+context-owner that's annotated @pure.
+
+When overriding a method, the overriding method must either be pure, or it must be inside the innermost @pure symbol
+that encloses the overridden method, or it must be inside a @pure-annotated subclass of the innermost @pure symbol
+that encloses the overridden method. For an example of this last case, see:
+
+	@pure class C {
+		def m() = ...
+	}
+	@pure class D extends C {
+		override def m() = ...  // ok because D.this is the same object as C.this, and D.this is @pure
+	}
+
+What we want to do here is:
+1. Check ClassDefs to ensure impure classes are not extending pure base classes?
+   I'm skeptical that this is really necessary if we're already (correctly) checking calls and overrides.
+2. isContainedIn is insufficient. Every time we look at a @pure class symbol in the ownership chain,
+   we've got to check superclasses to see if the sought-after purity boundary is among them.
+
+Actually, what if we did a subtype test on all method receivers (during call checking)?
+
+Here's another example:
+
+	@pure class C {
+		class C1 {
+			def m() = ...
+		}
+	}
+	@pure class D {
+		class D1 extends c.C1 {
+			override def m() = ...  // error: not within the purity boundary C (b/c D doesn't extend C).
+		}
+	}
+	val c: C = ???
+
+all_dotmod_neg test and dotmod_failed_tests are known-passing.
+New test dotmod_pure_basic is working, pure_refchecks is not quite working.
