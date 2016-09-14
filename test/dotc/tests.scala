@@ -70,6 +70,7 @@ class tests extends CompilerTest {
     dotc_transform_PostTyper_single()
     pos_Map_single()
     pos_t1123()
+    //pos_t7426()
     pos_Iter2()  // see <DISCUSSION: ITER2_ASINSTANCEOF> in notes.
     neg_zoo()
     neg_i1050a()
@@ -96,6 +97,7 @@ class tests extends CompilerTest {
   @Test def pos_t2698() = compileFile(posDir, "t2698", twice)
   @Test def pos_t2435() = compileFile(posDir, "t2435", twice)
   @Test def pos_t1123() = compileFile(posDir, "t1123", twice)
+  @Test def pos_t7426() = compileFile("./tests/pending/pos/", "t7426", twice)  // temporarily removed from main pos group due to unresolved bug
   @Test def pos_Iter2() = compileFile(posDir, "Iter2", twice)
   @Test def pos_Map_single() = compileFile(posDir, "Map")
   @Test def pos_Map() = compileFile(posDir, "Map", twice)

@@ -20,10 +20,6 @@ import typer.ErrorReporting._
 import util._
 
 
-/*
- TODO: Purity. What purity implementation means practically is that closed-over variables will be readonly when seen from within a pure method.
- */
-
 object DotMod {
 
   // FRONT-END INITIALIZATION
@@ -179,19 +175,6 @@ object DotMod {
 
     override def isSubType(tp1: Type, tp2: Type): Boolean = {
 
-      /*
-      val show = (tp2 match {
-        case RefinedType(_, MutabilityMemberName, _) => true
-        case TypeRef(_, _) => true
-        case _ => false
-      }) || (tp1 match {
-        case RefinedType(_, MutabilityMemberName, _) => true
-        case TypeRef(_, _) => true
-        case _ => false
-      })
-      if (show) System.err.println(em"comparing $tp1 to $tp2...")
-      */
-
       // Pass basic cases. We assume that Any is a readonly type.
       if ((tp1 eq tp2) || (tp2 eq defn.AnyType) || (tp2 eq WildcardType) || (tp1 eq defn.NothingType))
         return true
@@ -287,36 +270,20 @@ object DotMod {
     override def copyIn(ctx: Context): TypeComparer = new DotModTypeComparer(ctx)
   }
 
-  /*
-  Found the following in SymDenotation. Could contain useful information for helping avoid cyclic references.
-    final def isValueClass(implicit ctx: Context): Boolean = {
-      val di = this.initial.asSymDenotation
-      di.isClass &&
-      di.derivesFrom(defn.AnyValClass)(ctx.withPhase(di.validFor.firstPhaseId))
-        // We call derivesFrom at the initial phase both because AnyVal does not exist
-        // after Erasure and to avoid cyclic references caused by forcing denotations
-    }
-   */
-
-  /*
-  /// Mutability type reduction.
-  def reduceMut(m: Type)(implicit ctx: Context): Type = m match {
+  // Mutability type reduction.
+  // WE ARE NO LONGER DOING MUTABILITY REDUCTION on explicit annotations in the source code.
+  // Mutability reduction loses important information, e.g. reducing this.__MUTABILITY__ to mutable.
+  /* def reduceMut(m: Type)(implicit ctx: Context): Type = m match {
     case m: NamedType if m.name eq MutabilityMemberName =>
       // We've got a mutability member selection.
       // Reduce by doing a mutabilityOf on the prefix.
       mutabilityOf(m.prefix)
     case _ => m
-  }
-  */
+  } */
 
   /// The mutability of "this" when used by itself in the source program (not as part of a member selection).
   final def findStandaloneThisMutability(tp: ThisType)(implicit ctx: Context): Type =
     findThisMutability(ctx.owner, tp.cls)
-
-  /// The mutability of "this" when used as a prefix, selecting refSym.
-  /// NOTE: No longer used.
-  //final def findPrefixThisMutability(tp: ThisType, refSym: Symbol)(implicit ctx: Context): Type =
-  //  findThisMutability(refSym, tp.cls)
 
   /// Finds the first owner of s that is either a class or non-weak. If s itself is a class or non-weak, returns s.
   def skipWeakNonClassOwners(s: Symbol)(implicit ctx: Context): Symbol =
@@ -569,7 +536,6 @@ object DotMod {
       // If we did not do this, then the mutability may not match the current this-mutability.
       m match {
         case TypeRef(thisTpe, MutabilityMemberName) if thisTpe.isInstanceOf[ThisType] =>
-          //System.err.println(em"subst-mut for: $thisTpe")
           // Also, we don't just replace the ThisType of the nearest enclosing class. We replace any ThisType.
           // We want to replace the this-mutability only if it is different than what the this-mutability should
           // be inside the current context. But no special case is actually needed here -- if the mutability
@@ -579,9 +545,7 @@ object DotMod {
           // Otherwise, this-mutabilities referring to an outer class get unfairly reduced; we want to
           // keep outer-class mutabilities in their original forms for as long as possible.
           if (skipWeakNonClassOwners(ctx.owner.owner).derivesFrom(thisTpe.asInstanceOf[ThisType].cls)) {
-            // tp.termSymbol is passed to mutabilityOf because any this-types we want to replace refer to classes enclosing the method symbol.
             val thisMut = mutabilityOf(thisTpe, ctx.owner)
-            //System.err.println(em"${tp.termSymbol}: substituting $m -> $thisMut")
             refineResultMember(tp, MutabilityMemberName, TypeAlias(thisMut, 1), otherMembersToDrop = List(PrefixMutabilityName))
             // We don't bother keeping the __PREFIX_MUTABILITY__ (or assignability) member.
             // It only matters during assignment, and it should be put back automatically if this method is followed by a viewpoint adaptation.
@@ -598,44 +562,6 @@ object DotMod {
     case TypeRef(thereThis, MutabilityMemberName) if thereThis.isInstanceOf[ThisType] => here
     case _ => there
   }
-
-  /*here match {
-    case TypeRef(hereThis, MutabilityMemberName) => substThisMutability2(hereThis, there)
-    case here: SuperType => substThisMutability2(here.thistpe, there)
-    case here: ThisType =>
-      def substThereCls(there1: Type): Type = there1 match {
-        case TypeRef(thereThis, MutabilityMemberName) => substThereCls(thereThis)
-        case there1: SuperType => substThereCls(there1)
-        case there1: ThisType =>
-          val there2 = there.substThis(there1.cls, here)
-          System.err.println(em"Translated $there to $there2")
-          there2
-        case _ =>
-          there1
-      }
-      substThereCls(there)
-    case _ => there
-  }*/
-
-  /*
-  expected.dealias match {
-    case TypeRef(thisTpe, MutabilityMemberName) =>
-      substThisMutability2(got, thisTpe)
-    case expected: ThisType =>
-      got match {
-        case TypeRef(thisTpe, MutabilityMemberName) =>
-          substThisMutability2(thisTpe, expected)
-        case _ =>
-          if (got derivesFrom expected.cls)
-            TypeRef(expected, MutabilityMemberName)
-          else
-            TypeRef(got, MutabilityMemberName)
-      }
-    case expected: SuperType => substThisMutability2(got, expected.thistpe)
-    case _ =>
-      got
-  }
-  */
 
   def viewpointAdapt(prefix: Type, target: Type, origSym: Symbol)(implicit ctx: Context): Type = {
     val preMut = mutabilityOf(prefix, origSym)
@@ -788,15 +714,6 @@ object DotMod {
     pureOwner(sym.owner)
   }
 
-  /*
-  def isFinalDueToView(sym: Symbol, rhsTp: Type)(implicit ctx: Context): Boolean = {
-    // Do a compatibility check: is tp compatible with the original type of sym (not the viewed type)?
-    // >>> Currently a bit hacky -- returns false if both: sym's type has been modified due a type view,
-    //     and the RHS type of the assignment is possibly incompatible with sym's original type.
-    isViewedAsFinal(sym, ctx.owner) || !(viewedTypeOf(sym, sym.info) <:< sym.info) && !(rhsTp <:< sym.info)
-  }
-  */
-
   /** If tp is a named type, returns the non-viewpoint-adapted type of the symbol tp refers to. */
   def nonViewedNamedType(tp: Type)(implicit ctx: Context): Type = tp match {
     case tp: NamedType =>
@@ -858,7 +775,6 @@ object DotMod {
       //  where a search for method Symbols.this.ctx is performed from within Symbols, although ctx is
       //  defined in Contexts (Symbols and Contexts are mixed together).
       val (preMut, declaredMut) = (mutabilityOf(prefix, tree.symbol), declaredReceiverType(tree.symbol))
-      //val (preMut, declaredMut) = (mutabilityOf(prefix, prefix.termSymbol), declaredReceiverType(tree.symbol))
       // Make sure to do a this-substitution on the declared receiver type.
       // Before substitution, @polyread methods have a declared mutability like C.this.__MUTABILITY__,
       // which would not otherwise compare equal to the receiver mutability.
@@ -868,17 +784,11 @@ object DotMod {
       // and I would have to make sure to open up these mutabilities by only one extra level to avoid infinite recursion.
       // Issue: see <DISCUSSION:RECEIVER-MUTABILITY-SAME-OBJECT> in notes.
       // Trying to fix it with substThisMutability instead of substThis.
-      //val declared2 = if (prefix ne NoPrefix) declaredMut.substThis(tree.symbol.effectiveOwner.asClass, prefix) else declaredMut
       val declared2 = substThisMutability2(preMut, declaredMut)
       if (!(preMut <:< declared2)) {
         errorTree(tree, em"Incompatible receiver mutability in call to method ${tree.symbol.name}:\n" +
           em"  Expected: $declared2\n" +
           em"  Got: $preMut")
-      //val preMut2 = substThisMutability2(preMut, declaredMut)
-      //if (!(preMut2 <:< declaredMut)) {
-      //  errorTree(tree, em"Incompatible receiver mutability in call to method ${tree.symbol.name}:\n" +
-      //    em"  Expected: $declaredMut\n" +
-      //    em"  Got: $preMut" + (if (preMut ne preMut2) em" (after this-substitution: $preMut2)" else ""))
       } else
         tree
     }
@@ -908,12 +818,6 @@ object DotMod {
         // Conformance is present if either of the two following conditions holds:
         // 1. The called method is @pure.
         // 2. The called method is inside the purity boundary of the caller.
-        //System.err.println(em"Checking @pure on call to $selectedSym from ${ctx.owner} with purity boundary ${ctx.owner.purityBoundary}.")
-        //if (!(selectedSym.isPure || selectedSym.isContainedInPurityBoundaryOf(ctx.owner))) {
-        //  val tmp1 = selectedSym.isPure
-        //  val tmp2 = selectedSym.isContainedInPurityBoundaryOf(ctx.owner)
-        //  tmp1 && tmp2
-        //}
         if (!(selectedSym.isPure || selectedSym.isContainedInPurityBoundaryOf(ctx.owner))) {
           if (assumePure(ctx.owner.purityBoundary))
             ctx.warning(em"$selectedSym should be annotated @pure due to the assumed purity of ${ctx.owner.purityBoundary}", tree.pos)
@@ -1017,27 +921,6 @@ object DotMod {
       // We re-type the needed annotations here.
       // See <DISCUSSION: ANNOTATION TYPING ISSUE related to @asType/@asFinal> in notes.
       super.completeAnnotations(mdef, sym)(ctx.outer)
-      /*
-      sym.transformAnnotations { annot =>
-        if (allCustomAnnotations contains annot.symbol.name) {
-          var typeInContext = ctx.outer
-          Annotation(typedAnnotation(annot.tree)(typeInContext))  // create a typed annotation
-        } else
-          annot
-      }
-      */
-      /*
-      sym.annotations.foreach { annot =>
-        annot.tree(ctx.outer)
-      }
-      // necessary in order to mark the typed ahead annotations as definitely typed:
-      untpd.modsDeco(mdef).mods.annotations.foreach { annot =>
-        typedAnnotation(annot)(ctx.outer)
-      }
-      */
-      //sym.transformAnnotations { annot =>
-      //  annot.derivedAnnotation(typedAnnotation(annot.tree(ctx.outer))(ctx.outer))
-      //}
     }
 
     override def adaptInterpolated(tree0: tpd.Tree, pt: Type, original: untpd.Tree)(implicit ctx: Context): tpd.Tree = {
@@ -1155,47 +1038,6 @@ object DotMod {
               em"It must have a purity level compatible with @pure ${overridden.purityBoundary}.", overriding.pos)
         }
       }
-
-      /*
-      override def transformApply(tree: tpd.Apply)(implicit ctx: Context, info: TransformerInfo) = {
-        //System.err.println(s"$tree")
-        super.transformApply(tree)
-      }
-
-      override def transformSelect(tree: tpd.Select)(implicit ctx: Context, info: TransformerInfo) = {
-        tree.denot.alternatives.foreach { denot =>
-          val selectedSym = denot.symbol //tree.fun.symbol (if tree is Apply)
-          if (selectedSym is Method) {
-
-            // Check that all @asFinal annotations in effect in the current context are also in effect on the called method.
-            allFinals(ctx.owner).foreach { arg =>
-              if (!isViewedAsFinal(arg.symbol, selectedSym))
-                ctx.error(em"Cannot select $selectedSym from here: $arg must be declared @asFinal", tree.pos)
-            }
-
-            // Check that all type views in the current context are compatible with all type views at the called method.
-            allTypeViews(ctx.owner).foreach { case (arg, tpe) =>
-              val tpe2 = findViewedType(arg.symbol, selectedSym, arg.denot.info) match {
-                case NoType => arg.denot.info
-                case tp => tp
-              }
-              if (!(tpe <:< tpe2))
-                ctx.error(em"Cannot select $selectedSym from here: $arg is $tpe2 here, but must be at least $tpe", tree.pos)
-            }
-
-            // Check that the called method conforms to the purity of the caller (i.e., the purity of the current context owner).
-            // Conformance is present if either of the two following conditions holds:
-            // 1. The called method is @pure.
-            // 2. The called method is inside the purity boundary of the caller.
-            //System.err.println(em"Checking @pure on call to $selectedSym from ${ctx.owner} with purity boundary ${ctx.owner.purityBoundary}.")
-            if (!(selectedSym.isPure || selectedSym.isContainedInPurityBoundaryOf(ctx.owner)))
-              ctx.error(em"Cannot select $selectedSym from here: It must be @pure due to the @pure on ${ctx.owner.purityBoundary}.", tree.pos)
-          }
-        }
-
-        super.transformSelect(tree)
-      }
-      */
 
       override def transformTemplate(tree: tpd.Template)(implicit ctx: Context, info: TransformerInfo) = {
         val cls = ctx.owner
