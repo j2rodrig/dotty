@@ -2075,3 +2075,9 @@ identify arguments that should be typed, rebuild those annotation trees to conta
 untyped) arguments, use Annotation#derivedAnnnotation to build new annotations, and use
 SymDenotations#transformAnnotations to make the symbol's annotation list reflect the new annotations.
 (Of course, I don't know exactly what would happen here if the annotations are loaded from a classfile.)
+
+
+ERRORS in new tests:
+	./tests/pos/t7426.scala:3: error: anonymous class Object{...} is compiled twice
+	@foo(new AnyRef { }) trait A
+	         ^

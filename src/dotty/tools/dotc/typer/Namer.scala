@@ -414,6 +414,16 @@ class Namer { typer: Typer =>
     case mdef: DefTree =>
       val sym = enterSymbol(createSymbol(mdef))
       setDocstring(sym, stat)
+
+      // add java enum constants
+      mdef match {
+        case vdef: ValDef if (isEnumConstant(vdef)) =>
+          val enumClass = sym.owner.linkedClass
+          if (!(enumClass is Flags.Sealed)) enumClass.setFlag(Flags.AbstractSealed)
+          enumClass.addAnnotation(Annotation.makeChild(sym))
+        case _ =>
+      }
+
       ctx
     case stats: Thicket =>
       for (tree <- stats.toList) {
@@ -425,8 +435,26 @@ class Namer { typer: Typer =>
       ctx
   }
 
+  /** Determines whether this field holds an enum constant.
+    * To qualify, the following conditions must be met:
+    *  - The field's class has the ENUM flag set
+    *  - The field's class extends java.lang.Enum
+    *  - The field has the ENUM flag set
+    *  - The field is static
+    *  - The field is stable
+    */
+  def isEnumConstant(vd: ValDef)(implicit ctx: Context) = {
+    // val ownerHasEnumFlag =
+    // Necessary to check because scalac puts Java's static members into the companion object
+    // while Scala's enum constants live directly in the class.
+    // We don't check for clazz.superClass == JavaEnumClass, because this causes a illegal
+    // cyclic reference error. See the commit message for details.
+    //  if (ctx.compilationUnit.isJava) ctx.owner.companionClass.is(Enum) else ctx.owner.is(Enum)
+    vd.mods.is(allOf(Enum,  Stable, JavaStatic, JavaDefined)) // && ownerHasEnumFlag
+  }
+
   def setDocstring(sym: Symbol, tree: Tree)(implicit ctx: Context) = tree match {
-    case t: MemberDef => ctx.base.addDocstring(sym, t.rawComment)
+    case t: MemberDef => ctx.docbase.addDocstring(sym, t.rawComment)
     case _ => ()
   }
 
@@ -700,7 +728,7 @@ class Namer { typer: Typer =>
       // the parent types are elaborated.
       index(constr)
       symbolOfTree(constr).ensureCompleted()
-      
+
       index(rest)(inClassContext(selfInfo))
 
       val tparamAccessors = decls.filter(_ is TypeParamAccessor).toList
@@ -781,20 +809,27 @@ class Namer { typer: Typer =>
           lazy val schema = paramFn(WildcardType)
           val site = sym.owner.thisType
           ((NoType: Type) /: sym.owner.info.baseClasses.tail) { (tp, cls) =>
-            val iRawInfo =
-              cls.info.nonPrivateDecl(sym.name).matchingDenotation(site, schema).info
-            val iInstInfo = iRawInfo match {
-              case iRawInfo: PolyType =>
-                if (iRawInfo.paramNames.length == typeParams.length)
-                  iRawInfo.instantiate(typeParams map (_.typeRef))
+            def instantiatedResType(info: Type, tparams: List[Symbol], paramss: List[List[Symbol]]): Type = info match {
+              case info: PolyType =>
+                if (info.paramNames.length == typeParams.length)
+                  instantiatedResType(info.instantiate(tparams.map(_.typeRef)), Nil, paramss)
                 else NoType
+              case info: MethodType =>
+                paramss match {
+                  case params :: paramss1 if info.paramNames.length == params.length =>
+                    instantiatedResType(info.instantiate(params.map(_.termRef)), tparams, paramss1)
+                  case _ =>
+                    NoType
+                }
               case _ =>
-                if (typeParams.isEmpty) iRawInfo
+                if (tparams.isEmpty && paramss.isEmpty) info.widenExpr
                 else NoType
             }
-            val iResType = iInstInfo.finalResultType.asSeenFrom(site, cls)
+            val iRawInfo =
+              cls.info.nonPrivateDecl(sym.name).matchingDenotation(site, schema).info
+            val iResType = instantiatedResType(iRawInfo, typeParams, paramss).asSeenFrom(site, cls)
             if (iResType.exists)
-              typr.println(i"using inherited type for ${mdef.name}; raw: $iRawInfo, inst: $iInstInfo, inherited: $iResType")
+              typr.println(i"using inherited type for ${mdef.name}; raw: $iRawInfo, inherited: $iResType")
             tp & iResType
           }
         }

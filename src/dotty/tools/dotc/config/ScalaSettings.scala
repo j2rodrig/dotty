@@ -163,6 +163,7 @@ class ScalaSettings extends Settings.SettingGroup {
   val YkeepComments = BooleanSetting("-Ykeep-comments", "Keep comments when scanning source files.")
   val YforceSbtPhases = BooleanSetting("-Yforce-sbt-phases", "Run the phases used by sbt for incremental compilation (ExtractDependencies and ExtractAPI) even if the compiler is ran outside of sbt, for debugging.")
   val YdumpSbtInc = BooleanSetting("-Ydump-sbt-inc", "For every compiled foo.scala, output the API representation and dependencies used for sbt incremental compilation in foo.inc, implies -Yforce-sbt-phases.")
+  val YcheckAllPatmat = BooleanSetting("-Ycheck-all-patmat", "Check exhaustivity and redundancy of all pattern matching (used for testing the algorithm)")
   def stop = YstopAfter
 
   /** Area-specific debug output.
@@ -196,4 +197,68 @@ class ScalaSettings extends Settings.SettingGroup {
   val YpresentationLog = StringSetting("-Ypresentation-log", "file", "Log presentation compiler events into file", "")
   val YpresentationReplay = StringSetting("-Ypresentation-replay", "file", "Replay presentation compiler events from file", "")
   val YpresentationDelay = IntSetting("-Ypresentation-delay", "Wait number of ms after typing before starting typechecking", 0, 0 to 999)
+
+  /** Doc specific settings */
+  val template = OptionSetting[String](
+    "-template",
+    "A mustache template for rendering each top-level entity in the API"
+  )
+
+  val resources = OptionSetting[String](
+    "-resources",
+    "A directory containing static resources needed for the API documentation"
+  )
+
+  val DocTitle = StringSetting (
+    "-Ydoc-title",
+    "title",
+    "The overall name of the Scaladoc site",
+    ""
+  )
+
+  val DocVersion = StringSetting (
+    "-Ydoc-version",
+    "version",
+    "An optional version number, to be appended to the title",
+    ""
+  )
+
+  val DocOutput = StringSetting (
+    "-Ydoc-output",
+    "outdir",
+    "The output directory in which to place the documentation",
+    "."
+  )
+
+  val DocFooter = StringSetting (
+    "-Ydoc-footer",
+    "footer",
+    "A footer on every Scaladoc page, by default the EPFL/Lightbend copyright notice. Can be overridden with a custom footer.",
+    ""
+  )
+
+  val DocUncompilable = StringSetting (
+    "-Ydoc-no-compile",
+    "path",
+    "A directory containing sources which should be parsed, no more (e.g. AnyRef.scala)",
+    ""
+  )
+
+  //def DocUncompilableFiles(implicit ctx: Context) = DocUncompilable.value match {
+  //  case ""     => Nil
+  //  case path   => io.Directory(path).deepFiles.filter(_ hasExtension "scala").toList
+  //}
+
+  val DocExternalDoc = MultiStringSetting (
+    "-Ydoc-external-doc",
+    "external-doc",
+    "comma-separated list of classpath_entry_path#doc_URL pairs describing external dependencies."
+  )
+
+  val DocAuthor = BooleanSetting("-Ydoc-author", "Include authors.", true)
+
+  val DocGroups = BooleanSetting (
+    "-Ydoc:groups",
+    "Group similar functions together (based on the @group annotation)"
+  )
 }

@@ -10,7 +10,7 @@ import org.scalajs.sbtplugin.ScalaJSPlugin.autoImport._
 object DottyBuild extends Build {
 
   val baseVersion = "0.1"
-  val isNightly = sys.props.get("NIGHTLYBUILD") == Some("yes")
+  val isNightly = sys.env.get("NIGHTLYBUILD") == Some("yes")
 
   val jenkinsMemLimit = List("-Xmx1300m")
 
@@ -73,7 +73,9 @@ object DottyBuild extends Build {
       javaSource in Test := baseDirectory.value / "test",
       resourceDirectory in Compile := baseDirectory.value / "resources",
       unmanagedSourceDirectories in Compile := Seq((scalaSource in Compile).value),
+      unmanagedSourceDirectories in Compile += baseDirectory.value / "dottydoc" / "src",
       unmanagedSourceDirectories in Test := Seq((scalaSource in Test).value),
+      unmanagedSourceDirectories in Test += baseDirectory.value / "dottydoc" / "test",
 
       // set system in/out for repl
       connectInput in run := true,
@@ -98,8 +100,9 @@ object DottyBuild extends Build {
       libraryDependencies ++= partestDeps.value,
       libraryDependencies ++= Seq("org.scala-lang.modules" %% "scala-xml" % "1.0.1",
                                   "org.scala-lang.modules" %% "scala-partest" % "1.0.11" % "test",
+                                  "ch.epfl.lamp" % "dottydoc-client" % "0.1.0",
                                   "com.novocode" % "junit-interface" % "0.11" % "test",
-                                  "com.googlecode.java-diff-utils" % "diffutils" % "1.3.0",
+                                  "com.github.spullara.mustache.java" % "compiler" % "0.9.3",
                                   "com.typesafe.sbt" % "sbt-interface" % sbtVersion.value),
       // enable improved incremental compilation algorithm
       incOptions := incOptions.value.withNameHashing(true),
@@ -199,7 +202,8 @@ object DottyBuild extends Build {
     settings(
       addCommandAlias("partest",                   ";test:package;package;test:runMain dotc.build;lockPartestFile;test:test;runPartestRunner") ++
       addCommandAlias("partest-only",              ";test:package;package;test:runMain dotc.build;lockPartestFile;test:test-only dotc.tests;runPartestRunner") ++
-      addCommandAlias("partest-only-no-bootstrap", ";test:package;package;                        lockPartestFile;test:test-only dotc.tests;runPartestRunner")
+      addCommandAlias("partest-only-no-bootstrap", ";test:package;package;                        lockPartestFile;test:test-only dotc.tests;runPartestRunner") ++
+      addCommandAlias("dottydoc", ";dottydoc/run")
     ).
     settings(publishing)
 
@@ -262,7 +266,6 @@ object DottyInjectedPlugin extends AutoPlugin {
       */
     ).
     settings(publishing)
-
 
   /** A sandbox to play with the Scala.js back-end of dotty.
    *

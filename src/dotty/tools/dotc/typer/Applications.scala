@@ -31,7 +31,7 @@ import language.implicitConversions
 object Applications {
   import tpd._
 
-  def extractorMemberType(tp: Type, name: Name, errorPos: Position = NoPosition)(implicit ctx:Context) = {
+  def extractorMemberType(tp: Type, name: Name, errorPos: Position = NoPosition)(implicit ctx: Context) = {
     val ref = tp.member(name).suchThat(_.info.isParameterless)
     if (ref.isOverloaded)
       errorType(i"Overloaded reference to $ref is not allowed in extractor", errorPos)
@@ -41,12 +41,12 @@ object Applications {
       ref.info.widenExpr.dealias
   }
 
-  def productSelectorTypes(tp: Type, errorPos: Position = NoPosition)(implicit ctx:Context): List[Type] = {
+  def productSelectorTypes(tp: Type, errorPos: Position = NoPosition)(implicit ctx: Context): List[Type] = {
     val sels = for (n <- Iterator.from(0)) yield extractorMemberType(tp, nme.selectorName(n), errorPos)
     sels.takeWhile(_.exists).toList
   }
 
-  def productSelectors(tp: Type)(implicit ctx:Context): List[Symbol] = {
+  def productSelectors(tp: Type)(implicit ctx: Context): List[Symbol] = {
     val sels = for (n <- Iterator.from(0)) yield tp.member(nme.selectorName(n)).symbol
     sels.takeWhile(_.exists).toList
   }
@@ -58,7 +58,7 @@ object Applications {
       else tp :: Nil
     } else tp :: Nil
 
-  def unapplyArgs(unapplyResult: Type, unapplyFn:Tree, args:List[untpd.Tree], pos: Position = NoPosition)(implicit ctx: Context): List[Type] = {
+  def unapplyArgs(unapplyResult: Type, unapplyFn: Tree, args: List[untpd.Tree], pos: Position = NoPosition)(implicit ctx: Context): List[Type] = {
 
     def seqSelector = defn.RepeatedParamType.appliedTo(unapplyResult.elemType :: Nil)
     def getTp = extractorMemberType(unapplyResult, nme.get, pos)
@@ -533,8 +533,6 @@ trait Applications extends Compatibility { self: Typer with Dynamic =>
     def treeToArg(arg: Tree): Tree = arg
   }
 
-  def adaptApplyResult(funRef: TermRef, res: Tree)(implicit ctx: Context): Tree = res
-
   /** If `app` is a `this(...)` constructor call, the this-call argument context,
    *  otherwise the current context.
    */
@@ -543,24 +541,13 @@ trait Applications extends Compatibility { self: Typer with Dynamic =>
 
   def typedApply(tree: untpd.Apply, pt: Type)(implicit ctx: Context): Tree = {
 
-    /** Try same application with an implicit inserted around the qualifier of the function
-     *  part. Return an optional value to indicate success.
-     */
-    def tryWithImplicitOnQualifier(fun1: Tree, proto: FunProto)(implicit ctx: Context): Option[Tree] =
-      tryInsertImplicitOnQualifier(fun1, proto) flatMap { fun2 =>
-        tryEither { implicit ctx =>
-          Some(typedApply(
-            cpy.Apply(tree)(untpd.TypedSplice(fun2), proto.typedArgs map untpd.TypedSplice),
-            pt)): Option[Tree]
-        } { (_, _) => None }
-     }
-
     def realApply(implicit ctx: Context): Tree = track("realApply") {
       val originalProto = new FunProto(tree.args, IgnoredProto(pt), this)(argCtx(tree))
       val fun1 = typedExpr(tree.fun, originalProto)
 
       // Warning: The following lines are dirty and fragile. We record that auto-tupling was demanded as
-      // a side effect in adapt. If it was, we assume the tupled proto-type in the rest of the application.
+      // a side effect in adapt. If it was, we assume the tupled proto-type in the rest of the application,
+      // until, possibly, we have to fall back to insert an implicit on the qualifier.
       // This crucially relies on he fact that `proto` is used only in a single call of `adapt`,
       // otherwise we would get possible cross-talk between different `adapt` calls using the same
       // prototype. A cleaner alternative would be to return a modified prototype from `adapt` together with
@@ -576,6 +563,32 @@ trait Applications extends Compatibility { self: Typer with Dynamic =>
         if (!constrainResult(fun1.tpe.widen, proto.derivedFunProto(resultType = pt)))
           typr.println(i"result failure for $tree with type ${fun1.tpe.widen}, expected = $pt")
 
+      /** Type application where arguments come from prototype, and no implicits are inserted */
+      def simpleApply(fun1: Tree, proto: FunProto)(implicit ctx: Context): Tree =
+        methPart(fun1).tpe match {
+          case funRef: TermRef =>
+            val app =
+              if (proto.allArgTypesAreCurrent())
+                new ApplyToTyped(tree, fun1, funRef, proto.typedArgs, pt)
+              else
+                new ApplyToUntyped(tree, fun1, funRef, proto, pt)(argCtx(tree))
+            convertNewGenericArray(ConstFold(app.result))
+          case _ =>
+            handleUnexpectedFunType(tree, fun1)
+        }
+
+      /** Try same application with an implicit inserted around the qualifier of the function
+       *  part. Return an optional value to indicate success.
+       */
+      def tryWithImplicitOnQualifier(fun1: Tree, proto: FunProto)(implicit ctx: Context): Option[Tree] =
+        tryInsertImplicitOnQualifier(fun1, proto) flatMap { fun2 =>
+          tryEither {
+            implicit ctx => Some(simpleApply(fun2, proto)): Option[Tree]
+          } {
+            (_, _) => None
+          }
+        }
+
       fun1.tpe match {
         case ErrorType => tree.withType(ErrorType)
         case TryDynamicCallType =>
@@ -585,23 +598,20 @@ trait Applications extends Compatibility { self: Typer with Dynamic =>
             case _ =>
               handleUnexpectedFunType(tree, fun1)
           }
-        case _ => methPart(fun1).tpe match {
-          case funRef: TermRef =>
-            tryEither { implicit ctx =>
-              val app =
-                if (proto.argsAreTyped) new ApplyToTyped(tree, fun1, funRef, proto.typedArgs, pt)
-                else new ApplyToUntyped(tree, fun1, funRef, proto, pt)(argCtx(tree))
-              val result = adaptApplyResult(funRef, app.result)
-              convertNewGenericArray(ConstFold(result))
-            } { (failedVal, failedState) =>
+        case _ =>
+          tryEither {
+            implicit ctx => simpleApply(fun1, proto)
+          } {
+            (failedVal, failedState) =>
               def fail = { failedState.commit(); failedVal }
+              // Try once with original prototype and once (if different) with tupled one.
+              // The reason we need to try both is that the decision whether to use tupled
+              // or not was already taken but might have to be revised when an implicit
+              // is inserted on the qualifier.
               tryWithImplicitOnQualifier(fun1, originalProto).getOrElse(
                 if (proto eq originalProto) fail
                 else tryWithImplicitOnQualifier(fun1, proto).getOrElse(fail))
-             }
-          case _ =>
-            handleUnexpectedFunType(tree, fun1)
-        }
+          }
       }
     }
 
@@ -613,7 +623,7 @@ trait Applications extends Compatibility { self: Typer with Dynamic =>
      *
      *     { val xs = es; e' = e' + args }
      */
-     def typedOpAssign: Tree = track("typedOpAssign") {
+    def typedOpAssign: Tree = track("typedOpAssign") {
       val Apply(Select(lhs, name), rhss) = tree
       val lhs1 = typedExpr(lhs)
       val liftedDefs = new mutable.ListBuffer[Tree]
@@ -765,14 +775,13 @@ trait Applications extends Compatibility { self: Typer with Dynamic =>
      *  The generalizations of a type T are the smallest set G such that
      *
      *   - T is in G
-     *   - If a typeref R in G represents a trait, R's superclass is in G.
+     *   - If a typeref R in G represents a class or trait, R's superclass is in G.
      *   - If a type proxy P is not a reference to a class, P's supertype is in G
      */
     def isSubTypeOfParent(subtp: Type, tp: Type)(implicit ctx: Context): Boolean =
       if (subtp <:< tp) true
       else tp match {
-        case tp: TypeRef if tp.symbol.isClass =>
-          tp.symbol.is(Trait) && isSubTypeOfParent(subtp, tp.firstParent)
+        case tp: TypeRef if tp.symbol.isClass => isSubTypeOfParent(subtp, tp.firstParent)
         case tp: TypeProxy => isSubTypeOfParent(subtp, tp.superType)
         case _ => false
       }
