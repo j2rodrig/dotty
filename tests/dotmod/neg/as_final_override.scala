@@ -10,25 +10,10 @@ object as_final_override {
     }
   }
   class D extends C {
-    override def m(): Unit = {  // error
-      super.m()
-    }
+    override def m(): Unit = ???  // error
   }
   class E extends C {
-    @asFinal(x) override def m(): Unit = {
-      super.m()
-    }
-  }
-
-  class C1 {
-    def m(): Unit = {
-      x = ???
-    }
-  }
-  class D1 extends C1 {
-    @asFinal(x) override def m(): Unit = {
-      super.m()  // error
-    }
+    @asFinal(x) override def m(): Unit = ???
   }
 
   class O {

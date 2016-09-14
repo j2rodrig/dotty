@@ -5,47 +5,43 @@ object as_type_override {
   var x: AnyRef = ???
 
   class C {
-    @asType[Any](x) def m(): Unit = {
-      m()
-    }
+    @asType[AnyRef @readonly](x) def m(): Unit = ???
   }
   class D extends C {
-    override def m(): Unit = {  // error
-      super.m()
-    }
+    override def m(): Unit = ???  // error
   }
   class E extends C {
-    @asType[Any](x) override def m(): Unit = {
-      super.m()
-    }
+    @asType[AnyRef @mutabilityOfRef(this)](x) override def m(): Unit = ???  // error
+  }
+  class F extends C {
+    @asType[AnyRef @readonly](x) override def m(): Unit = ???
   }
 
   class C1 {
-    def m(): Unit = {
-      x = ???
-    }
+    def m(): Unit = ???
   }
   class D1 extends C1 {
-    @asType[Any](x) override def m(): Unit = {
-      super.m()  // error
-    }
+    @asType[AnyRef @mutabilityOfRef(this)](x) override def m(): Unit = ???
+  }
+  class E1 extends C1 {
+    @asType[AnyRef @readonly](x) override def m(): Unit = ???
   }
 
   class O {
     var y: AnyRef = ???
     class C {
-      @asType[Any](y) def m(): Unit = {}
+      @asType[AnyRef @readonly](y) def m(): Unit = ???
     }
   }
   val o: O = ???
   class P {
 
     class D extends o.C {
-      override def m(): Unit = {} // error
+      override def m(): Unit = ???  // error
     }
 
     class E extends o.C {
-      @asType[Any](o.y) override def m(): Unit = {}
+      @asType[AnyRef @readonly](o.y) override def m(): Unit = ???
     }
   }
 }

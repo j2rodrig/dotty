@@ -54,7 +54,7 @@ object DotMod {
             // We look up the typer/context of the completer to do the annotation typing.
             // See <DISCUSSION:ANNOTATION-TYPER-CONTEXT> in notes.
             var typeInContext = inf.originalOuterCtx.outer  // We also type in the next-outer context. See <DISCUSSION: CONTEXT-FOR-ANNOT-TYPING> in notes.
-            Annotation(typeInContext.typer.typedAnnotation(annotTree)(typeInContext))
+            Annotation(typeInContext.typer.typedAnnotation(annotTree)(typeInContext))  // create a typed annotation
           }
       case _: LazyType =>
         // See <DISCUSSION:LAZY-NON-COMPLETER> in notes.
@@ -80,8 +80,13 @@ object DotMod {
         inf.isParameterless
     }
 
-    def isPure(implicit ctx: Context): Boolean =
-      annotationsWithoutCompleting(pureAnnotationNames).exists(_.symbol eq defn.PureAnnot)
+    def isPure(implicit ctx: Context): Boolean = {
+      if (sym.isConstructor)
+        sym.owner.isPure
+      else
+        assumePure(sym) ||
+        annotationsWithoutCompleting(pureAnnotationNames).exists(_.symbol eq defn.PureAnnot)
+    }
 
     /** Finds the innermost symbol that is annotated @pure in this symbol's ownership chain.
       * NoSymbol if no @pure symbol exists in the ownership chain. */
@@ -95,7 +100,7 @@ object DotMod {
       if (sym eq NoSymbol) false
       else if ((sym is PackageClass) && !(boundary is PackageClass)) false
       else if (sym eq boundary) true
-      else if (sym.derivesFrom(boundary)) true
+      else if (sym.isPure && sym.derivesFrom(boundary)) true
       else sym.owner.isInside(boundary)
     }
 
@@ -129,6 +134,14 @@ object DotMod {
         assert(false, s"Expected an annotation-class application tree, got $tree")
         typeName("<none>")
     }
+
+    // HACK!!! If the tree has a type, returns that tree. Otherwise, returns a version of the tree that is typed in the given context.
+    def forcedTyped(implicit ctx: Context): tpd.Tree = {
+      if (tree.hasType)
+        tree.asInstanceOf[tpd.Tree]
+      else
+        ctx.typer.typed(tree)
+    }
   }
 
 
@@ -136,11 +149,10 @@ object DotMod {
 
   val MutabilityMemberName = typeName("__MUTABILITY__")
   val PrefixMutabilityName = typeName("__PREFIX_MUTABILITY__")
-  val OuterMutabilityName  = typeName("__OUTER_MUTABILITY__")
   def ReadonlyType(implicit ctx: Context) = TypeAlias(defn.ReadonlyAnnotType, 1)  // info for a readonly mutability member
   def MutableType(implicit ctx: Context) = TypeAlias(defn.MutableAnnotType, 1)    // info for a mutable mutability member
 
-  lazy val defaultPolyreadArrayMethods: List[TermName] = List (
+  lazy val defaultPureArrayMethods: List[TermName] = List (
     "length", "apply", "clone"
   ).map(termName).map(NameTransformer.encode)
 
@@ -153,6 +165,8 @@ object DotMod {
   val finalAnnotationNames = List("asFinal").map(typeName)
   val typeviewAnnotationNames = List("asType").map(typeName)
   val pureAnnotationNames = List("pure").map(typeName)
+
+  val allCustomAnnotations = receiverAnnotationNames ::: finalAnnotationNames ::: typeviewAnnotationNames ::: pureAnnotationNames
 
 
   /******************
@@ -517,12 +531,22 @@ object DotMod {
     else
       TypeRef(prefix, name)
 
-  def ignoreReceiverMutabilityWhenCalled(sym: Symbol)(implicit ctx: Context): Boolean = {
-    val ownerClassIfExists = sym.effectiveOwner
-    (ownerClassIfExists eq defn.AnyClass) ||
-    (ownerClassIfExists eq defn.AnyValClass) ||
-    (ownerClassIfExists eq defn.ObjectClass) ||
-    ((ownerClassIfExists eq defn.ArrayClass) && defaultPolyreadArrayMethods.contains(sym.name))
+  def assumePure(sym: Symbol)(implicit ctx: Context): Boolean = {
+    val ownerClassIfExists = if (sym.isClass) sym else sym.effectiveOwner
+
+    (
+      // Assume everything in Any/AnyVal/Object is @pure (AnyRef is an alias of Object)
+      (ownerClassIfExists eq defn.AnyClass) ||
+      (ownerClassIfExists eq defn.AnyValClass) ||
+      (ownerClassIfExists eq defn.ObjectClass) ||
+
+      // Arrays: only certain methods are @pure
+      ((ownerClassIfExists eq defn.ArrayClass) && defaultPureArrayMethods.contains(sym.name)) ||
+
+      // Assume everything in the Predef module is @pure
+      (ownerClassIfExists eq defn.DottyPredefModule.moduleClass) ||
+      (ownerClassIfExists eq defn.ScalaPredefModule.moduleClass)
+    )
   }
 
   /**
@@ -545,6 +569,7 @@ object DotMod {
       // If we did not do this, then the mutability may not match the current this-mutability.
       m match {
         case TypeRef(thisTpe, MutabilityMemberName) if thisTpe.isInstanceOf[ThisType] =>
+          //System.err.println(em"subst-mut for: $thisTpe")
           // Also, we don't just replace the ThisType of the nearest enclosing class. We replace any ThisType.
           // We want to replace the this-mutability only if it is different than what the this-mutability should
           // be inside the current context. But no special case is actually needed here -- if the mutability
@@ -566,6 +591,51 @@ object DotMod {
           tp  // mutability member is not a ThisType. No substitution necessary. (Unless we allow more complicated mutability types that contain this-types!)
       }
   }
+
+  /** Used to patch an issue where the mutability we expected actually refers to a superclass of the mutability we got.
+    * See {{{<DISCUSSION:RECEIVER-MUTABILITY-SAME-OBJECT>}}} in the notes. */
+  def substThisMutability2(here: Type, there: Type)(implicit ctx: Context): Type = there match {
+    case TypeRef(thereThis, MutabilityMemberName) if thereThis.isInstanceOf[ThisType] => here
+    case _ => there
+  }
+
+  /*here match {
+    case TypeRef(hereThis, MutabilityMemberName) => substThisMutability2(hereThis, there)
+    case here: SuperType => substThisMutability2(here.thistpe, there)
+    case here: ThisType =>
+      def substThereCls(there1: Type): Type = there1 match {
+        case TypeRef(thereThis, MutabilityMemberName) => substThereCls(thereThis)
+        case there1: SuperType => substThereCls(there1)
+        case there1: ThisType =>
+          val there2 = there.substThis(there1.cls, here)
+          System.err.println(em"Translated $there to $there2")
+          there2
+        case _ =>
+          there1
+      }
+      substThereCls(there)
+    case _ => there
+  }*/
+
+  /*
+  expected.dealias match {
+    case TypeRef(thisTpe, MutabilityMemberName) =>
+      substThisMutability2(got, thisTpe)
+    case expected: ThisType =>
+      got match {
+        case TypeRef(thisTpe, MutabilityMemberName) =>
+          substThisMutability2(thisTpe, expected)
+        case _ =>
+          if (got derivesFrom expected.cls)
+            TypeRef(expected, MutabilityMemberName)
+          else
+            TypeRef(got, MutabilityMemberName)
+      }
+    case expected: SuperType => substThisMutability2(got, expected.thistpe)
+    case _ =>
+      got
+  }
+  */
 
   def viewpointAdapt(prefix: Type, target: Type, origSym: Symbol)(implicit ctx: Context): Type = {
     val preMut = mutabilityOf(prefix, origSym)
@@ -658,6 +728,10 @@ object DotMod {
     *  For example, in the sjs_ScopedVar test, there is a private field "value" whose denot.info
     *  is a TypeRef, but whose denot.sym.info is an ExprType, which is a non-value type (that I do not expect here). */
   def findViewedType(sym: Symbol, fromSym: Symbol, origType: Type)(implicit ctx: Context): Type = {
+    // It is possible for sym to be a class (and origType to be a ClassInfo) if "this" is used as an argument to @asType.
+    // A ClassInfo is not a ValueType, but we don't want to trigger an assertion (below).
+    if (sym.isClass) return NoType
+
     //assert(sym.isTerm && !sym.info.isInstanceOf[MethodicType], em"Expected a value term in findViewedType")
     assert(origType.isInstanceOf[ValueType], em"Expected a value term in findViewedType")
 
@@ -668,7 +742,7 @@ object DotMod {
     // Look through annotations on fromSym.
     // If there is an @asType[T](ref) present, and the symbol of ref is the given symbol, return T.
     fromSym.annotationsWithoutCompleting(typeviewAnnotationNames).foreach { annot =>
-      if ((annot.symbol eq defn.AsTypeAnnot) && (annot.arguments.head.symbol eq sym))
+      if ((annot.symbol eq defn.AsTypeAnnot) && (annot.arguments.head.forcedTyped.symbol eq sym))
         return getLastTypeArgOf(annot.tree.tpe)
     }
 
@@ -792,13 +866,63 @@ object DotMod {
       // pry open mutabilities of the form C.this.__MUTABILITY__ to see what those mutabilities actually
       // evaluate to in the comparison context. There would be a cost in type comparer complexity,
       // and I would have to make sure to open up these mutabilities by only one extra level to avoid infinite recursion.
-      val declared2 = if (prefix ne NoPrefix) declaredMut.substThis(tree.symbol.effectiveOwner.asClass, prefix) else declaredMut
+      // Issue: see <DISCUSSION:RECEIVER-MUTABILITY-SAME-OBJECT> in notes.
+      // Trying to fix it with substThisMutability instead of substThis.
+      //val declared2 = if (prefix ne NoPrefix) declaredMut.substThis(tree.symbol.effectiveOwner.asClass, prefix) else declaredMut
+      val declared2 = substThisMutability2(preMut, declaredMut)
       if (!(preMut <:< declared2)) {
         errorTree(tree, em"Incompatible receiver mutability in call to method ${tree.symbol.name}:\n" +
-          em"  Expected: $declaredMut\n" +
+          em"  Expected: $declared2\n" +
           em"  Got: $preMut")
+      //val preMut2 = substThisMutability2(preMut, declaredMut)
+      //if (!(preMut2 <:< declaredMut)) {
+      //  errorTree(tree, em"Incompatible receiver mutability in call to method ${tree.symbol.name}:\n" +
+      //    em"  Expected: $declaredMut\n" +
+      //    em"  Got: $preMut" + (if (preMut ne preMut2) em" (after this-substitution: $preMut2)" else ""))
       } else
         tree
+    }
+
+    def checkedPurity(prefix: Type, tree: tpd.Tree)(implicit ctx: Context): tpd.Tree = {
+      tree.denot.alternatives.foreach { denot =>
+        val selectedSym = denot.symbol
+
+        // Check that all @asFinal annotations in effect in the current context are also in effect on the called method.
+        allFinals(ctx.owner).foreach { arg =>
+          if (!isViewedAsFinal(arg.symbol, selectedSym))
+            return errorTree(tree, em"Cannot select $selectedSym from here: $arg must be declared @asFinal")
+        }
+
+        // Check that all type views in the current context are compatible with all type views at the called method.
+        allTypeViews(ctx.owner).foreach { case (arg, tpe) =>
+          val argDenot = arg.forcedTyped.denot
+          val tpe2 = findViewedType(argDenot.symbol, selectedSym, argDenot.info) match {
+            case NoType => argDenot.info
+            case tp => tp
+          }
+          if (!(tpe <:< tpe2))
+            return errorTree(tree, em"Cannot select $selectedSym from here: $arg is $tpe here, which is not compatible with expected type $tpe2.")
+        }
+
+        // Check that the called method conforms to the purity of the caller (i.e., the purity of the current context owner).
+        // Conformance is present if either of the two following conditions holds:
+        // 1. The called method is @pure.
+        // 2. The called method is inside the purity boundary of the caller.
+        //System.err.println(em"Checking @pure on call to $selectedSym from ${ctx.owner} with purity boundary ${ctx.owner.purityBoundary}.")
+        //if (!(selectedSym.isPure || selectedSym.isContainedInPurityBoundaryOf(ctx.owner))) {
+        //  val tmp1 = selectedSym.isPure
+        //  val tmp2 = selectedSym.isContainedInPurityBoundaryOf(ctx.owner)
+        //  tmp1 && tmp2
+        //}
+        if (!(selectedSym.isPure || selectedSym.isContainedInPurityBoundaryOf(ctx.owner))) {
+          if (assumePure(ctx.owner.purityBoundary))
+            ctx.warning(em"$selectedSym should be annotated @pure due to the assumed purity of ${ctx.owner.purityBoundary}", tree.pos)
+          else
+            return errorTree(tree, em"Cannot select $selectedSym from here: It must be @pure due to the @pure on ${ctx.owner.purityBoundary}.")
+        }
+      }
+
+      tree
     }
 
     /**
@@ -806,14 +930,16 @@ object DotMod {
       *  - Receiver compatibility on method selections.
       */
     def preChecks(tree: tpd.Tree)(implicit ctx: Context): tpd.Tree = tree match {
-      case tree: tpd.RefTree if (tree.symbol is Method) && !tree.symbol.isStatic && !ignoreReceiverMutabilityWhenCalled(tree.symbol) =>
+      case tree: tpd.RefTree if (tree.symbol is Method) && !assumePure(tree.symbol) =>
         tree.tpe match {
           case TermRef(prefix, underlying) =>
-            checkedReceiver(prefix, tree)
+            val tree1 = checkedReceiver(prefix, tree)
+            checkedPurity(prefix, tree1)
           case _ =>
             System.err.println(em"WEIRD WARNING: Selection of ${tree.symbol} does not have a TermRef type. Type is: ${tree.tpe}")
             tree
         }
+
       case _ => tree
     }
 
@@ -830,11 +956,12 @@ object DotMod {
         // Basically, we can use @asType to force a more restrictive (greater/upcast) static type on a symbol,
         // but we cannot use @asType to force arbitrary downcasts.
         viewedTypeList(tree.symbol).foreach { case (arg, typeInside) =>
-          arg.tpe match {
+          val typedArg = arg.forcedTyped  // HACK!!! I don't know why I don't always have a typed tree here. See <DISCUSSION: ANNOTATION TYPING ISSUE related to @asType/@asFinal>.
+          typedArg.tpe match {
             case _: NamedType =>
-              val typeOutside = viewedTypeOf(arg.symbol, arg.denot.info)(ctx)
+              val typeOutside = viewedTypeOf(typedArg.symbol, typedArg.denot.info)(ctx)
               if (!(typeOutside <:< typeInside))
-                return errorTree(arg, em"Illegal type view for ${arg.symbol}:\n" +
+                return errorTree(arg, em"Illegal type view for ${typedArg.symbol}:\n" +
                   em" required at least: $typeOutside\n" +
                   em" got: $typeInside")
             case _ =>
@@ -886,7 +1013,31 @@ object DotMod {
     override def completeAnnotations(mdef: untpd.MemberDef, sym: Symbol)(implicit ctx: Context): Unit = {
       // Complete annotations in the outer context (rather than current).
       // See <DISCUSSION:LAZY-NON-COMPLETER> and <DISCUSSION:SYM-ANNOT-COMPLETER> in notes.
+      // Update: We're completing _some_ annotations in the outer context, and also forcing typing of annotation arguments.
+      // We re-type the needed annotations here.
+      // See <DISCUSSION: ANNOTATION TYPING ISSUE related to @asType/@asFinal> in notes.
       super.completeAnnotations(mdef, sym)(ctx.outer)
+      /*
+      sym.transformAnnotations { annot =>
+        if (allCustomAnnotations contains annot.symbol.name) {
+          var typeInContext = ctx.outer
+          Annotation(typedAnnotation(annot.tree)(typeInContext))  // create a typed annotation
+        } else
+          annot
+      }
+      */
+      /*
+      sym.annotations.foreach { annot =>
+        annot.tree(ctx.outer)
+      }
+      // necessary in order to mark the typed ahead annotations as definitely typed:
+      untpd.modsDeco(mdef).mods.annotations.foreach { annot =>
+        typedAnnotation(annot)(ctx.outer)
+      }
+      */
+      //sym.transformAnnotations { annot =>
+      //  annot.derivedAnnotation(typedAnnotation(annot.tree(ctx.outer))(ctx.outer))
+      //}
     }
 
     override def adaptInterpolated(tree0: tpd.Tree, pt: Type, original: untpd.Tree)(implicit ctx: Context): tpd.Tree = {
@@ -959,10 +1110,13 @@ object DotMod {
         if ((overridden is Method) && !(overriding is Method))
           ridingMut = polymorphicMutability(overriding.effectiveOwner)
 
-        if (!(riddenMut <:< ridingMut))
-          ctx.error(em"Cannot override $overridden due to receiver mutability.\n" +
-            em"   Overridden mutability: $riddenMut\n" +
-            em"   Overriding mutability: $ridingMut", overriding.pos)
+        if (!(riddenMut <:< ridingMut)) {
+          // If the receiver incompatibility is likely due to an assumed @pure annotation, issue a warning later instead of an error here
+          if (overriding.isPure || !assumePure(overridden))
+            ctx.error(em"Cannot override $overridden due to receiver mutability.\n" +
+              em"   Overridden mutability: $riddenMut\n" +
+              em"   Overriding mutability: $ridingMut", overriding.pos)
+        }
       }
 
       def checkFinals(overriding: Symbol, overridden: Symbol)(implicit ctx: Context): Unit = {
@@ -976,8 +1130,9 @@ object DotMod {
       def checkTypeViews(overriding: Symbol, overridden: Symbol)(implicit ctx: Context): Unit = {
         // If the overridden method declares a type view, then the viewed type must be compatible with the viewed type in the overriding method.
         viewedTypeList(overridden).foreach { case (arg, tpe) =>
-          val tpe2 = findViewedType(arg.symbol, overriding, arg.denot.info) match {
-            case NoType => arg.denot.info
+          val argDenot = arg.forcedTyped.denot
+          val tpe2 = findViewedType(argDenot.symbol, overriding, argDenot.info) match {
+            case NoType => argDenot.info
             case tp => tp
           }
           if (!(tpe <:< tpe2))
@@ -990,37 +1145,57 @@ object DotMod {
         // Conformance is present if either of the two following conditions holds:
         // 1. The overriding method is @pure.
         // 2. The overriding method is inside the purity boundary of the overridden method.
-        if (!(overriding.isPure || overriding.isContainedInPurityBoundaryOf(overridden)))
-          ctx.error(em"Cannot override with $overriding (in ${overriding.lexicallyEnclosingClass}): " +
-            em"It must be @pure due to the @pure on ${overridden.purityBoundary}.")
+        if (!(overriding.isPure || overriding.isContainedInPurityBoundaryOf(overridden))) {
+          // If the override error is due to a purity assumption, issue a warning instead of an error.
+          if (assumePure(overridden.purityBoundary))
+            ctx.warning(em"$overriding should have a @pure annotation (in ${overriding.lexicallyEnclosingClass}) " +
+              em"due to the assumed purity of ${overridden.purityBoundary}.", overriding.pos)
+          else
+            ctx.error(em"Cannot override with $overriding (in ${overriding.lexicallyEnclosingClass}): " +
+              em"It must have a purity level compatible with @pure ${overridden.purityBoundary}.", overriding.pos)
+        }
       }
 
+      /*
       override def transformApply(tree: tpd.Apply)(implicit ctx: Context, info: TransformerInfo) = {
-        // Check that all @asFinal annotations in effect in the current context are also in effect on the called method.
-        allFinals(ctx.owner).foreach { arg =>
-          if (!isViewedAsFinal(arg.symbol, tree.fun.symbol))
-            ctx.error(em"Cannot call ${tree.fun.symbol}: $arg must be declared @asFinal", tree.pos)
-        }
-
-        // Check that all type views in the current context are compatible with all type views at the called method.
-        allTypeViews(ctx.owner).foreach { case (arg, tpe) =>
-          val tpe2 = findViewedType(arg.symbol, tree.fun.symbol, arg.denot.info) match {
-            case NoType => arg.denot.info
-            case tp => tp
-          }
-          if (!(tpe <:< tpe2))
-            ctx.error(em"Cannot call ${tree.fun.symbol}: $arg is $tpe2 here, but must be at least $tpe", tree.pos)
-        }
-
-        // Check that the called method conforms to the purity of the caller (i.e., the purity of the current context owner).
-        // Conformance is present if either of the two following conditions holds:
-        // 1. The called method is @pure.
-        // 2. The called method is inside the purity boundary of the caller.
-        if (!(tree.fun.symbol.isPure || tree.fun.symbol.isContainedInPurityBoundaryOf(ctx.owner)))
-          ctx.error(em"Cannot call ${tree.fun.symbol}: It must be @pure due to the @pure on ${ctx.owner.purityBoundary}.")
-
+        //System.err.println(s"$tree")
         super.transformApply(tree)
       }
+
+      override def transformSelect(tree: tpd.Select)(implicit ctx: Context, info: TransformerInfo) = {
+        tree.denot.alternatives.foreach { denot =>
+          val selectedSym = denot.symbol //tree.fun.symbol (if tree is Apply)
+          if (selectedSym is Method) {
+
+            // Check that all @asFinal annotations in effect in the current context are also in effect on the called method.
+            allFinals(ctx.owner).foreach { arg =>
+              if (!isViewedAsFinal(arg.symbol, selectedSym))
+                ctx.error(em"Cannot select $selectedSym from here: $arg must be declared @asFinal", tree.pos)
+            }
+
+            // Check that all type views in the current context are compatible with all type views at the called method.
+            allTypeViews(ctx.owner).foreach { case (arg, tpe) =>
+              val tpe2 = findViewedType(arg.symbol, selectedSym, arg.denot.info) match {
+                case NoType => arg.denot.info
+                case tp => tp
+              }
+              if (!(tpe <:< tpe2))
+                ctx.error(em"Cannot select $selectedSym from here: $arg is $tpe2 here, but must be at least $tpe", tree.pos)
+            }
+
+            // Check that the called method conforms to the purity of the caller (i.e., the purity of the current context owner).
+            // Conformance is present if either of the two following conditions holds:
+            // 1. The called method is @pure.
+            // 2. The called method is inside the purity boundary of the caller.
+            //System.err.println(em"Checking @pure on call to $selectedSym from ${ctx.owner} with purity boundary ${ctx.owner.purityBoundary}.")
+            if (!(selectedSym.isPure || selectedSym.isContainedInPurityBoundaryOf(ctx.owner)))
+              ctx.error(em"Cannot select $selectedSym from here: It must be @pure due to the @pure on ${ctx.owner.purityBoundary}.", tree.pos)
+          }
+        }
+
+        super.transformSelect(tree)
+      }
+      */
 
       override def transformTemplate(tree: tpd.Template)(implicit ctx: Context, info: TransformerInfo) = {
         val cls = ctx.owner

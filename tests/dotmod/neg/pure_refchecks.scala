@@ -2,6 +2,7 @@ import dotty._
 
 object pure_refchecks {
 
+  // Override checking
   class C {
     def m() = ???
     @pure def n() = ???
@@ -11,12 +12,8 @@ object pure_refchecks {
     override def n() = ???  // error
   }
   class E extends C {
-    @pure override def m() = {
-      super.m()   // error
-    }
-    @pure override def n() = {
-      super.n()
-    }
+    @pure override def m() = ???
+    @pure override def n() = ???
   }
 
 
@@ -24,9 +21,7 @@ object pure_refchecks {
     def m() = ???
   }
   @pure class D1 extends C1 {
-    override def m() = {
-      super.m()
-    }
+    override def m() = ???
   }
   class E1 extends C1 {
     override def m() = ???  // error

@@ -14,6 +14,7 @@ object as_type {
 
   @asType[C](a)   // error
   def n() = {
+    m()
   }
 
   @asType[Any](this)  // error
@@ -23,7 +24,40 @@ object as_type {
   @asType[Any](a) def o() = {
     @asType[AnyRef](a)  // error
     def o1() = {
+      m()
     }
+  }
+
+  def o3() = {
+    var x: C = ???
+    @asType[C @mutable](x) def p1(): Unit = {
+      p1()
+      p2()
+      p3()
+      p4()
+    }
+    @asType[C @readonly](x) def p2(): Unit = {
+      p1()  // error
+      p2()
+      p3()
+      p4()  // error
+    }
+    @pure def p3(): Unit = {
+      p1()  // error
+      p2()  // error
+      p3()
+      p4()  // error
+    }
+    def p4(): Unit = {
+      p1()
+      p2()
+      p3()
+      p4()
+    }
+    p1()
+    p2()
+    p3()
+    p4()
   }
 
 }

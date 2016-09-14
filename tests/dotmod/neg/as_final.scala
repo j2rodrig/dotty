@@ -53,4 +53,13 @@ object as_final {
       }
     }
   }
+
+  class C2 {
+    def m(): Unit = ???
+  }
+  class D2 extends C2 {
+    @asFinal(a) override def m(): Unit = {
+      super.m()  // error
+    }
+  }
 }

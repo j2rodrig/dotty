@@ -2004,3 +2004,74 @@ Here's another example:
 
 all_dotmod_neg test and dotmod_failed_tests are known-passing.
 New test dotmod_pure_basic is working, pure_refchecks is not quite working.
+
+<DISCUSSION:RECEIVER-MUTABILITY-SAME-OBJECT>
+./tests/dotmod/neg/pure_basic.scala:64: error: Incompatible receiver mutability in call to method n:
+  Expected: C1.this.__MUTABILITY__
+  Got: D1.this.__MUTABILITY__
+      super.n()
+            ^
+C1.this and D1.this really ought to denote the same object here.
+What's happening in the receiver mutability checking code?
+Apparently solved: by doing a simple substitution of receiver mutability. The substitution used is different than
+  the substitution used in viewpoint adaptation... perhaps worthy of further investigation (to find similarities/differences between the different this-substitutions)?
+
+
+<DISCUSSION: ANNOTATION TYPING ISSUE related to @asType/@asFinal>.
+  Error in  dotmod_as_type test:
+	dotty.tools.dotc.ast.Trees$UnAssignedTypeException: type of Ident(a) is not assigned
+		at dotty.tools.dotc.ast.Trees$Tree.tpe(Trees.scala:137)
+		at dotty.tools.dotc.DotMod$DotModTyper$$anonfun$customChecks$1.apply(DotMod.scala:946)
+		at dotty.tools.dotc.DotMod$DotModTyper$$anonfun$customChecks$1.apply(DotMod.scala:945)
+		at scala.collection.immutable.List.foreach(List.scala:381)
+		at dotty.tools.dotc.DotMod$DotModTyper.customChecks(DotMod.scala:945)
+		...
+The Ident(a) tree is an @asType annotation argument.
+What's strange about this error is that we do in fact have a tpd.Tree (not an untpd.Tree),
+and yet the tree has null for its myTpe field.
+It's not coming from my early-annotation-typing code - the early-typed annotations always type the arguments.
+It's actually coming from the annotations I get from calling SymDenotations#annotations.
+Why aren't the annotations I get here fully typed?
+The only reason I can think of for this behaviour is to allow extension-writers the option of _not_ typing annotation arguments...
+This behaviour causes me a problem, however - I want the annotation arguments not only typed, but typed in a particular context
+  (specifically, the context enclosing the method context). Typing annotation arguments lazily won't work,
+  particularly since we lose the original typing context (which is in the Completer) when the method symbol is completed.
+Perhaps the solution here is to override the Typer's default annotation typing, and force annotation argument to be completed there.
+  I would only want to force argument typing on particular annotations, namely @asFinal and @asType.
+  New information: As it turns out, I've already overridden Typer#completeAnnotations. I'll force argument typing there.
+  Update: I do not know of a way to directly set the type of an annotation tree from here.
+  Solution: Use derivedAnnotation to generate new annotations with newly-typed trees inside the early-annotation-typing code.
+  But, we still do not have access to the right context. I suppose it makes sense that we wouldn't necessarily have a context
+  where we don't have a Tree (which would happen where the annotation is loaded from a classfile).
+  A possibility: Use SymDenotations#transformAnnotations (setting annotations directly is not allowed outside of dotc.core).
+Still doesn't work. Error message:
+	java.lang.AssertionError: assertion failed
+		at scala.Predef$.assert(Predef.scala:151)
+		at dotty.tools.dotc.typer.Typer$$anonfun$typedTypeTree$1.apply(Typer.scala:920)
+		...
+		at dotty.tools.dotc.core.SymDenotations$SymDenotation.transformAnnotations(SymDenotations.scala:270)
+		at dotty.tools.dotc.DotMod$DotModTyper.completeAnnotations(DotMod.scala:1023)
+		at dotty.tools.dotc.typer.Typer$$anonfun$typedDefDef$1.apply(Typer.scala:1100)
+		...
+The failing assertion is:
+	assert(isFullyDefined(pt, ForceDegree.none))
+in Typer#typedTypeTree, which is similar to a problem I saw above, which is the result of trying to type
+the annotation's type argument. I only want to type the term argument so that I know what symbol
+the argument is referring to.
+
+One option: Find the name of the argument, and do the name lookup myself...
+But this would require access to the original context also.
+
+Strangely, this error does not occur on all @asType annotations.
+
+HACK in place: When examining an annotation argument that doesn't have a type, force a temporary typing in
+the current context. This _should_ be adequate for our purposes, under the following assumption:
+We examine annotations during selection operations only. If the selected symbol is visible from the
+current position, valid arguments of annotations on that symbol should also be typable/visible
+(unless the argument refers to a private symbol -- but we'll cross that bridge later if we need to).
+
+The only other thing I can think of is to dig into annotation trees during Typer#completeAnnotations,
+identify arguments that should be typed, rebuild those annotation trees to contain typed (rather than
+untyped) arguments, use Annotation#derivedAnnnotation to build new annotations, and use
+SymDenotations#transformAnnotations to make the symbol's annotation list reflect the new annotations.
+(Of course, I don't know exactly what would happen here if the annotations are loaded from a classfile.)

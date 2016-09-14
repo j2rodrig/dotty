@@ -12,7 +12,7 @@ object receiver {
   val c: C @readonly = ???
   c.m()   // error
   c.mm()  // error
-  c.mp()  // ok
+  c.mp()  // ok - receiver is @polyread
   c.mr()  // ok
 
 
@@ -49,10 +49,10 @@ object receiver {
     }
     @readonly def mr(): Unit = {
       mm()  // error
-      mp()  // error
+      mp()  // ok - receiver is @polyread
       mr()
       this.mm()  // error
-      this.mp()  // error
+      this.mp()  // ok - receiver is @polyread
       this.mr()
     }
   }
