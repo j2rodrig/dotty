@@ -2081,3 +2081,303 @@ ERRORS in new tests:
 	./tests/pos/t7426.scala:3: error: anonymous class Object{...} is compiled twice
 	@foo(new AnyRef { }) trait A
 	         ^
+This is a low-priority bug. It appears to have something to do with the early annotation typing, and
+fixing it would probably require figuring out how to type all annotation arguments exactly once.
+I am temporarily moving this test back to the pending folder.
+
+
+<STDLIB-ANNOTATION-EXPERIMENT>
+Annotating List1:
+Annotation ordering:
+- @pure on IntList, List, Cons, Nil.
+  The purity system feels a little inflexible.
+
+Annotating Iter2:
+When adding @pure to ArrayIterator#foreach, i.e.:
+    @pure override def foreach(f: A => Unit): Unit =
+      for (i <- 0 until len) f(elem(i))
+I get the following error:
+	./tests/dotmod/collections/Iter2.scala:180: error: value until is not a member of Int(0)
+	      for (i <- 0 until len) f(elem(i))
+	                ^
+Perhaps there is a problem with implicit resolution?
+
+Expanding to:
+    @pure override def foreach(f: A => Unit): Unit = {
+      var i = 0
+      while (i < len) {
+        f(elem(i))
+        i += 1
+      }
+    }
+Gives the error:
+	./tests/dotmod/collections/Iter2.scala:182: error: value f does not take parameters
+	        f(elem(i))
+	        ^
+The type of f at this position is expected to be a MethodType.
+But we are getting: TypeRef(ThisType(TypeRef(ThisType(TypeRef(NoPrefix,immutable)),Iter2$)),IterableTransforms$)
+  where IterableTransforms is an implicit class.
+It seems that Dotty assumes that the method type here to be either a MethodType or an ExprType,
+  so it issues a "does not take parameters" if the type is not a MethodType.
+So why are we getting a TypeRef here?
+Up the stack trace, we have a call to Applications#isAsGood with both arguments being:
+	TermRef(ThisType(TypeRef(ThisType(TypeRef(NoPrefix,immutable)),Iter2$)),IterableTransforms)
+Up further, there is a call to adaptInterpolated with tree Ident(IterableTransforms) that has the foregoing type.
+Up further. there is a typedExpr on this tree.
+Never mind: this particular stack trace is inside a test application, so it is probably unrelated to the error displayed.
+
+Let's look for the "does not take parameters" error issued from the type assigner.
+Info: It does not look like the error is triggered from the type assigner. So where is it coming from?
+Info: It looks like I can breakpoint it in TypedApply#fail.
+Info: Nope, not there either.
+
+New information:
+There is actually a hidden error before the reported error:
+	...
+	*** ERROR: Cannot select method apply from here: It must be @pure due to the @pure on method foreach.
+	./tests/dotmod/collections/Iter2.scala:182
+	*** ERROR: value f does not take parameters
+	./tests/dotmod/collections/Iter2.scala:182
+	...
+It looks like the context mode Mode.Printing was retracted at the time the purity error occurred.
+Probable hypothesis: The typer tried to synthetically generate a call to apply.
+  When that attempt failed, the typer reported that it could not call f without parameters.
+
+SOLUTION: This is a defaulting problem.
+Setting all members of Function, AbstractFunction, Tuple, and Product to being assumed @pure.
+What consequences does this have for correctness? After all, it is possible to have an
+impure function passed as an argument to a pure method. We can account for purity from the
+point of view of the method's caller. The way I've defined @pure is the following:
+@pure means that the method cannot interpret any reference it pulls from its environment
+as either mutable or assignable. References obtained through parameters are not affected
+by @pure, so it seems fairly coherent that references obtained through functions that are passed
+as parameters may be allowed to be mutable and assignable. Conveniently, I allow assumed-pure
+methods (which now include FunctionN#apply) to be overridden by impure methods (merely issuing
+a warning rather than an error). This works for limited cases, but it seems hacky.
+
+I wonder if there is somehow a way to usefully encode @asFinal/@asType information in reference types?
+Right now, I'm restricting method selections based on their purity compatibility in the current context.
+An Experiment:
+	class C {
+		def m() = ???
+	}
+	class D extends C {
+		@pure def m() = ???
+	}
+	val d: D @readonly = ???
+	d.m()  // ok
+	val c: C @readonly = d
+	c.m()  // error: expected receiver to be @mutable, got c.__MUTABILITY__
+Trying the @pureAt annotation:
+(The meaning of @pureAt(ths) is that ths and all enclosing this-references are polymorphic,
+ and that all prefixless variables outside of ths are readonly. ths itself must have a ThisType.)
+	class C {
+		class D {
+			@pure def m1(): Unit = {
+				m2()  // ok: @pure on m1 is the same as @pureAt(D.this)
+				m3()  // error: expected @mutable for D.this, got D.this.__MUTABILITY__
+				n()   // ok: n has C.this.__MUTABILITY__ for C.this, and does not have access to D.this
+				@pure def m1a(): Unit = {
+					m1()   // ok: m1 is @pure
+					m2()   // ok: m2 has D.this.__MUTABILITY__ for D.this, and does not have access to local variables of m1
+					m3()   // error: expected @mutable for D.this, got D.this.__MUTABILITY__
+					n()    // ok: n doesn't have access to D.this or local variables of m1
+					m1b()  // error: m1b expects access to local variables of m1
+				}
+				m1a()  // ok: m1a is pure
+				def m1b(): Unit = ???
+				m1b()  // ok: m1b is within m1
+			}
+			@pureAt(D.this) def m2(): Unit = {
+				m1()  // ok
+				m3()  // error: expected @mutable for D.this, got D.this.__MUTABILITY__
+				n()   // ok: n doesn't have access to D.this
+			}
+			@pureAt(C.this) def m3(): Unit = {
+				m1()  // ok
+				m2()  // ok
+				n()   // ok
+			}
+		}
+		@pure def n = ???
+	}
+Is it possible or reasonable to represent purity boundary (like mutability) as a type member of reference types?
+Revisiting overriding, should the following override of method m1 be allowed?
+	class C {
+		class D {
+			def m1() = ???
+		}
+		class E extends D {
+			@pure def m1() = ???   // this-mutability is E.this, or @pureAt(E.this)
+		}
+		class F extends D {
+			@pureAt(C.this) def m1() = ???  // how to check?
+		}
+		class G extends D {
+			@asType[C@mutabilityOf(C.this)](C.this) def m1() = ???  // how to check?
+		}
+	}
+	val c: C = ???
+	val d: c.D @readonly = ???
+	val e: c.E @readonly = ???
+	d.m1() // error
+	e.m1() // ok
+
+	val cr: C @readonly = ???  // type of cr is C { __PURE_AT__ =+ what? }
+	val cr_d: cr.D = ???  // type selection cr.D is viewpoint-adapted to: cr.D { __PURE_AT__ =+ what? }
+	val cr_e: cr.E = ???
+	cr_d.m1()  // error: expected @mutable receiver, got @pureAt(...)
+	cr_e.m1()
+Discussion: The basic idea behind purity is that:
+Every reference is not merely a reference to a single object, but rather a reference implicitly
+contains information about what's in its enclosing environment. Specifically, a reference to a
+particular object of type D is associated with a reference to a particular object of type C.
+(This is a given in path-dependent typing.) So the question becomes: When I'm in method of
+class D (so I have a D.this), how do I determine the mutability of C.this?
+
+The mechanism of @asType annotations seems sufficient to declare mutabilities of enclosing
+object references, provided references of the form C.this are allowed as arguments.
+(There are 2 things I'd want to change, however: (1) make @asType legal only for this-types
+or no-prefix references [as opposed to allowing references to arbitrary fields], and
+(2) stop forcing the type given for @asType to be a supertype of enclosing @asTypes
+[current behaviour: the type argument of @asType must be a supertype of enclosing @asTypes for the same reference].)
+Update: I suppose change (1) here isn't strictly necessary.
+
+The annotation @pureAt can assign certain mutabilities to enclosing objects, as if a set of @asType annotations is present.
+
+__OUTER_MUTABILITY__ = ???
+
+Function example:
+class Pkg {
+	abstract class Function1[-A,+B] {
+		@pure def apply(x:A):B  // can this be @pure? Yes. Specifically, we're looking at @pureAt(Function1.this).
+	}
+	class E {
+		def doSomething(): Unit = {
+			var v = 0
+			class MyFn extends Function1[Int,Int] {
+				@mutabilityOfRef(this) @pureAt(Pkg.this) def apply(diff: Int): Int = {  // what goes here? See below.
+					v += diff; v
+				}
+			}
+			val myFn$ = new MyFn
+			myFn$.apply(3)
+		}
+	}
+}
+For the override of apply, it seems like we need to say that the overriding version is pure in every place
+that the overridden version can see. In this case, the @pure on Function1#apply means that the receiver
+mutability is polymorphic on both Function1.this and Pkg.this. Overriding, these constraints can be
+respected by the annotations @mutabilityOfRef(this) @pureAt(Pkg.this).
+Entailments: The purity-override checking must be updated to check enclosing references singly rather
+than the current "if-overridden-is-pure-then-overriding-must-be-pure."
+The definition of @pure itself is changed here - @pure now says nothing about references that it cannot see.
+Unless: The functionality I'm after is fully encapsulated by @pureAt, and @pure (if used at all) means something stricter.
+
+What about a different kind of annotation?
+@nonMutable(ref) where ref is a this-type or prefixless variable.
+If ref is a this-type, then @nonMutable(ref) means that the mutability of ref is ref.__MUTABILITY__.
+If ref is a prefixless variable, then @nonMutable(ref) means that the mutability of ref is readonly.
+Q: Can there be a uniformity of definition here where prefixless variables also have mutability ref.__MUTABILITY__?
+
+
+What if we represent purity using some kind of polymorphic type parameter?
+There are already facilities for type interpolation in Dotty.
+And I previously had an example of polymorphic purity where I used a type parameter to represent the necessary relationships.
+
+
+<POSSIBLE-BUG-SUPERTYPE>
+Am I finding the mutability of a supertype correctly?
+Yes.
+
+<BACK-TO-RECEIVERS--TOWARD-PURITY>
+(Toward purity) What kind of system/representation is needed to support purity, with consideration only of the immediate receiver?
+E.g., consider the following, where apply is polymorphic, and apply2 is mutating:
+	abstract class Function1[-A,+B] {
+		@polyread def apply(x:A):B
+		@mutable def apply2(x:A):B
+		type __MUTABILITY__ = this.BLAH
+		//type __MUTABILITY__ = readonly  // default for function classes
+	}
+	class E {
+		def n() = {
+			var v = 0
+			class MyFn extends Function1[Int,Int] {
+				@polyread def apply(diff: Int): Int = { v += diff; v }  // rcv. mut. is MyFn.this.__MUTABILITY__
+				@mutable def apply2(diff: Int): Int = { v += diff; v }
+
+				@mutabilityOf[this.BLAH] def apply3(diff: Int): Int = { v += diff; v }
+				type BLAH = mutable
+			}
+			val e0 = new MyFn  // e0 is readonly due to type __MUTABILITY__ = readonly
+			e0
+		}
+	}
+	val e: E = ???
+	val fn: Function1[Int,Int] = e.n()
+	fn.apply(3)  // ok: apply is @polyread
+	fn.apply2(3) // error: apply is @mutable
+	fn.apply3(3) // ok: ... why?
+	app(fn)  // ok: Function1 has type __MUTABILITY__ = readonly
+	def app(fn: Function1[Int,Int]) = {
+		fn(3)  // ok: apply is @polyread
+	}
+Trying again:
+	abstract class Function1[-A,+B] {
+		type __OUTER__ = mutable
+		@mutabilityOf[__OUTER__] def apply(x:A):B
+	}
+	class E {
+		def n() = {
+			var v = 0
+			// Pure
+			val e0 = new Function1[Int,Int] with {
+                type __OUTER__ = readonly
+                @mutabilityOf[__OUTER__] def apply(diff: Int): Int = { v += diff; v }
+            }
+			// ImPure
+			val e1 = new Function1[Int,Int] with {
+                type __OUTER__ = mutable
+                var w = 0
+                @mutabilityOf[__OUTER__] def apply(diff: Int): Int = { w += diff; w }  // should this type-check OK?
+                    // mutabilityOf(this) == this.__OUTER__#__MUTABILITY__
+                    // q: is this.__OUTER__#__MUTABILITY__ <:< mutable?
+            }
+			e0
+		}
+	}
+	val e: E = ???
+	val fn = e.n()
+	@mutabilityOfRef(this) def app(fn1: Function1[Int,Int] { type __O__ = +readonly }) = {
+		fn1.apply(3)  // mutabilityOf(fn1) == fn1.__OUTER__#__MUTABILITY__
+		              // receiver mutability == fn1.__OUTER__#__MUTABILITY__
+		              // ok.
+	}
+	app(fn)
+
+An important question: What happens when a closure is typed? (in the typer)
+
+
+<ASSIGNABILITY-REVISITED>
+I have defined primitive value types (like Int) to be non-refinable.
+However, this causes problems during the assignability check -- the __PREFIX_MUTABILITY__ member is not present.
+Looks like I will have to write a separate function assignabilityOf(tp) to avoid this problem.
+
+<DISCUSSION: ABSTRACT-MUT-2>
+In the following apply method, the mutability of E1.this is reported to be @mutable:
+      class E1 extends F1[Int,Int] {
+        override type __OUTER__ = readonly
+        var w = 0
+        @mutabilityOf[__OUTER__] def apply(diff: Int): Int = { w = w + diff; w }
+      }
+The problem here is that @mutabilityOf[__OUTER__] evaluates to:
+	E1.this.__OUTER__#__MUTABILITY__
+During type comparision, the bounds of:
+	E1.this.__OUTER__
+are requested, and since the upper bound is not Any, the mutability is deemed to be @mutable.
+There are really two problems here:
+	1. mutabilityOf() should be used to find the upper mutability bound of E1.this.__OUTER__, and
+	2. "override type __OUTER__ = readonly" should really be "override type __OUTER__ = AnyRef@readonly"
+		(the mutability member of __OUTER__ needs to be readonly; setting __OUTER__ to readonly directly would be a hack).
+Incidental bug fix:
+	- When comparing T1#__MUTABILITY__ with T2#__MUTABILITY__, type comparer now returns true if T1 is equivalent to T2.

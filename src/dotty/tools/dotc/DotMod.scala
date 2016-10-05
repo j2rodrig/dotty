@@ -76,6 +76,10 @@ object DotMod {
         inf.isParameterless
     }
 
+    def isField(implicit ctx: Context): Boolean = {
+      sym.denot.info.isInstanceOf[ValueType]
+    }
+
     def isPure(implicit ctx: Context): Boolean = {
       if (sym.isConstructor)
         sym.owner.isPure
@@ -96,7 +100,7 @@ object DotMod {
       if (sym eq NoSymbol) false
       else if ((sym is PackageClass) && !(boundary is PackageClass)) false
       else if (sym eq boundary) true
-      else if (sym.isPure && sym.derivesFrom(boundary)) true
+      else if (sym.isPure && (sym.derivesFrom(boundary) || boundary.derivesFrom(sym))) true
       else sym.owner.isInside(boundary)
     }
 
@@ -228,16 +232,29 @@ object DotMod {
       val tp1defaulted = tp1 match {
         // If tp1 refers to the mutability member of another type, but that member doesn't exist, find its default mutability.
         case tp1: TypeRef if (tp1.name eq MutabilityMemberName) && !tp1.denot.exists =>
+
+          // Check to see if tp2 selects the mutability member of an equivalent type
+          tp2 match {
+            case tp2: TypeRef if (tp2.name eq MutabilityMemberName) && !tp2.denot.exists =>
+              if (isSubType(tp1.prefix, tp2.prefix) && isSubType(tp2.prefix, tp1.prefix))
+                return true
+            case _ =>
+          }
+
           tp1.prefix match {
             case _: ThisType =>  // we've got a this-type with polymorphic mutability: don't reduce
               if (tp2 eq defn.ReadonlyAnnotType)  // all this-type mutabilities are <: readonly
                 return true
               tp1
             case tr: TypeRef =>  // we've got a mutability of type T#__MUTABILITY__. See <DISCUSSION: POLYMORPHIC_2> in notes.
-              if (isSubType(defn.AnyType, tr.info.bounds.hi))  // default to readonly if tr's upper bound is Any
-                defn.ReadonlyAnnotType
-              else
-                defn.MutableAnnotType  // default to mutable if tr's upper bound is any other type
+
+              // New approach as per <DISCUSSION: ABSTRACT-MUT-2> in notes:
+              mutabilityOf(tr.info.bounds.hi)
+
+              //if (isSubType(defn.AnyType, tr.info.bounds.hi))  // default to readonly if tr's upper bound is Any
+              //  defn.ReadonlyAnnotType
+              //else
+              //  defn.MutableAnnotType  // default to mutable if tr's upper bound is any other type
             case _ =>  // something else: default to mutable
               defn.MutableAnnotType
           }
@@ -253,10 +270,14 @@ object DotMod {
                 return true
               tp2
             case tr: TypeRef =>  // we've got a mutability of type T#__MUTABILITY__.
-              if (isSubType(defn.AnyType, tr.info.bounds.lo))
-                defn.ReadonlyAnnotType  // default to readonly if tr's lower bound is Any
-              else
-                defn.MutableAnnotType  // reduce to mutable if tr's lower bound is any other type
+
+              // New approach as per <DISCUSSION: ABSTRACT-MUT-2> in notes:
+              mutabilityOf(tr.info.bounds.lo)
+
+              //if (isSubType(defn.AnyType, tr.info.bounds.lo))
+              //  defn.ReadonlyAnnotType  // default to readonly if tr's lower bound is Any
+              //else
+              //  defn.MutableAnnotType  // reduce to mutable if tr's lower bound is any other type
             case _ =>  // something else: default to mutable
               defn.MutableAnnotType
           }
@@ -395,6 +416,18 @@ object DotMod {
   }
 
   /**
+    * Returns the assignability (prefix mutability) of the given type.
+    * See <ASSIGNABILITY-REVISITED> in notes.
+    */
+  def assignabilityOf(tp: Type)(implicit ctx: Context): Type = tp match {
+    case tp: TermRef =>
+      mutabilityOf(tp.prefix, tp.symbol)
+    case _ =>
+      System.err.println(em"POSSIBLE ERROR: Unexpected type in assignability check: $tp")
+      defn.MutableAnnotType
+  }
+
+  /**
     * Returns the mutability of the given type. Optionally, takes the referred-to symbol (assuming tp is a prefix type).
     */
   def mutabilityOf(tp: Type, origSym: Symbol = NoSymbol)(implicit ctx: Context): Type = {
@@ -499,20 +532,35 @@ object DotMod {
       TypeRef(prefix, name)
 
   def assumePure(sym: Symbol)(implicit ctx: Context): Boolean = {
-    val ownerClassIfExists = if (sym.isClass) sym else sym.effectiveOwner
+    val owner = if (sym.isClass) sym else sym.effectiveOwner
 
     (
       // Assume everything in Any/AnyVal/Object is @pure (AnyRef is an alias of Object)
-      (ownerClassIfExists eq defn.AnyClass) ||
-      (ownerClassIfExists eq defn.AnyValClass) ||
-      (ownerClassIfExists eq defn.ObjectClass) ||
+      (owner eq defn.AnyClass) ||
+      (owner eq defn.AnyValClass) ||
+      (owner eq defn.ObjectClass) ||
+
+      // Assume everything in Function/Tuple/Product is @pure
+      defn.isFunctionClass(owner) ||
+      defn.isAbstractFunctionClass(owner) ||
+      defn.isTupleClass(owner) ||
+      defn.isProductClass(owner) ||
+
+      // Assume all methods in Byte/Int/Double/Boolean/etc. are @pure
+      owner.isPrimitiveValueClass ||
+
+      // Assume annotation constructors are @pure
+      (owner derivesFrom defn.AnnotationClass) ||
 
       // Arrays: only certain methods are @pure
-      ((ownerClassIfExists eq defn.ArrayClass) && defaultPureArrayMethods.contains(sym.name)) ||
+      ((owner eq defn.ArrayClass) && defaultPureArrayMethods.contains(sym.name)) ||
 
       // Assume everything in the Predef module is @pure
-      (ownerClassIfExists eq defn.DottyPredefModule.moduleClass) ||
-      (ownerClassIfExists eq defn.ScalaPredefModule.moduleClass)
+      (owner eq defn.DottyPredefModule.moduleClass) ||
+      (owner eq defn.ScalaPredefModule.moduleClass) ||
+
+      // Assume certain key standard-lib methods are @pure
+      (sym eq defn.Sys_error)
     )
   }
 
@@ -724,8 +772,11 @@ object DotMod {
   }
 
   def isAssignable(tp: Type)(implicit ctx: Context): Boolean = {
-    val prefixMutDenot = tp.member(PrefixMutabilityName)
-    !prefixMutDenot.exists || (prefixMutDenot.info <:< MutableType)
+    val a = assignabilityOf(tp)
+    a <:< defn.MutableAnnotType
+
+    //val prefixMutDenot = tp.member(PrefixMutabilityName)
+    //!prefixMutDenot.exists || (prefixMutDenot.info <:< MutableType)
   }
 
   class DotModTypeOpHooks(initCtx: Context) extends TypeOpHooks(initCtx) {
@@ -737,6 +788,9 @@ object DotMod {
 
       // Don't do custom logic in a types-erased phase
       if (!ctx.erasedTypes) {
+
+        if (denot.symbol.name eq termName("w"))
+          false
 
         // Do viewpoint adaption for terms only.
         // Note: Changed to canHaveAnnotations from isViewpointAdaptable.
@@ -821,8 +875,10 @@ object DotMod {
         if (!(selectedSym.isPure || selectedSym.isContainedInPurityBoundaryOf(ctx.owner))) {
           if (assumePure(ctx.owner.purityBoundary))
             ctx.warning(em"$selectedSym should be annotated @pure due to the assumed purity of ${ctx.owner.purityBoundary}", tree.pos)
-          else
+          else {
+            //selectedSym.isContainedInPurityBoundaryOf(ctx.owner)
             return errorTree(tree, em"Cannot select $selectedSym from here: It must be @pure due to the @pure on ${ctx.owner.purityBoundary}.")
+          }
         }
       }
 
@@ -1003,39 +1059,48 @@ object DotMod {
       }
 
       def checkFinals(overriding: Symbol, overridden: Symbol)(implicit ctx: Context): Unit = {
-        // If the overridden method declares a symbol to be effectively final, then it must also be effectively final in the overriding method.
-        asFinalList(overridden).foreach { arg =>
-          if (!isViewedAsFinal(arg.symbol, overriding))
-            ctx.error(em"Cannot override $overridden: $arg must be declared @asFinal", overriding.pos)
+        if (overriding is Method) {   // synthetic getter methods are assumed-pure, so nothing must be done if overriding is a field
+          // If the overridden method declares a symbol to be effectively final, then it must also be effectively final in the overriding method.
+          asFinalList(overridden).foreach { arg =>
+            if (!isViewedAsFinal(arg.symbol, overriding))
+              ctx.error(em"Cannot override $overridden: $arg must be declared @asFinal", overriding.pos)
+          }
         }
       }
 
       def checkTypeViews(overriding: Symbol, overridden: Symbol)(implicit ctx: Context): Unit = {
-        // If the overridden method declares a type view, then the viewed type must be compatible with the viewed type in the overriding method.
-        viewedTypeList(overridden).foreach { case (arg, tpe) =>
-          val argDenot = arg.forcedTyped.denot
-          val tpe2 = findViewedType(argDenot.symbol, overriding, argDenot.info) match {
-            case NoType => argDenot.info
-            case tp => tp
+        if (overriding is Method) {   // synthetic getter methods are assumed-pure, so nothing must be done if overriding is a field
+          // If the overridden method declares a type view, then the viewed type must be compatible with the viewed type in the overriding method.
+          viewedTypeList(overridden).foreach { case (arg, tpe) =>
+            val argDenot = arg.forcedTyped.denot
+            val tpe2 = findViewedType(argDenot.symbol, overriding, argDenot.info) match {
+              case NoType => argDenot.info
+              case tp => tp
+            }
+            if (!(tpe <:< tpe2))
+              ctx.error(em"Cannot override $overridden: $arg is $tpe2 here, but must be at least $tpe", overriding.pos)
           }
-          if (!(tpe <:< tpe2))
-            ctx.error(em"Cannot override $overridden: $arg is $tpe2 here, but must be at least $tpe", overriding.pos)
         }
       }
 
       def checkPurityEffects(overriding: Symbol, overridden: Symbol)(implicit ctx: Context): Unit = {
-        // Make sure the overriding method conforms to the purity of the overridden method.
-        // Conformance is present if either of the two following conditions holds:
-        // 1. The overriding method is @pure.
-        // 2. The overriding method is inside the purity boundary of the overridden method.
-        if (!(overriding.isPure || overriding.isContainedInPurityBoundaryOf(overridden))) {
-          // If the override error is due to a purity assumption, issue a warning instead of an error.
-          if (assumePure(overridden.purityBoundary))
-            ctx.warning(em"$overriding should have a @pure annotation (in ${overriding.lexicallyEnclosingClass}) " +
-              em"due to the assumed purity of ${overridden.purityBoundary}.", overriding.pos)
-          else
-            ctx.error(em"Cannot override with $overriding (in ${overriding.lexicallyEnclosingClass}): " +
-              em"It must have a purity level compatible with @pure ${overridden.purityBoundary}.", overriding.pos)
+        // Check purity of overriding methods only.
+        // Fields (synthetic getters) are assumed @pure, and type members cannot be @pure.
+        //  (A @pure on a class/trait denotes that the constructor method is pure, not the class/trait itself.)
+        if (overriding is Method) {
+          // Make sure the overriding method conforms to the purity of the overridden method.
+          // Conformance is present if either of the two following conditions holds:
+          // 1. The overriding method is @pure.
+          // 2. The overriding method is inside the purity boundary of the overridden method.
+          if (!(overriding.isPure || overriding.isContainedInPurityBoundaryOf(overridden))) {
+            // If the override error is due to a purity assumption, issue a warning instead of an error.
+            if (assumePure(overridden.purityBoundary))
+              ctx.warning(em"$overriding should have a @pure annotation (in ${overriding.lexicallyEnclosingClass}) " +
+                em"due to the assumed purity of ${overridden.purityBoundary}.", overriding.pos)
+            else
+              ctx.error(em"Cannot override with $overriding (in ${overriding.lexicallyEnclosingClass}): " +
+                em"It must have a purity level compatible with @pure ${overridden.purityBoundary}.", overriding.pos)
+          }
         }
       }
 

@@ -27,6 +27,6 @@ object receiver_override {
     @polyread override def n(): Unit = ???  // error
   }
   class I[T, U] extends F[T] {
-    @mutabilityOf[U] override def n(): Unit = ???  // ok?
+    @mutabilityOf[U] override def n(): Unit = ???  // error
   }
 }

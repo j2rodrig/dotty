@@ -127,6 +127,7 @@ class tests extends CompilerTest {
   @Test def dotmod_as_type_override() = compileFile(dotmodNegDir, "as_type_override")
   @Test def dotmod_pure_basic() = compileFile(dotmodNegDir, "pure_basic")
   @Test def dotmod_pure_refchecks() = compileFile(dotmodNegDir, "pure_refchecks")
+  @Test def dotmod_pure_rcv_mut() = compileFile(dotmodNegDir, "pure_rcv_mut")
   @Test def all_dotmod_neg() = {
     //compileFiles(dotmodNegDir, verbose = true, compileSubDirs = false)
     dotmod_simple_readonly()
@@ -157,6 +158,7 @@ class tests extends CompilerTest {
 
   @Test def dotmod_empty_object() = compileFile(dotmodPosDir, "empty_object", twice)
   @Test def dotmod_coll_Iter2() = compileFile(dotmodCollDir, "Iter2", twice)
+  @Test def dotmod_coll_List1() = compileFile(dotmodCollDir, "List1", twice)
   @Test def dotmod_coll_Map() = compileFile(dotmodCollDir, "Map")  // no "twice" until Dotty bug fixed
   @Test def dotmod_iterator() = compileFile(dotmodPosDir, "iterator", twice)
 

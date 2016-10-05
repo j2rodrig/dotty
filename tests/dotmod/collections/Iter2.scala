@@ -166,8 +166,8 @@ object Iter2 {
   case class ArrayIterator[+A](elems: Array[AnyRef], len: Int) extends Iterator[A] {
     import ArrayIterator._
 
-    @polyread private def elem(i: Int) = {
-      val m: AnyRef @mutable = elems(i)
+    @pure private def elem(i: Int) = {
+      val m: AnyRef = elems(i)
       elems(i).asInstanceOf[A]
     }
 
@@ -176,8 +176,15 @@ object Iter2 {
     @readonly def hasNext = cur < len
     def next = { val res = elem(cur); cur += 1; res }
 
-    override def foreach(f: A => Unit): Unit =
-      for (i <- 0 until len) f(elem(i))
+    @pure override def foreach(f: A => Unit): Unit = {
+      for (i <- 0 until len)
+        f(elem(i))
+      /*var i = 0
+      while (i < len) {
+        f(elem(i))
+        i += 1
+      }*/
+    }
 
     override def map[B](f: A => B): ArrayIterator[B] = {
       var mapped = elems

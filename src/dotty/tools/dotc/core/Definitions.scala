@@ -467,6 +467,8 @@ class Definitions {
   def AsFinalAnnot(implicit ctx: Context) = AsFinalAnnotType.symbol.asClass
   lazy val PureAnnotType = ctx.requiredClassRef("dotty.pure")
   def PureAnnot(implicit ctx: Context) = PureAnnotType.symbol.asClass
+  lazy val PureAtAnnotType = ctx.requiredClassRef("dotty.pureAt")
+  def PureAtAnnot(implicit ctx: Context) = PureAtAnnotType.symbol.asClass
 
   // Annotation classes
   lazy val AliasAnnotType = ctx.requiredClassRef("dotty.annotation.internal.Alias")

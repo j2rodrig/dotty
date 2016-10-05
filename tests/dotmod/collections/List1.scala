@@ -2,20 +2,20 @@ import dotty._
 
 object List1 {
 
-  abstract class List[A] {
+  @pure abstract class List[A] {
       def isEmpty: Boolean;
       def head: A;
       def tail: List[A];
       def prepend(x: A) = Cons[A](x, this);
   }
 
-  def Nil[B] = new List[B] {
+  @pure def Nil[B] = new List[B] {
     def isEmpty: Boolean = true;
     def head = sys.error("head of Nil");
     def tail = sys.error("tail of Nil");
   }
 
-  def Cons[C](x: C, xs: List[C]): List[C] = new List[C] {
+  @pure def Cons[C](x: C, xs: List[C]): List[C] = new List[C] {
     def isEmpty = false;
     def head = x;
     def tail = xs;
@@ -31,7 +31,7 @@ object List1 {
     ()
   }
 
-  class IntList() extends List[Int] {
+  @pure class IntList() extends List[Int] {
     def isEmpty: Boolean = false;
     def head: Int = 1;
     def foo: List[Int] { def isEmpty: Boolean; def head: Int; def tail: List[Int] } = Nil[Int];
