@@ -264,6 +264,7 @@ object DotMod {
       val tp2defaulted = tp2 match {
         // If tp2 refers to the mutability member of another type, but that member doesn't exist, then default to mutable.
         case tp2: TypeRef if (tp2.name eq MutabilityMemberName) && !tp2.denot.exists =>
+          System.err.println(em"Comparing: $tp1 <:? $tp2")
           tp2.prefix match {
             case _: ThisType =>  // we've got a this-type with polymorphic mutability: don't reduce
               if (tp1 eq defn.MutableAnnotType)  // all this-type mutabilities are >: mutable
@@ -520,6 +521,10 @@ object DotMod {
     // @mutabilityOf[T] - generates type T#__MUTABILITY__
     else if (annot.symbol eq defn.MutabilityOfAnnot)
       TypeRefUnlessNoPrefix(getLastTypeArgOf(annot.tree.tpe), MutabilityMemberName)
+
+    // @mutability[M] - returns M
+    else if (annot.symbol eq defn.MutabilityDirectAnnot)
+      getLastTypeArgOf(annot.tree.tpe)
 
     else
       NoType
@@ -823,12 +828,14 @@ object DotMod {
     def checkedReceiver(prefix: Type, tree: tpd.Tree)(implicit ctx: Context): tpd.Tree = {
       if (tree.symbol.isConstructor)  // it's always OK to call a constructor (regardless of receiver mutability) because the receiver reference is unique
         return tree
+      // adding a substThis to the declared mutability
+      val declaredMut = declaredReceiverType(tree.symbol).substThis(tree.symbol.lexicallyEnclosingClass.asClass, prefix)
       // When asking for mutabilityOf(prefix) here, we search from the current context owner (rather than tree.symbol).
       // The reason is that when checkedReceiver is called, this-types are valid with respect to the current
       //  context, but the called method may be in a different tree. E.g., see core/Symbols,
       //  where a search for method Symbols.this.ctx is performed from within Symbols, although ctx is
       //  defined in Contexts (Symbols and Contexts are mixed together).
-      val (preMut, declaredMut) = (mutabilityOf(prefix, tree.symbol), declaredReceiverType(tree.symbol))
+      val preMut = mutabilityOf(prefix, tree.symbol)
       // Make sure to do a this-substitution on the declared receiver type.
       // Before substitution, @polyread methods have a declared mutability like C.this.__MUTABILITY__,
       // which would not otherwise compare equal to the receiver mutability.

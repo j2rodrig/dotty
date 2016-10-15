@@ -128,6 +128,7 @@ class tests extends CompilerTest {
   @Test def dotmod_pure_basic() = compileFile(dotmodNegDir, "pure_basic")
   @Test def dotmod_pure_refchecks() = compileFile(dotmodNegDir, "pure_refchecks")
   @Test def dotmod_pure_rcv_mut() = compileFile(dotmodNegDir, "pure_rcv_mut")
+  @Test def dotmod_pure_rcv_mut_2() = compileFile(dotmodNegDir, "pure_rcv_mut_2")
   @Test def all_dotmod_neg() = {
     //compileFiles(dotmodNegDir, verbose = true, compileSubDirs = false)
     dotmod_simple_readonly()

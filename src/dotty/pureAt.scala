@@ -1,3 +1,3 @@
 package dotty
 
-class pureAt(thisRef: AnyRef) extends scala.annotation.Annotation
+class pureAt[T] extends scala.annotation.Annotation

@@ -2381,3 +2381,149 @@ There are really two problems here:
 		(the mutability member of __OUTER__ needs to be readonly; setting __OUTER__ to readonly directly would be a hack).
 Incidental bug fix:
 	- When comparing T1#__MUTABILITY__ with T2#__MUTABILITY__, type comparer now returns true if T1 is equivalent to T2.
+Another incidental bug:
+	./tests/dotmod/neg/pure_rcv_mut_2.scala:30: error: Incompatible receiver mutability in call to method apply:
+	  Expected: M#__MUTABILITY__
+	  Got: dotty.mutable
+	    fn.apply(3)
+	       ^
+Which is no longer appearing. Ignoring.
+
+<DISCUSSION:POLYMORPH-PURITY>
+What I want is a conditional purity. Derivations of the basic function class should be allowed to be either readonly or mutable:
+	class F1[M,-A,+B] { @mutabilityOf[M] def apply() }
+
+	class MutableF1[-A,+B] extends F1[AnyRef,A,B] { def apply() ; type __MUTABILITY__ = mutable }
+	class ReadonlyF1[-A,+B] extends F1[Any@readonly,A,B] { @readonly def apply() ; type __MUTABILITY__ = readonly }
+
+Actual first-cut solution:
+  // Using F1 as an experimental stand-in for Function1.
+  abstract class F1[-A,+B] {
+    type M >: Any@mutable <: Any@readonly
+    @mutabilityOf[M] def apply(a: A): B
+  }
+
+  // ImPure and Pure extensions of F1
+  class MutableF1[-A,+B] extends F1[A,B] {
+    type M = Any@mutable
+    private var _local_ = 0
+    @mutabilityOf[M] def apply(a: A): B = { _local_ = 1 ; ??? }  // ok
+  }
+  class ReadonlyF1[-A,+B] extends F1[A,B] {
+    type M = Any@readonly
+    private var _local_ = 0
+    @mutabilityOf[M] def apply(a: A): B = { _local_ = 1 ; ??? }  // error
+  }
+
+  // Calling various versions of F1
+  val mutableF1: F1[Int,Int] { type M = Any@mutable ; type __MUTABILITY__ <: mutable } = new MutableF1[Int,Int]
+  mutableF1.apply(3)
+
+  val readonlyF1: F1[Int,Int] { type M = Any@readonly ; type __MUTABILITY__ <: readonly } = new ReadonlyF1[Int,Int]
+  readonlyF1.apply(3)
+
+  app[mutable](mutableF1)
+  app[readonly](readonlyF1)
+  app(mutableF1)
+  app(readonlyF1)
+  def app[N >: mutable <: readonly](fn: F1[Int,Int] { type M = Any { type __MUTABILITY__ = N } ; type __MUTABILITY__ <: N }) = {
+    fn.apply(3)
+  }
+
+<OUTER-PURITY-REVISITED-AGAIN>
+How does @pureAt[] really work?
+Here's an example of a first-class function call:
+
+	class C {
+		@pure def m(ls: List[Int] @readonly) = {
+			var sum = 0
+			@pureAt[C] def add(i: Int) = { sum += i }  // mutates m's local vars
+			ls.foreach(add)   // calls add on every element of ls
+		}
+	}
+
+Possible annotations on List and Function1:
+
+	class List[+A] {
+		// type parameter R and purity annotations are added to the definition of foreach.
+		@pure def foreach[R,U](f: Function1[A,U] @pureAt[R]) = f.apply(???)
+	}
+	abstract class Function1[-A,+B] {
+		type __PURE_AT__   // this member is refined to R by @pureAt[R]
+		@pureAt[__PURE_AT__] def apply(a: A): B
+	}
+
+@pureAt[] denotes the mutability of a list of references.
+Say lexically we have:
+	class C {
+		class D {
+			class E {
+			}
+		}
+	}
+@pureAt[D] means:
+	- C.this is nonmutable
+	- D.this is nonmutable
+	- E.this is mutable
+Since we seem to be talking about specific references, how about we use @pureAt(D.this) instead of @pureAt[D]?
+What are the restrictions on calling?
+	class C {
+		@pureAt(C.this) def cm() = ???
+		class D {
+			@pureAt(D.this) def dm() = {
+				D.this   // is @pureAt(D.this)
+				C.this   // is D.this.outer, which is @pureAt(C.this)
+				C.this.cm()  // ok: rcv is @pureAt(C.this)
+			}
+			class E {
+				@pureAt(D.this) def em1() = {
+					E.this   // is @pureAt(D.this)
+					D.this   // is E.this.outer, which is @pureAt(D.this)
+					D.this.dm()  // ok: rcv is @pureAt(D.this)
+				}
+				@pureAt(C.this) def em2() = {
+					dm()  // Error: D.this is @pureAt(C.this) here, which is not compatible with @pureAt(D.this)
+					cm()  // ok: rcv is @pureAt(C.this)
+				}
+			}
+		}
+	}
+Default @pureAt() member is taken from enclosing @pureAt():
+class C {
+	@pureAt(C.this) def m() = ???
+	class D {
+		def n() = ???  // default: @pureAt(C.this)
+	}
+}
+Subtyping relations:
+	@pureAt(D.this) <: @pureAt(C.this)  if D.this =:= C.this or @pureAt(D.this.outer) <: @pureAt(C.this)
+
+When checking the receiver of a method:
+- What do we have for the mutability of the class enclosing that method? A: the receiver mutability is already present.
+- What do we have for the mutability of other enclosing-class references? A: ???
+  The act of dereferencing, e.g., c.D, must have something to do with this.
+  A new object is mutable on all enclosing classes. (Enclosing-ref mutabilities are protected by method receivers.)
+  Arbitrary references can carry enclosing-class mutability information. (For checking against method rcv annots.)
+
+Viewpoint Adaptation on Type Selection
+	If c (of type C) is @readonly,
+		then c.D is @pureAt[C].           // acceptable precision loss: enclosers of C are no longer mutable (although they may have been mutable in reference c)
+
+In the example above,
+	class C {
+		class D {
+			def dm1() = ???
+			@pureAt[D] def dm2() = ???
+		}
+		@pure def cm(): D = {
+			val d: D @pureAt[C] = new this.D   // this is @pureAt[C], so this.D is also @pureAt[C]
+			d.dm1()  // Error: expected @mutable, got @pureAt[C]
+			d.dm2()  // Ok: expected @pureAt[D], got @pureAt[C]. (@pureAt[C] <: @pureAt[D] because C contains D.)
+			d
+		}
+		def cm2() = {
+			val d: D @pureAt[C] = cm()
+			d.dm1()  // Error: expected @mutable, got @pureAt[C]. (d's outer reference is @readonly, so an error here is to be expected.)
+			(new this.D).dm1()  // but this is OK: this is @mutable, so "new this.D" is also @mutable.
+		}
+	}
