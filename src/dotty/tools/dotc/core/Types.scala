@@ -434,6 +434,7 @@ object Types {
           go(tp.underlying)
         case tp: ClassInfo =>
           tp.cls.findMember(name, pre, excluded)
+          // TODO: default __MUTABILITY__ >: mutable <: readonly
         case AndType(l, r) =>
           goAnd(l, r)
         case OrType(l, r) =>
@@ -444,6 +445,7 @@ object Types {
           ctx.newErrorSymbol(pre.classSymbol orElse defn.RootClass, name)
         case _ =>
           NoDenotation
+          // TODO: set type expression defaults to __MUTABILITY__ = mutable?
       }
       def goRec(tp: RecType) =
         if (tp.parent == null) NoDenotation

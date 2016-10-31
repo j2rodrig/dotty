@@ -612,7 +612,8 @@ object DotMod {
   /** Used to patch an issue where the mutability we expected actually refers to a superclass of the mutability we got.
     * See {{{<DISCUSSION:RECEIVER-MUTABILITY-SAME-OBJECT>}}} in the notes. */
   def substThisMutability2(here: Type, there: Type)(implicit ctx: Context): Type = there match {
-    case TypeRef(thereThis, MutabilityMemberName) if thereThis.isInstanceOf[ThisType] => here
+    case TypeRef(thereThis, MutabilityMemberName)
+      if thereThis.isInstanceOf[ThisType] || thereThis.isInstanceOf[SuperType] => here
     case _ => there
   }
 
