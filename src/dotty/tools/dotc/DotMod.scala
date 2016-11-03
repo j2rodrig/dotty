@@ -9,6 +9,7 @@ import core.Decorators._
 import core.Denotations._
 import core.Flags._
 import core.Names._
+import core.Periods._
 import core.Symbols._
 import core.SymDenotations._
 import core.TypeOpHooks
@@ -264,7 +265,7 @@ object DotMod {
       val tp2defaulted = tp2 match {
         // If tp2 refers to the mutability member of another type, but that member doesn't exist, then default to mutable.
         case tp2: TypeRef if (tp2.name eq MutabilityMemberName) && !tp2.denot.exists =>
-          System.err.println(em"Comparing: $tp1 <:? $tp2")
+          //System.err.println(em"Comparing: $tp1 <:? $tp2")
           tp2.prefix match {
             case _: ThisType =>  // we've got a this-type with polymorphic mutability: don't reduce
               if (tp1 eq defn.MutableAnnotType)  // all this-type mutabilities are >: mutable
@@ -815,6 +816,18 @@ object DotMod {
       target
     }
 
+    /** The default denotation of a named class member. Called whenever the named member cannot be found in the given class. */
+    override def defaultedMember(tp: ClassInfo, name: Name, pre: Type, excluded: FlagSet)(implicit ctx: Context): Denotation = {
+      if (name eq MutabilityMemberName) {
+        // Create a JointRef denotation to represent the bounds mutable..readonly;
+        // We create a JointRef because we must return a Denotation (not a Type).
+        val rinfo = TypeBounds(defn.MutableAnnotType, defn.ReadonlyAnnotType)
+        new JointRefDenotation(NoSymbol, rinfo, Period.allInRun(ctx.runId))
+      }
+      else
+        NoDenotation
+    }
+
     /** A new object of the same type as this one, using the given context. */
     override def copyIn(ctx: Context) = new DotModTypeOpHooks(ctx)
   }
@@ -972,10 +985,10 @@ object DotMod {
       // NOTE: We no longer do mutability-type reduction/simplification here.
       // Eager simplification can reduce this-mutabilities to @mutable in places where they should be polymorphic.
       val mut = annotationToMutabilityType(tp.annot, ctx.owner.lexicallyEnclosingClass)
-      if (mut eq NoType)
-        tp   // not a valid RI annotation - return type unchanged
-      else
+      if (mut ne NoType)
         refineResultMember(tp.underlying, MutabilityMemberName, TypeAlias(mut, 1))  // strip annotation, replace with refinement
+      else
+        tp   // not a valid RI annotation - return type unchanged
     }
 
     override def completeAnnotations(mdef: untpd.MemberDef, sym: Symbol)(implicit ctx: Context): Unit = {

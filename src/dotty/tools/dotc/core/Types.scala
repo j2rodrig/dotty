@@ -433,8 +433,11 @@ object Types {
         case tp: TypeProxy =>
           go(tp.underlying)
         case tp: ClassInfo =>
-          tp.cls.findMember(name, pre, excluded)
-          // TODO: default __MUTABILITY__ >: mutable <: readonly
+          val d = tp.cls.findMember(name, pre, excluded)
+          if (d eq NoDenotation)
+            ctx.typeOpHooks.defaultedMember(tp, name, pre, excluded)
+          else
+            d
         case AndType(l, r) =>
           goAnd(l, r)
         case OrType(l, r) =>
@@ -445,7 +448,6 @@ object Types {
           ctx.newErrorSymbol(pre.classSymbol orElse defn.RootClass, name)
         case _ =>
           NoDenotation
-          // TODO: set type expression defaults to __MUTABILITY__ = mutable?
       }
       def goRec(tp: RecType) =
         if (tp.parent == null) NoDenotation

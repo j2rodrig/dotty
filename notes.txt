@@ -2527,3 +2527,21 @@ In the example above,
 			(new this.D).dm1()  // but this is OK: this is @mutable, so "new this.D" is also @mutable.
 		}
 	}
+
+
+<CHANGE-TO-DEFAULT-MUTABILITIES>
+TODO:
+1. Set default class-member mutability to __MUTABILITY__ >: mutable <: readonly
+2. Refine class-reference types to { __MUTABILITY__ = mutable } if not already refined
+2a. Refine Any to { __MUTABILITY__ =+ readonly }
+
+Implemented default class members.
+
+Test pos/rbtree is failing with errors like:
+./tests/pos/rbtree.scala:66: error: type mismatch:
+ found   : B1{__MUTABILITY__ =+ (dotty.mutable | B1#__MUTABILITY__)}(v)
+ required: B
+  def update[A: Ordering, B, B1 >: B](tree: Tree[A, B], k: A, v: B1, overwrite: Boolean): Tree[A, B1] = blacken(upd(tree, k, v, overwrite))
+                                                                                                                             ^
+Reverting default class members does not fix this error.
+Attempting to revert further back.
