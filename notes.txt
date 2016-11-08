@@ -2545,3 +2545,109 @@ Test pos/rbtree is failing with errors like:
                                                                                                                              ^
 Reverting default class members does not fix this error.
 Attempting to revert further back.
+(This is what I get for not consistently running all regression tests.)
+DIAGNOSIS: A "fix" to the type comparer a few weeks ago is now causing problems. Fix discussion: <DISCUSSION: ABSTRACT-MUT-2>.
+The problem is that the lower bound of B1 in rbtree is B, so the type comparer is taking mutabilityOf(B),
+which does not compare identically to mutabilityOf(B1).
+xxx POSSIBLE FIX: Now that default mutabilities are in place, I should be able to start removing special-case code in the type comparer.
+MORE INFORMATION: Setting up a debug message where mutability defaults are causing false comparisons:
+In the type comparer:
+      if (((tp1 ne tp1defaulted) || (tp2 ne tp2defaulted)) && !super.isSubType(tp1defaulted, tp2defaulted) && super.isSubType(tp1, tp2))
+        System.err.println(em"False comparison $tp1defaulted <: $tp2defaulted  (from $tp1 <: $tp2)")
+Output debug messages:
+	False comparison dotty.mutable | B1#__MUTABILITY__ <: dotty.mutable  (from dotty.mutable | B1#__MUTABILITY__ <: B1#__MUTABILITY__)
+	... (error above) ...
+	False comparison dotty.mutable | B1#__MUTABILITY__ <: dotty.mutable  (from dotty.mutable | B1#__MUTABILITY__ <: B#__MUTABILITY__)
+	... (other errors) ...
+What's clearly happening here is that tp2 (B1#__MUTABILITY__) is not observed to have a denotation,
+and tp1 is not a simple-form mutability selection (tp1 is an OrType, not a TypeRef),
+so tp2 is defaulted to its lower bound (mutable).
+QUESTION: Shouldn't tp2 have a denotation now that class mutability member defaults are implemented in findMember?
+INFO: The denotation computation involves a findMember on TypeVar(PolyParam(B)) or TypeVar(PolyParam(B1)).
+	It is possible that, since B1 is uninstantiated, the ClassInfo defaulting is never reached,
+	causing findMember to return a NoDenotation.
+ANALYSIS: What's actually happening is the following:
+  findMember on PolyParam(B).
+  There is a constraint yielded for PolyParam(B), which is: TypeAlias(TypeRef(NoPrefix,B1),0).
+  findMember on the denotation of TypeRef(NoPrefix,B1), which is the upper bound of TypeAlias(TypeRef(NoPrefix,B1),0).
+  findMember on TypeBounds(TypeRef(NoPrefix,B), TypeRef(ThisType(TypeRef(NoPrefix,scala)),Any)).
+  findMember on the denotation of TypeRef(ThisType(TypeRef(NoPrefix,scala)),Any).
+  Possible exception?
+No exception.
+  What happens is that finding membership of a class denotation calls ClassDenotation#nonPrivateMembersNamed,
+   which does not do the defaulting. Maybe I need to do the defaulting from ClassDenotation#findMember
+    rather than Type#findMember.
+  HOWEVER: Now rbtree has 129 errors (instead of 17 (instead of 0)).
+Is there a better way to shadow/default mutability members?
+
+
+<A CONVERSATION WITH ONDREJ>
+On Tue, Nov 01, 2016 at 05:32:08PM +0000, Jonathan Rodriguez wrote:
+> Hi Ondrej,
+
+> I just wanted to let you know what I’ve been thinking about.
+
+> We were looking at polymorphism and mutability, and whether my system could be simplified.
+> One proposed approach is to encode polymorphic mutability as a type parameter:
+
+>   def m[M >: mutable <: readonly]() …
+
+> However, adding a mutability parameter may actually make the system unnecessarily complicated at some level.
+> Here’s my reasoning: The reason we proposed adding a type parameter M is to allow a mutability substitution
+> to take place when the method is applied. However, even for parameterless methods, there is already a substitution
+> that takes place: the “this” reference is substituted by the given receiver reference when the method is applied.
+> (The substitution of “this” is actually a very fundamental operation in Dotty. It seems to be related to DOT’s
+> self-reference substitution, which as far as I can tell, is the only kind of substitution required to implement DOT.)
+> Ideally, I would want the receiver-mutability substitution to rely only on this-substitution, since it is
+> specifically the mutability of “this” that we are trying to handle here. More specifically, the substitution of
+> the mutability of “this” ought to be subsumable by the substitution of “this” itself wherever possible.
+
+If I remember correctly, in ReIm, the viewpoint adaptation of @polyread
+can be with respect to not the this parameter, but some other parameter.
+That is, if you annotate this @mutable or @readonly and some other
+parameter @polyread and the return type @polyread, then the return
+type gets viewpoint-adapted according to the mutability of the
+@polyread parameter, not the mutability of this.
+
+That said, this seems like a rather unusual case, and I think it's fine
+if your implementation of @polyread can only viewpoint adapt with
+respect to the mutability of this.
+
+> I now think that the problem is in how I was setting the default mutabilities.
+
+> I am now looking into setting the mutability of named classes/traits to be abstract (rather than simply mutable). For example:
+
+>   class C { type __MUTABILITY__ >: mutable <: readonly }
+
+> That is, no class has a particular mutability. It is OK for the mutability to be abstract here since we will also
+> assume that all objects will initialize the __MUTABILITY__ member to something during construction.
+> (In the absence of other information, the only thing we know about an object of base class C is that its mutability
+> is somewhere between mutable and readonly, which is exactly what we want when supporting polymorphism.)
+
+Yes, this sounds reasonable.
+
+> We are then left with the problem of properly defaulting the assignment to the __MUTABILITY__ member—unannotated/legacy
+> code assumes all objects are mutable. This assumption literally means that all objects (not classes) are initialized
+> with the assignment “type __MUTABILITY__ = mutable" unless otherwise annotated.
+
+Yes, I think this is right.
+
+> Here is the new set of defaulting rules that I’m experimenting with:
+
+> 1. All classes are assumed to contain the type declaration __MUTABILITY__ >: mutable <: readonly unless __MUTABILITY__
+> is otherwise declared. Classes are only allowed to declare (not initialize) __MUTABILITY__.
+
+> 2. All objects are assumed to initialize __MUTABILITY__ = mutable upon construction. However, this initialization
+> may be overridden.
+
+> 3. In practice, we assume that every non-singleton type expression contains “type __MUTABLE__ = mutable” unless
+> otherwise annotated/initialized (this assumption is distinct from the assumption of the declaration of __MUTABLE__
+> in classes). (Exception: the type expression “Any” is assumed to assign readonly. Defaulted & implicit type
+> expressions are still considered type expressions.) (The widening of “this” produces a type with __MUTABILITY__
+> initialized to something that depends on the current receiver-mutability annotation.)
+
+OK, this sounds good. I'm looking forward to hearing about how it works out.
+
+Ondřej
+
+> - Jonathan

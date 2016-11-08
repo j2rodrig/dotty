@@ -1620,7 +1620,11 @@ object SymDenotations {
 
     override final def findMember(name: Name, pre: Type, excluded: FlagSet)(implicit ctx: Context): Denotation = {
       val raw = if (excluded is Private) nonPrivateMembersNamed(name) else membersNamed(name)
-      raw.filterExcluded(excluded).asSeenFrom(pre).toDenot(pre)
+      val denot = raw.filterExcluded(excluded).asSeenFrom(pre).toDenot(pre)
+      //if (denot eq NoDenotation)
+      //  ctx.typeOpHooks.defaultedMember(this, name, pre, excluded)
+      //else
+        denot
     }
 
     private[this] var baseTypeRefCache: java.util.HashMap[CachedType, Type] = null

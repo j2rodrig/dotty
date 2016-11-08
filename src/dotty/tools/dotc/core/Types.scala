@@ -434,9 +434,9 @@ object Types {
           go(tp.underlying)
         case tp: ClassInfo =>
           val d = tp.cls.findMember(name, pre, excluded)
-          if (d eq NoDenotation)
-            ctx.typeOpHooks.defaultedMember(tp, name, pre, excluded)
-          else
+          //if (d eq NoDenotation)
+          //  ctx.typeOpHooks.defaultedMember(tp, name, pre, excluded)
+          //else
             d
         case AndType(l, r) =>
           goAnd(l, r)
@@ -572,6 +572,7 @@ object Types {
       try go(this)
       catch {
         case ex: Throwable =>
+          System.err.println(i"findMember exception for $this member $name, pre = $pre")
           core.println(i"findMember exception for $this member $name, pre = $pre")
           throw ex // DEBUG
       }
