@@ -23,17 +23,17 @@ object pure_rcv_mut_2 {
   }
 
   // Calling various versions of F1
-  val mutableF1: F1[Int,Int] { type M = mutable ; type __MUTABILITY__ <: mutable } = new MutableF1[Int,Int]
+  val mutableF1: F1[Int,Int] { type M = mutable ; type __MUTABILITY__ = mutable } = new MutableF1[Int,Int]
   mutableF1.apply(3)
 
-  val readonlyF1: F1[Int,Int] { type M = readonly ; type __MUTABILITY__ <: readonly } = new ReadonlyF1[Int,Int]
+  val readonlyF1: F1[Int,Int] { type M = readonly ; type __MUTABILITY__ = readonly } = new ReadonlyF1[Int,Int]
   readonlyF1.apply(3)
 
   app[mutable](mutableF1)
   app[readonly](readonlyF1)
   app(mutableF1)  // mutability parameter is inferred!!!
   app(readonlyF1) // mutability parameter is inferred!!!
-  def app[N >: mutable <: readonly](fn: F1[Int,Int] { type M = N ; type __MUTABILITY__ <: N }) = {
+  def app[N >: mutable <: readonly](fn: F1[Int,Int] { type M = N ; type __MUTABILITY__ = N }) = {
     fn.apply(3)
   }
 
