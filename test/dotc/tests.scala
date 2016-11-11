@@ -79,6 +79,8 @@ class tests extends CompilerTest {
     neg_cycles()
     pos_autoTupling()
     neg_autoTupling
+    pos_annotDepMethType()
+    pos_compound()
   }
   @Test def cyclic_reference_tests() = {
     dotc_core_Symbols()
@@ -106,6 +108,8 @@ class tests extends CompilerTest {
   @Test def pos_checkInstantiable() = compileFile(posDir, "checkInstantiable", twice)
   @Test def pos_autoTupling() = compileFile(posDir, "autoTuplingTest", twice)
   @Test def neg_cycles() = compileFile(negDir, "cycles")
+  @Test def pos_annotDepMethType() = compileFile(posDir, "annotDepMethType", twice)  // has HKApply types
+  @Test def pos_compound() = compileFile(posDir, "compound", twice)  // has RecType types
 
   @Test def dotmod_simple_readonly() = compileFile(dotmodNegDir, "simple_readonly")
   @Test def dotmod_simple_viewpoint() = compileFile(dotmodNegDir, "simple_viewpoint")
@@ -120,7 +124,7 @@ class tests extends CompilerTest {
   @Test def dotmod_result_override() = compileFile(dotmodNegDir, "result_override")
   @Test def dotmod_receiver_override() = compileFile(dotmodNegDir, "receiver_override")
   @Test def dotmod_value_override() = compileFile(dotmodNegDir, "value_override")
-  @Test def dotmod_class_immutability() = compileFile(dotmodNegDir, "class_immutability")
+  //@Test def dotmod_class_immutability() = compileFile(dotmodNegDir, "class_immutability")  // this test probably doesn't make sense any more
   @Test def dotmod_as_final() = compileFile(dotmodNegDir, "as_final")
   @Test def dotmod_as_type() = compileFile(dotmodNegDir, "as_type")
   @Test def dotmod_as_final_override() = compileFile(dotmodNegDir, "as_final_override")
@@ -144,13 +148,15 @@ class tests extends CompilerTest {
     dotmod_result_override()
     dotmod_receiver_override()
     dotmod_value_override()
-    dotmod_class_immutability()
+    //dotmod_class_immutability()
     dotmod_as_final()
     dotmod_as_type()
     dotmod_as_final_override()
     dotmod_as_type_override()
     dotmod_pure_basic()
     dotmod_pure_refchecks()
+    dotmod_pure_rcv_mut()
+    dotmod_pure_rcv_mut_2()
   }
 
   @Test def dotmod_collection_mut() = compileFile(dotmodNegDir + "collections/", "collection_mut")

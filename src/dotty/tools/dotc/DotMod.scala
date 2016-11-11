@@ -9,7 +9,6 @@ import core.Decorators._
 import core.Denotations._
 import core.Flags._
 import core.Names._
-import core.Periods._
 import core.Symbols._
 import core.SymDenotations._
 import core.TypeOpHooks
@@ -193,8 +192,8 @@ object DotMod {
       val m1 = reduce(mut1, UpperBound)
       val m2 = reduce(mut2, LowerBound)
 
-      //if (m1 ne mut1) System.err.println(em"$mut1 reduced to $m1")
-      //if (m2 ne mut2) System.err.println(em"$mut2 reduced to $m2")
+      if (m1 ne mut1) System.err.println(em"$mut1 reduced to $m1")
+      if (m2 ne mut2) System.err.println(em"$mut2 reduced to $m2")
 
       if ((m1 ne mut1) || (m2 ne mut2))
         // recurse until mutability reductions reach a steady state
@@ -224,16 +223,6 @@ object DotMod {
       case _ =>
         false
     }
-
-    /*def mayNeedMutabilityCheck(tp: Type): Boolean = tp match {
-      case tp: RefinedType => (tp.refinedName eq MutabilityMemberName) || mayNeedMutabilityCheck(tp.parent)
-      case tp: TypeRef => !isMutability(tp)
-      case tp: ThisType => true
-      case tp: SuperType => true
-      case tp: PolyParam => true
-      case tp: TypeVar => !tp.isInstantiated
-      case _ => false
-    }*/
 
     def isMutabilityRefinement(tp: Type): Boolean = tp match {
       case tp: RefinedType => (tp.refinedName eq MutabilityMemberName) || isMutabilityRefinement(tp.parent)
@@ -276,8 +265,6 @@ object DotMod {
       else if (isMutabilityRefinement(tp1wd) || isMutabilityRefinement(tp2)) {
         val mut1wd = mutabilityOf2(tp1wd, UpperBound)
         val mut2 = mutabilityOf2(tp2, LowerBound)
-        //if (!isSubType(mut1wd, mut2))
-        //  System.err.println(em"Mut fail: $tp1wd ($mut1wd) <: $tp2 ($mut2)")
         isSubType(mut1wd, mut2) && {
           // continue the subtyping check on underlying types. To make sure we don't recurse badly, we strip the mutability members first.
           val dropped1 = dropRefinementsNamed(tp1wd, List(MutabilityMemberName))
@@ -290,139 +277,8 @@ object DotMod {
         super.isSubType(tp1, tp2)
     }
 
-    def isSubType_deprecated(tp1: Type, tp2: Type): Boolean = {
-
-      // Pass basic cases. We assume that Any is a readonly type.
-      if ((tp1 eq tp2) || (tp2 eq defn.AnyType) || (tp2 eq WildcardType) || (tp1 eq defn.NothingType))
-        return true
-
-      // Since we do custom logic for term types only, pass the prototypes, class infos, bounds, wilds, and errors to the default subtype logic.
-      if ((tp2 eq NoType) || tp2.isInstanceOf[ProtoType] || tp2.isInstanceOf[TypeType] || tp2.isInstanceOf[WildcardType] || tp2.isError)
-        return super.isSubType(tp1, tp2)
-
-      // Special case logic any time tp1 (or its widening) refines the mutability member.
-      // We need to check this here because otherwise the ordinary subtyping logic may
-      // assume that tp2 does not contain this member, and discard it from tp1.
-      // We use a widenDealias here -- see <DISCUSSION: WIDEN-DEALIAS> in notes.
-      tp1.widenDealias.stripAnnots match {
-        case tp1w: RefinedType =>
-          val denot1 = tp1w.member(MutabilityMemberName)
-          if (denot1.exists) {
-            val info2 = TypeAlias(mutabilityOf(tp2), 1)
-            if (isSubType(denot1.info, info2)) {  // check refined member
-              val dropped1 = dropRefinementsNamed(tp1w, List(MutabilityMemberName, PrefixMutabilityName))
-              val dropped2 = dropRefinementsNamed(tp2.widen, List(MutabilityMemberName, PrefixMutabilityName))
-              return super.isSubType(dropped1, dropped2) // check parents
-            } else {
-              return false   // subtype failed due to mutability
-            }
-          }
-        case _ =>
-      }
-
-
-      // Special case logic any time tp2 refines the mutability member, but tp1 does not.
-      // If tp1 does not have the mutability member, we default it to mutable.
-      // Practically, defaulting tp1's member to mutable just means we ignore the
-      // member on tp2 (and allow the type comparison to proceed on tp2's parent).
-      tp2 match {
-        case tp2: RefinedType if tp2.refinedName eq MutabilityMemberName =>
-          val info1 = TypeAlias(mutabilityOf(tp1), 1)
-          if (isSubType(info1, tp2.refinedInfo)) {  // check refined member
-            val dropped2 = dropRefinementsNamed(tp2, List(MutabilityMemberName, PrefixMutabilityName))
-            return isSubType(tp1, dropped2) // member's OK, but still have to check the parent.
-          } else
-            return false
-
-        // Also make sure the presence of a prefix mutability member doesn't affect subtyping
-        case tp2: RefinedType if tp2.refinedName eq PrefixMutabilityName =>
-          return isSubType(tp1, tp2.parent)    // member's OK, but still have to check the parent.
-
-        case _ =>
-      }
-
-      val tp1defaulted = tp1 match {
-        // If tp1 refers to the mutability member of another type, but that member doesn't exist, find its default mutability.
-        case tp1: TypeRef if (tp1.name eq MutabilityMemberName) && !tp1.denot.exists =>
-
-          // Check to see if tp2 selects the mutability member of an equivalent type
-          tp2 match {
-            case tp2: TypeRef if (tp2.name eq MutabilityMemberName) && !tp2.denot.exists =>
-              if (isSubType(tp1.prefix, tp2.prefix) && isSubType(tp2.prefix, tp1.prefix))
-                return true
-            case _ =>
-          }
-
-          tp1.prefix match {
-            case _: ThisType =>  // we've got a this-type with polymorphic mutability: don't reduce
-              if (tp2 eq defn.ReadonlyAnnotType)  // all this-type mutabilities are <: readonly
-                return true
-              tp1
-            case tr: TypeRef =>  // we've got a mutability of type T#__MUTABILITY__. See <DISCUSSION: POLYMORPHIC_2> in notes.
-
-              // New approach as per <DISCUSSION: ABSTRACT-MUT-2> in notes:
-              mutabilityOf(tr.info.bounds.hi)
-
-              //if (isSubType(defn.AnyType, tr.info.bounds.hi))  // default to readonly if tr's upper bound is Any
-              //  defn.ReadonlyAnnotType
-              //else
-              //  defn.MutableAnnotType  // default to mutable if tr's upper bound is any other type
-            case _ =>  // something else: default to mutable
-              defn.MutableAnnotType
-          }
-        case _ =>
-          tp1
-      }
-      val tp2defaulted = tp2 match {
-        // If tp2 refers to the mutability member of another type, but that member doesn't exist, then default to mutable.
-        case tp2: TypeRef if (tp2.name eq MutabilityMemberName) && !tp2.denot.exists =>
-          //System.err.println(em"Comparing: $tp1 <:? $tp2")
-          tp2.prefix match {
-            case _: ThisType =>  // we've got a this-type with polymorphic mutability: don't reduce
-              if (tp1 eq defn.MutableAnnotType)  // all this-type mutabilities are >: mutable
-                return true
-              tp2
-            case tr: TypeRef =>  // we've got a mutability of type T#__MUTABILITY__.
-
-              // New approach as per <DISCUSSION: ABSTRACT-MUT-2> in notes:
-              mutabilityOf(tr.info.bounds.lo)
-
-              //if (isSubType(defn.AnyType, tr.info.bounds.lo))
-              //  defn.ReadonlyAnnotType  // default to readonly if tr's lower bound is Any
-              //else
-              //  defn.MutableAnnotType  // reduce to mutable if tr's lower bound is any other type
-            case _ =>  // something else: default to mutable
-              defn.MutableAnnotType
-          }
-        case _ =>
-          tp2
-      }
-
-      if (((tp1 ne tp1defaulted) || (tp2 ne tp2defaulted)) && !super.isSubType(tp1defaulted, tp2defaulted) && super.isSubType(tp1, tp2)) {
-        tp2 match {
-          case tp2: TypeRef =>
-            val d2 = tp2.denot
-          case _ =>
-        }
-        System.err.println(em"False comparison $tp1defaulted <: $tp2defaulted  (from $tp1 <: $tp2)")
-      }
-
-      super.isSubType(tp1defaulted, tp2defaulted)
-    }
-
     override def copyIn(ctx: Context): TypeComparer = new DotModTypeComparer(ctx)
   }
-
-  // Mutability type reduction.
-  // WE ARE NO LONGER DOING MUTABILITY REDUCTION on explicit annotations in the source code.
-  // Mutability reduction loses important information, e.g. reducing this.__MUTABILITY__ to mutable.
-  /* def reduceMut(m: Type)(implicit ctx: Context): Type = m match {
-    case m: NamedType if m.name eq MutabilityMemberName =>
-      // We've got a mutability member selection.
-      // Reduce by doing a mutabilityOf on the prefix.
-      mutabilityOf(m.prefix)
-    case _ => m
-  } */
 
   /// The mutability of "this" when used by itself in the source program (not as part of a member selection).
   final def findStandaloneThisMutability(tp: ThisType)(implicit ctx: Context): Type =
@@ -443,9 +299,11 @@ object DotMod {
     Second, find and return the receiver mutability declared on the first element of the pair.
    */
   final def findThisMutability(refSym: Symbol, ofClass: Symbol)(implicit ctx: Context): Type = {
-    assert(refSym.exists, em"Attempt to find the mutability of ${ofClass.name}.this outside of $ofClass")
+    //assert(refSym.exists, em"Attempt to find the mutability of ${ofClass.name}.this outside of $ofClass")
     assert(ofClass.isClass, em"Expected a class in findThisMutability, got $ofClass")
     if (ofClass derivesFrom refSym)  // if we're already at the class we're looking for, return @mutable
+      return defn.MutableAnnotType
+    if (!refSym.exists)  // if we're outside of the class we're looking for, assume @mutable
       return defn.MutableAnnotType
 
     // Find the owning class of refSym
@@ -543,13 +401,27 @@ object DotMod {
     */
   def assignabilityOf(tp: Type)(implicit ctx: Context): Type = tp match {
     case tp: TermRef =>
-      mutabilityOf(tp.prefix, tp.symbol)
+      mutabilityOf2(tp.prefix)
     case _ =>
       System.err.println(em"POSSIBLE ERROR: Unexpected type in assignability check: $tp")
       defn.MutableAnnotType
   }
 
   /*
+   Finds the mutability of the given type tp.
+   The mutability is itself a type, which has one of the following forms:
+     mutable
+     readonly
+     p.C.this.__MUTABILITY__    // for some class C on path p
+     p.A#__MUTABILITY__         // for some abstract type A on path p
+     m1 | m2                    // union of mutabilities
+     m1 & m2                    // intersection of mutabilities
+     <error>                    // ErrorType (only if tp is an ErrorType)
+
+   The boundSpec parameter determines, in certain cases, whether the upper bound or lower bound is returned. boundSpec makes a difference in the following cases:
+     tp refines __MUTABILITY__ to bounds >: L <: U where L != U.
+     tp is an intersection or union type.
+
    Cases we address here:
    1. tp is abstract, and its upper bound is not mutable -
    2. tp is this/super - the mutability is assumed to be refined according to a receiver-mutability annotation.
@@ -579,7 +451,7 @@ object DotMod {
   CLASSES:
    All classes are assumed to contain the definition "type __MUTABILITY__ >: mutable <: readonly".
   */
-  def mutabilityOf2(tp: Type, whichBound: BoundSpec = UpperBound /*, abstractRecursions: List[Type] = Nil*/)(implicit ctx: Context): Type = {
+  def mutabilityOf2(tp: Type, whichBound: BoundSpec = UpperBound)(implicit ctx: Context): Type = {
 
     def go(tp: Type): Type = {
       // We have to check for This/Super before widening. Otherwise, since ThisType is a singleton, widening would eliminate it.
@@ -642,6 +514,12 @@ object DotMod {
 
             case tp: ErrorType => tp
 
+            case NoPrefix => defn.MutableAnnotType
+
+            case tp: RecType => mutabilityOf2(tp.parent, whichBound)
+
+            case tp: HKApply => mutabilityOf2(tp.superType, whichBound)
+
             case _ =>
               assert(false, s"Unexpected type in mutabilityOf2: $tpWidened" + (if (tp ne tpWidened) s" (widened from $tp)" else ""))
               defn.MutableAnnotType
@@ -692,7 +570,7 @@ object DotMod {
 
   // Abstract type.
   // If the upper bound of the type is definitely mutable, returns mutable; otherwise, returns tpAbstract#__MUTABILITY__.
-  def goAbstract(tpAbstract: Type /*, abstractRecursions: List[Type]*/)(implicit ctx: Context): Type = {
+  def goAbstract(tpAbstract: Type)(implicit ctx: Context): Type = {
     def findBounds(tp: Type): Type = tp match {
       case tp: TypeVar => findBounds(tp.underlying)
       case tp: PolyParam => tp.underlying  // polymorphic parameter -- return underlying bounds
@@ -704,58 +582,10 @@ object DotMod {
     // Return mutable if the upper bound of tpAbstract is definitely mutable.
     findBounds(tpAbstract) match {
       case bounds: TypeBounds
-        if /*!(abstractRecursions contains tpAbstract) &&*/   // recurse only if we haven't seen tpAbstract before
-          (mutabilityOf2(bounds.hi, UpperBound /*, tpAbstract :: abstractRecursions*/) eq defn.MutableAnnotType) =>
-        defn.MutableAnnotType
+        if mutabilityOf2(bounds.hi, UpperBound) eq defn.MutableAnnotType =>
+          defn.MutableAnnotType
       case _ =>
         TypeRef(tpAbstract, MutabilityMemberName)
-    }
-  }
-
-  /**
-    * Returns the mutability of the given type. Optionally, takes the referred-to symbol (assuming tp is a prefix type).
-    */
-  def mutabilityOf(tp: Type, origSym: Symbol = NoSymbol)(implicit ctx: Context): Type = {
-    val tpstable = tp.widenIfUnstable.stripAnnots
-    tpstable match {
-
-      // tp is C.this for some class C
-      case tp: ThisType =>
-        // If we're starting from a static symbol, default to @mutable
-        if (origSym.exists && origSym.isStatic || ctx.owner.isStatic)
-          defn.MutableAnnotType
-        else
-          findStandaloneThisMutability(tp)
-      case tp: SuperType =>
-        // The mutability of super is the same as the mutability of this. See <DISCUSSION: SUPER_THIS_MUT> in the notes.
-        mutabilityOf(tp.thistpe, origSym)
-
-      // Basically, we want to avoid doing a member query if tp depends on an abstract/uninstantiated type member.
-      //   In such cases, we want tp's mutability to depend directly on that type member,
-      //     not default to @mutable. See <DISCUSSION: POLYMORPHIC_2> in notes.
-      case tpw =>
-        val tpwd = tpw.widenDealias.stripAnnots
-        tpwd match {
-
-          // tp widens to an abstract type member - return tp#__MUTABILITY__
-          case tp: TypeRef if !tp.symbol.isClass =>
-            TypeRef(tp, MutabilityMemberName)
-          case tp: TypeVar =>
-            TypeRef(tp, MutabilityMemberName)
-          case tp: PolyParam =>
-            TypeRef(tp, MutabilityMemberName)
-
-          // tp refers to a specific class for which we have an unusual default
-          case tp: TypeRef if tp.symbol eq defn.AnyClass =>  // Any is assumed to be readonly
-            defn.ReadonlyAnnotType
-
-          case tp1 =>  // got something else - look for mutability member - default to mutable
-            val mutDenot = tp1.member(MutabilityMemberName)
-            if (mutDenot.exists)
-              mutDenot.info.bounds.hi  // (We take the upper bound here. See <DISCUSSION: MUT_BOUNDS> in notes.)
-            else
-              defn.MutableAnnotType
-        }
     }
   }
 
@@ -838,8 +668,12 @@ object DotMod {
       // Assume all methods in Byte/Int/Double/Boolean/etc. are @pure
       owner.isPrimitiveValueClass ||
 
-      // Assume annotation constructors are @pure
-      (owner derivesFrom defn.AnnotationClass) ||
+      // Assume annotation constructors are @pure. Amendment: Assume only certain annotation constructors are pure.
+      (owner eq defn.PureAnnot) ||
+      (owner eq defn.AnnotationClass) ||
+      (owner eq defn.StaticAnnotationClass) ||
+      (owner eq defn.ClassfileAnnotationClass) ||
+      //(owner derivesFrom defn.AnnotationClass) ||
 
       // Arrays: only certain methods are @pure
       ((owner eq defn.ArrayClass) && defaultPureArrayMethods.contains(sym.name)) ||
@@ -882,7 +716,7 @@ object DotMod {
           // Otherwise, this-mutabilities referring to an outer class get unfairly reduced; we want to
           // keep outer-class mutabilities in their original forms for as long as possible.
           if (skipWeakNonClassOwners(ctx.owner.owner).derivesFrom(thisTpe.asInstanceOf[ThisType].cls)) {
-            val thisMut = mutabilityOf(thisTpe, ctx.owner)
+            val thisMut = mutabilityOf2(thisTpe)
             refineResultMember(tp, MutabilityMemberName, TypeAlias(thisMut, 1), otherMembersToDrop = List(PrefixMutabilityName))
             // We don't bother keeping the __PREFIX_MUTABILITY__ (or assignability) member.
             // It only matters during assignment, and it should be put back automatically if this method is followed by a viewpoint adaptation.
@@ -902,10 +736,14 @@ object DotMod {
   }
 
   def viewpointAdapt(prefix: Type, target: Type, origSym: Symbol)(implicit ctx: Context): Type = {
-    val preMut = mutabilityOf(prefix, origSym)
+    val preMut = mutabilityOf2(prefix) //mutabilityOf(prefix, origSym)
     val target1 = substThisMutability(target)   // translate this-mutabilities on the target
-    val tpMut = mutabilityOf(target1, ctx.owner)
+    val tpMut = mutabilityOf2(target1) //mutabilityOf(target1, ctx.owner)
     val finalMut = preMut | tpMut
+    //if (prefix ne NoPrefix) {
+    //  System.err.println(em"pre: $prefix mut $preMut")
+    //  System.err.println(em"tp:  $target1 mut $tpMut" + (if (target ne target1) em" (tp subst from $target)" else ""))
+    //}
 
     // Refine the mutability if the final mutability is different than target mutability.
     val tp1 = if (finalMut ne tpMut)
@@ -1132,7 +970,7 @@ object DotMod {
       //  context, but the called method may be in a different tree. E.g., see core/Symbols,
       //  where a search for method Symbols.this.ctx is performed from within Symbols, although ctx is
       //  defined in Contexts (Symbols and Contexts are mixed together).
-      val preMut = mutabilityOf(prefix, tree.symbol)
+      val preMut = mutabilityOf2(prefix)
       // Make sure to do a this-substitution on the declared receiver type.
       // Before substitution, @polyread methods have a declared mutability like C.this.__MUTABILITY__,
       // which would not otherwise compare equal to the receiver mutability.
