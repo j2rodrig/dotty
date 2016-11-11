@@ -937,18 +937,6 @@ object DotMod {
       target
     }
 
-    /** The default denotation of a named class member. Called whenever the named member cannot be found in the given class. */
-/*    override def defaultedMember(clsDenot: ClassDenotation, name: Name, pre: Type, excluded: FlagSet)(implicit ctx: Context): Denotation = {
-      if (name eq MutabilityMemberName) {
-        // Create a JointRef denotation to represent the bounds mutable..readonly;
-        // We create a JointRef because we must return a Denotation (not a Type).
-        val rinfo = TypeBounds(defn.MutableAnnotType, defn.ReadonlyAnnotType)
-        new JointRefDenotation(NoSymbol, rinfo, Period.allInRun(ctx.runId))
-      }
-      else
-        NoDenotation
-    }*/
-
     /** A new object of the same type as this one, using the given context. */
     override def copyIn(ctx: Context) = new DotModTypeOpHooks(ctx)
   }
