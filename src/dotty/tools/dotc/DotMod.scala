@@ -19,6 +19,8 @@ import typer._
 import typer.ErrorReporting._
 import util._
 
+import scala.collection.Set
+
 
 object DotMod {
 
@@ -168,7 +170,8 @@ object DotMod {
   val receiverAnnotationNames = List("polyread", "readonly", "mutable", "mutabilityOf", "mutabilityOfRef").map(typeName)
   val finalAnnotationNames = List("asFinal").map(typeName)
   val typeviewAnnotationNames = List("asType").map(typeName)
-  val pureAnnotationNames = List("pure").map(typeName)
+  val pureAnnotationNames = List("pure", "pureAt").map(typeName)
+  val outerMutabilityAnnotNames = List("pure", "mutableIn").map(typeName)
 
   val allCustomAnnotations = receiverAnnotationNames ::: finalAnnotationNames ::: typeviewAnnotationNames ::: pureAnnotationNames
 
@@ -192,8 +195,8 @@ object DotMod {
       val m1 = reduce(mut1, UpperBound)
       val m2 = reduce(mut2, LowerBound)
 
-      if (m1 ne mut1) System.err.println(em"$mut1 reduced to $m1")
-      if (m2 ne mut2) System.err.println(em"$mut2 reduced to $m2")
+      //if (m1 ne mut1) System.err.println(em"$mut1 reduced to $m1")
+      //if (m2 ne mut2) System.err.println(em"$mut2 reduced to $m2")
 
       if ((m1 ne mut1) || (m2 ne mut2))
         // recurse until mutability reductions reach a steady state
@@ -280,10 +283,6 @@ object DotMod {
     override def copyIn(ctx: Context): TypeComparer = new DotModTypeComparer(ctx)
   }
 
-  /// The mutability of "this" when used by itself in the source program (not as part of a member selection).
-  final def findStandaloneThisMutability(tp: ThisType)(implicit ctx: Context): Type =
-    findThisMutability(ctx.owner, tp.cls)
-
   /// Finds the first owner of s that is either a class or non-weak. If s itself is a class or non-weak, returns s.
   def skipWeakNonClassOwners(s: Symbol)(implicit ctx: Context): Symbol =
     if (!s.isClass && s.isWeakOwner) skipWeakNonClassOwners(s.owner) else s
@@ -314,6 +313,11 @@ object DotMod {
       declaredReceiverType(refSym)   // found it!
     else
       findThisMutability(classOfSym, ofClass)   // keep looking... starting at fromSym's owner
+  }
+
+  /// Translates any @mutableIn[C] or @pure annotations into
+  def findOuterThisMutability(refSym: Symbol, ofClass: Symbol)(implicit ctx: Context): Type = {
+    ???
   }
 
   /**
@@ -468,41 +472,19 @@ object DotMod {
 
             // tp refines __MUTABILITY__; return the aliased / simplified-bounded mutability
             case tp: RefinedType =>
-              if (tp.refinedName eq MutabilityMemberName) tp.member(MutabilityMemberName).info match {
-                case inf: TypeAlias =>  // tp has a specific assigned mutability
-                  inf.alias
-                case inf: RealTypeBounds =>
-                  if (inf.hi eq inf.lo)
-                    inf.hi
-                  else if (inf.hi eq defn.MutableAnnotType)
-                    inf.hi
-                  else if (inf.lo eq defn.ReadonlyAnnotType)
-                    inf.lo
-                  else
-                    // Return the upper bound.
-                    // One thing to be careful of when doing type comparisons:
-                    // mutabilityOf(tp1) <:< mutabilityOf(tp2) may incorrectly return true if tp2's mutability is a RealTypeBounds.
-                    // An alternative is to return TypeRef(tp, MutabilityMemberName) here, but then the type comparision would
-                    // have to be careful to avoid infinite recursion.
-                    if (whichBound eq UpperBound) {
-                      // We've also got a stupidity check here: if the upper bound was defaulted, produce readonly
-                      if (inf.hi eq defn.AnyType) defn.ReadonlyAnnotType else inf.hi
-                    } else {
-                       // We've also got a stupidity check here: if the lower bound was defaulted, produce mutable
-                      if (inf.lo eq defn.NothingType) defn.MutableAnnotType else inf.lo
-                    }
-              } else go(tp.parent)
+              if (tp.refinedName eq MutabilityMemberName) queryMutabilityMember(tp, isClassRef = false)
+              else go(tp.parent)
+
+            // tp is (or widens to) a particular class reference.
+            // Act as though the class reference was refined to a particular mutability.
+            case tp: TypeRef if tp.symbol.isClass =>
+              if (tp.symbol eq defn.AnyClass) defn.ReadonlyAnnotType
+              else queryMutabilityMember(tp, isClassRef = true)
 
             // tp widens to an abstract type member -
             case tp: TypeRef if !tp.symbol.isClass => goAbstract(tp /*, abstractRecursions*/)
             case tp: TypeVar => goAbstract(tp /*, abstractRecursions*/)
             case tp: PolyParam => goAbstract(tp /*, abstractRecursions*/)
-
-            // tp is (or widens to) a particular class reference.
-            // Act as though the class reference was refined to a particular mutability.
-            case tp: TypeRef =>
-              if (tp.symbol eq defn.AnyClass) defn.ReadonlyAnnotType
-              else defn.MutableAnnotType
 
             // Handle intersections and unions. Since we're returning the upper bound, the mutabilities are intersected or unioned respectively.
             case tp: AndType =>
@@ -525,6 +507,63 @@ object DotMod {
               defn.MutableAnnotType
           }
       }
+    }
+
+    // Queries the type for the __MUTABILITY__ member.
+    // If it exists, and it is a type member, returns the specified bound (whichBound).
+    // If it doesn't exist, or is not a type member, returns the default mutability (mutable).
+    def queryMutabilityMember(tp: Type, isClassRef: Boolean): Type = tp.member(MutabilityMemberName) match {
+
+      // There is an explicit __MUTABILITY__ member.
+      case denot: SingleDenotation =>
+        denot.info match {
+
+          // is a type assignment
+          case inf: TypeAlias =>
+            inf.alias
+
+          // is a type definition
+          case inf: RealTypeBounds =>
+            if (inf.hi eq inf.lo)
+              inf.hi
+            else if (inf.hi eq defn.MutableAnnotType)
+              inf.hi
+            else if (inf.lo eq defn.ReadonlyAnnotType)
+              inf.lo
+            else
+              // Return the upper bound.
+              // * One thing to be careful of when doing type comparisons:
+              // mutabilityOf(tp1) <:< mutabilityOf(tp2) may incorrectly return true if tp2's mutability is a RealTypeBounds.
+              // An alternative is to return TypeRef(tp, MutabilityMemberName) here, but then the type comparision would
+              // have to be careful to avoid infinite recursion.
+              // * Regarding isClassRef: if isClassRef is true, then don't return the upper bound.
+              // Instead, return the default mutability, which is the lower bound (normally, mutable).
+              // The reason for isClassRef is to allow distinction between __MUTABILITY__ type refinements
+              // (where we do want to return the upper bound), and class references, where we want to
+              // implicitly assume the existence of an appropriate type refinement).
+              if ((whichBound eq UpperBound) && !isClassRef) {
+                // We've also got a stupidity check here: if the upper bound was defaulted, produce readonly
+                if (inf.hi eq defn.AnyType) defn.ReadonlyAnnotType else inf.hi
+              } else {
+                // We've also got a stupidity check here: if the lower bound was defaulted, produce mutable
+                if (inf.lo eq defn.NothingType) defn.MutableAnnotType else inf.lo
+              }
+
+          // is something else - since there's no /type member/ named __MUTABILITY__, assume it doesn't exist
+          // (there would be a name conflict otherwise). So return the default mutability.
+          case _ =>
+            defn.MutableAnnotType
+        }
+
+      // There is not an explicit __MUTABILITY__ member. Return the default mutability.
+      // (Explanation: We've either got a NoDenotation or MultiDenotation here.
+      //  If it's a NoDenotation, the member doesn't exist.
+      //  We shouldn't be getting a MultiDenotation from a type member query,
+      //  and in any case intersection-type handling should have dealt with this issue before we got here.
+      //  Regardless, a MultiDenotation should mean that __MUTABILITY__ is defined as something
+      //  other than a type member, so the actual mutability is the default mutability.)
+      case _ =>
+        defn.MutableAnnotType
     }
 
     // Mutability intersection.
@@ -589,6 +628,257 @@ object DotMod {
     }
   }
 
+
+  //-----OUTER-MUTABILITY TRY 2B------//
+
+  def findHighestMutableLevel(tp: Type)(implicit ctx: Context): Type = {
+
+    // Finds the first (innermost) reference on a prefixes list where the next element is non-mutable or non-existent.
+    // Note: The mutability of the first element of the list is ignored. That is, the first element of the list may
+    //   be returned even if that element is non-mutable. This is a reasonable behaviour because we are testing/checking
+    //   for outer references, not the basic receiver mutability.
+    def lastMutable(prefixes: List[Type]): Type = {
+      if (prefixes.tail eq Nil)
+        defn.RootClass.typeRef  // reached the end of the prefix chain. It's possible that prefixes.head is not <root> if we're calling a nested method, but return <root> anyway (for compatibility with outer reference chains).
+      else if (mutabilityOf2(prefixes.tail.head) eq defn.MutableAnnotType)
+        lastMutable(prefixes.tail)
+      else prefixes.head  // next item in prefixes is not mutable.
+    }
+
+    lastMutable(findPrefixReferences(tp))
+  }
+
+  def findHighestMutableLevel(atSym: Symbol)(implicit ctx: Context): Type = {
+
+    // Climbs the ownership chain to find the innermost @mutableIn[] annotation.
+    def lastMutable(sym: Symbol): Type = {
+      sym.annotationsWithoutCompleting(outerMutabilityAnnotNames).foreach { annot =>
+
+        // @mutableIn[p.C];
+        if (annot.symbol eq defn.MutableInAnnot) {
+          return getLastTypeArgOf(annot.tree.tpe)  // todo do we care about polymorphism in this parameter? (No. - but we do want to update receiver-mutability searching to be compatible with this annotation.)
+        }
+
+      }
+      val owner = sym.owner //skipValDefs(sym.owner)
+      if (!owner.exists) sym.typeRef  // base case: root reference
+      else lastMutable(owner)
+    }
+
+    def skipValDefs(s: Symbol): Symbol =
+      // Skip weak owners, except for packages and modules.
+      if (s.isWeakOwner && !s.is(Package) && !s.is(Module)) skipValDefs(s)
+      else s
+
+    lastMutable(skipValDefs(atSym))
+  }
+
+  def symIsContainedInOwnerOfType(sym: Symbol, tp: Type)(implicit ctx: Context): Boolean = tp match {
+
+    // Should we check to see of tp's class contains the symbol directly, or whether tp's owner class contains the symbol?
+    // I think we have to check both.
+    // It is possible for either tp's class or enclosing class to be unrelated to the given symbol sym,
+    //   so we have to check both cases - if either the class or enclosing class contains sym, we return true.
+    case tp: TypeRef =>
+      sym.isContainedIn(tp.symbol) ||
+      sym.isContainedIn(tp.symbol.lexicallyEnclosingClass)
+
+    // tp is an intersection of (otherwise-unrelated) classes.
+    // The reference referred to by tp is known to be mutable.
+    // If either branch of the intersection contains sym, then we return true.
+    // (Note: I expect that an intersection type here will be a very rare occurrence.)
+    case tp: AndType =>
+      symIsContainedInOwnerOfType(sym, tp.tp1) || symIsContainedInOwnerOfType(sym, tp.tp2)
+
+    case tp: ErrorType => true
+
+    case _ => false
+  }
+
+  def checkPrefixToOuterCompatibility(prefix: Type, atSym: Symbol)(implicit ctx: Context): Boolean = {
+    val highestPrefix = unwrapToConcreteClass(findHighestMutableLevel(prefix))
+    val highestOuter = unwrapToConcreteClass(findHighestMutableLevel(atSym))
+    val isContained = symIsContainedInOwnerOfType(highestOuter.classSymbol, highestPrefix)
+
+    //System.err.println(em"at $atSym: highest mutable outer == $highestOuter")
+
+    //if (!isContained)
+    //  assert(false, em"Containment error: Prefix $highestPrefix does not contain $highestOuter")  // todo change to error message instead of assert
+    isContained
+  }
+
+  //-----OUTER-MUTABILITY TRY 2------//
+
+  // New approach to outer mutability:
+  // 1. Find the mutability of the current type.
+  // 2. Unwrap the current type to expose its prefix.
+  // 3. Repeat from 1, setting the current type to the prefix type.
+
+  // Finds underlying named-class references.
+  // May return: p.C, where C is a named class, or an intersection of such references.
+  //   If tp is NoType, NoPrefix, or an error type, returns tp unchanged.
+  def unwrapToConcreteClass(tp: Type)(implicit ctx: Context): Type = tp.widenDealias.stripAnnots match {
+    case tp: TypeRef if tp.symbol.isClass => tp
+    case tp: TypeProxy => unwrapToConcreteClass(tp.underlying)
+    case AndType(tp1, tp2) => unwrapToConcreteClass(tp1) & unwrapToConcreteClass(tp2)
+    case tp: OrType => unwrapToConcreteClass(tp.approximateUnion)
+    case NoType => NoType
+    case NoPrefix => NoPrefix
+    case tp: ErrorType => tp
+    case _ =>
+      assert(false, s"Unexpected type $tp in unwrapToConcreteClass")
+      tp
+  }
+
+  // Finds valid prefixes of underlying named-class references.
+  def unwrapToPrefix(tp: Type)(implicit ctx: Context): Type = unwrapToConcreteClass(tp) match {
+    case tp: TypeRef => tp.prefix
+    case AndType(tp1, tp2) => unwrapToPrefix(tp1) & unwrapToPrefix(tp2)
+    case _ => tp
+  }
+
+  // Finds a list of all prefix references, starting at tp and ending at <root>.
+  def findPrefixReferences(tp: Type)(implicit ctx: Context): List[Type] = {
+    val prefix = unwrapToPrefix(tp)
+    if (prefix.exists && (prefix ne NoPrefix) && !prefix.isError)
+      tp :: findPrefixReferences(prefix)
+    else
+      List(tp)
+  }
+
+  case class PairedMutability(tp: Type, mutability: Type)
+
+  def findPrefixMutabilities(tp: Type)(implicit ctx: Context): List[PairedMutability] = {
+    val current = PairedMutability(tp, mutabilityOf2(tp))
+    val prefix = unwrapToPrefix(tp)
+    if (prefix.exists && (prefix ne NoPrefix) && !prefix.isError)
+      current :: findPrefixMutabilities(prefix)
+    else
+      List(current)
+  }
+
+  def findNonMutableOuters(atSym: Symbol)(implicit ctx: Context): Set[Type] = {
+    var outers = Set[Type]()
+    var sym = atSym
+    while (sym ne NoSymbol) {
+      sym.annotationsWithoutCompleting(pureAnnotationNames).foreach { annot =>
+        val annotSymbol = annot.symbol
+
+        // @pureAt[p.C];
+        if (annotSymbol eq defn.PureAtAnnot) {
+          val tpArg = getLastTypeArgOf(annot.tree.tpe)
+          outers ++= findPrefixReferences(tpArg).map(unwrapToConcreteClass)
+        }
+
+        // @pure; todo
+      }
+      sym = sym.owner
+    }
+    outers
+  }
+
+  def findMutableOuters(atSym: Symbol)(implicit ctx: Context): List[Type] = {
+    if (atSym.effectiveOwner is Method) Nil   // atSym is a nested method - ignore outer references
+    else {
+      val allOuters = findPrefixReferences(atSym.enclosingClass.thisType).tail // do a .tail to remove immediate receiver reference
+      val nonMutableOuters = findNonMutableOuters(atSym)
+      allOuters.filter(!nonMutableOuters.contains(_)).map(unwrapToConcreteClass)
+    }
+  }
+
+  def prefixListToString(tpList: List[Type])(implicit ctx: Context): String = {
+    val strs = tpList.map { tp => em"$tp" }
+    strs.mkString(" & ")
+  }
+
+  def isCallableByPrefix(prefix: Type, atSym: Symbol)(implicit ctx: Context): Boolean = {
+    val allPrefixes = findPrefixReferences(prefix).tail  // do a .tail to remove immediate receiver reference
+    val mutablePrefixes = allPrefixes.map(unwrapToConcreteClass).filter(mutabilityOf2(_) eq defn.MutableAnnotType)
+    val mutableOuters = findMutableOuters(atSym)
+    val callable = makeAndType(mutablePrefixes) <:< makeAndType(mutableOuters)
+    if (!callable)
+      System.err.println(em"Call to $atSym has incompatible prefix.\n   Got: ${prefixListToString(mutablePrefixes)}\n   Expected: ${prefixListToString(mutableOuters)}\n")
+    callable
+  }
+
+  def checkPrefixes(tree: tpd.Tree, prefixes: List[PairedMutability], nonMutableOuters: Set[Type])(implicit ctx: Context): tpd.Tree = {
+    // Look at prefix tail (to skip immediate receiver reference)
+    prefixes.tail.foreach { prefix =>
+      if (prefix.mutability ne defn.MutableAnnotType) {
+        val found = nonMutableOuters.exists { tpOuter =>
+          prefix.tp <:< tpOuter
+        }
+        if (!found) return errorTree(tree, em"Outer-reference mutability error:\n   Receiver has a non-mutable prefix ${prefix.tp}, but a mutable prefix was expected")
+      }
+    }
+    tree
+  }
+
+
+  //-----OUTER-MUTABILITY TRY 1------//
+
+  def makeAndType(tpList: List[Type])(implicit ctx: Context): Type = {
+    if (tpList eq Nil) defn.AnyType
+    else if (tpList.tail eq Nil) tpList.head
+    else AndType(tpList.head, makeAndType(tpList.tail))
+  }
+
+  // STEP 1: Find outer references
+  def findOuterReferences(atSym: Symbol)(implicit ctx: Context): List[Type] = {
+    val owner = atSym.enclosingClass
+    val tp =
+      if (owner is Module) owner.termRef
+      else owner.thisType
+    findPrefixReferences_dep(tp)
+  }
+  def findOuterReferences_dep(implicit ctx: Context): List[Type] = findOuterReferences_dep(ctx.owner)
+  def findOuterReferences_dep(atSym: Symbol, skipEnclosingClass: Boolean = false)(implicit ctx: Context): List[Type] = {
+    if (atSym eq NoSymbol) Nil
+    else if (atSym.isClass) {
+      if (skipEnclosingClass) findOuterReferences_dep(atSym.owner, skipEnclosingClass = false)
+      else atSym.thisType :: findOuterReferences_dep(atSym.owner, skipEnclosingClass)
+    }
+    else findOuterReferences_dep(atSym.owner, skipEnclosingClass)
+  }
+  def findOuterReferenceMutabilities(implicit ctx: Context): List[Type] = findOuterReferenceMutabilities(ctx.owner)
+  def findOuterReferenceMutabilities(atSym: Symbol, skipEnclosingClass: Boolean = false)(implicit ctx: Context): List[Type] = {
+    if (atSym eq NoSymbol) Nil
+    else if (atSym.isClass) {
+      if (skipEnclosingClass) findOuterReferenceMutabilities(atSym.owner, skipEnclosingClass = false)
+      else defn.MutableAnnotType :: findOuterReferenceMutabilities(atSym.owner, skipEnclosingClass)  // TODO: replace defn.MutableAnnotType with actual mutability
+    }
+    else findOuterReferenceMutabilities(atSym.owner)
+  }
+
+  // STEP 2: Discover prefix-type references
+  def findPrefixReferences_dep(tp: Type)(implicit ctx: Context): List[Type] = tp match {
+
+    // got a term p.x; add p.x to the prefix list, then look at p
+    case tp: TermRef if tp.prefix ne NoPrefix => tp :: findPrefixReferences_dep(tp.prefix)
+
+    // got a variable x; widen it to find higher prefixes
+    case tp: TermRef => findPrefixReferences_dep(tp.widen)
+
+    // got a type p.C.this; add it, then look at outer references of p.C
+    case tp: ThisType => tp :: findPrefixReferences_dep(tp.tref)
+      // /*tp :: */ findOuterReferences(tp.cls) //findPrefixReferences(tp.tref)
+
+    // got a type q.D.super[p.C.this]; look at p.C.this
+    case tp: SuperType => findPrefixReferences_dep(tp.underlying)
+
+    // got a type p.C; look at p
+    case tp: TypeRef => findPrefixReferences_dep(tp.prefix)
+
+    // got a type proxy; look at underlying type
+    case tp: TypeProxy => findPrefixReferences_dep(tp.underlying)
+
+    // got a ground type; we've either reached the root class, gotten an error, or gotten something unexpected
+    case _ => Nil
+  }
+  // todo: findPrefixReferenceMutabilities
+
+
+
   /**
     * Returns the mutability of a symbol's declared receiver-mutability type.
     * If no RI annotations are present on the symbol, defaults to @mutable.
@@ -610,6 +900,14 @@ object DotMod {
 
     // No RI annotations found.
     defn.MutableAnnotType
+  }
+
+  def annotationToPurityType(annot: Annotation, classSym: Symbol)(implicit ctx: Context): Type = {
+    assert(classSym.isClass, em"Expected a class, got $classSym")
+    val symbol = annot.symbol
+
+    if (symbol eq defn.PureAtAnnot) getLastTypeArgOf(annot.tree.tpe)
+    else NoType
   }
 
   def annotationToMutabilityType(annot: Annotation, classSym: Symbol)(implicit ctx: Context): Type = {
@@ -917,8 +1215,8 @@ object DotMod {
       // Don't do custom logic in a types-erased phase
       if (!ctx.erasedTypes) {
 
-        if (denot.symbol.name eq termName("w"))
-          false
+        //if (denot.symbol.name eq termName("w"))
+        //  false
 
         // Do viewpoint adaption for terms only.
         // Note: Changed to canHaveAnnotations from isViewpointAdaptable.
@@ -1023,6 +1321,35 @@ object DotMod {
       case tree: tpd.RefTree if (tree.symbol is Method) && !assumePure(tree.symbol) =>
         tree.tpe match {
           case TermRef(prefix, underlying) =>
+
+            // Prefix validation
+            //val prefixes = findPrefixMutabilities(prefix)
+            //val outers = findNonMutableOuters(tree.symbol)
+            //val prefixes = findPrefixReferences(prefix)
+            //val andPrefix = makeAndType(prefixes)
+            //System.err.println(em"Prefix type: $prefix")
+            //System.err.println(em"Selecting ${tree.symbol}; prefixes are: $andPrefix")
+
+            //val y = findPrefixMutabilities(tree.symbol.owner.thisType)
+            //val outers = findOuterReferences(tree.symbol)
+                //findOuterReferences_dep(tree.symbol, tree.symbol.isConstructor)
+            //val andOuters = makeAndType(outers)
+            //System.err.println(em" outers at ${tree.symbol} are: $andOuters")
+
+            //System.err.println(em"$andPrefix (in call to ${tree.symbol})")
+
+            //System.err.println("")
+
+            //assert (x.length == y.length, em"Mismatch on prefix $prefix calling ${tree.symbol}.")
+
+            //val tre1 = checkPrefixes(tree, prefixes, outers)
+            //if (tre1.tpe.isError) return tre1
+            //isCallableByPrefix(prefix, tree.symbol)
+
+            //checkPrefixToOuterCompatibility(prefix, tree.symbol)
+
+            // TODO: the checkPrefixToOuterCompatibility seems to be very slow (see, e.g., the pos_rbtree test). Try an approach that uses less compute time...
+
             val tree1 = checkedReceiver(prefix, tree)
             checkedPurity(prefix, tree1)
           case _ =>

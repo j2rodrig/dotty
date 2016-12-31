@@ -2651,3 +2651,226 @@ OK, this sounds good. I'm looking forward to hearing about how it works out.
 Ondřej
 
 > - Jonathan
+
+
+<RETURNING-AGAIN-TO-PURE-AT-MEANING>
+@pureAt[p.D] means: The reference p.D.this widens to merely p.D (that is, no mutability refinement),
+	and for every class q.C enclosing D, q.C.this widens to merely q.C (that is, no mutability refinement).
+For classes r.E inside p.D, r.E.this is allowed to be mutable (unless otherwise annotated).
+If @pureAt[p.D]'s context's immediately-enclosing class is D, then @pureAt[p.D] is equivalent to @pure.
+
+Viewpoint adaptation:
+  If p.c:C{__MUTABILITY__ = readonly} then c.D is assumed to refine { __PURE_AT__ = p.C }
+
+	object p {
+		class C {
+			class D {
+				def m = {
+					val c1: p.C @readonly = ???
+					val d1: c1.D = new c1.D
+					d1.m2
+				}
+				// receiver for m2 assumes
+				@pureAt[p.C] def m2 = ???
+			}
+		}
+	}
+
+Again:
+	class Y {
+		class X1 {
+		}
+		@pureAt[Y] class X2 {
+			def m1() = ???
+			@pureAt[Y] def m2() = { local_x = ??? }  // mutation inside X allowed, but not at Y or above.
+			var local_x = ???
+		}
+	}
+	val y: Y @readonly = ???
+	new y.X2()  // error: cannot select X2 from path y: constructor X2.__init__ expects @mutable, got @pureAt[Y]
+	val x: y.X2 @pureAt[Y] = new y.X2()  //
+	x.m1()   // error
+	x.m2()   // ok
+
+x@pureAt[p.C] means that all references
+
+Framing:
+When a method m is called, m takes a receiver reference. In the Dotty language, the "receiver" is not just
+a single reference, but a vector of references, one reference per enclosing class. When m is called, the
+mutability of each element of this vector must be compatible with the corresponding receiver mutability
+declared at m.
+
+However, a "receiver vector" is still just a single reference. So this reference must encode the entire
+mutability vector (or approximate it).
+
+But we're not really talking about singleton types here. If we have a reference x of class C, and class D
+encloses class C, then x's type must have some notion of what its mutability is wrt. D (mutability wrt. C
+is already handled by the existing mutability system). Generalizing, if we have an arbitrary type X that
+has C as a base class, then X must have some notion of what its mutability is wrt. D. Of course, X may
+have many base classes _C, with just as many enclosing classes _D. We don't know which _D will be the actual
+enclosing class at runtime, so the system here must deal with all possible _D.
+
+One way to handle this issue is to invent a type mechanism to say, "X is mutable up to classes [_D1,..,_Dn]."
+(Reim has a simpler binary version of this: every method has a receiver mutability and a static mutability.
+I propose to extend this mechanism to include enclosing classes.)
+What a type must include to implement this mechanism is a set of classes. Can this set be implemented as
+an intersection type? (Yes.)
+
+Proposed special members:
+  __MUTABILITY__ - basic receiver mutability.
+  __MUTABLE_UP_TO__ -
+    Allowed types:
+      Top: Any
+      Intersection: p1.D1 & .. & pn.Dn
+      Bottom: Nothing
+Intersection is an arbitrary type whose base classes constitute the boundaries within which the reference is allowed to be mutable.
+Any means that the reference is allowed to be mutable everywhere (up to root/static scope).
+Nothing means that the reference cannot mutate any enclosing scope.
+If G.this is requested for some outer class G, and G is or is inside a class E where Intersection contains E or a
+ superclass of E, then G.this is allowed to be considered mutable. G.this is also allowed to be mutable if __MUTABLE_UP_TO__ is Any.
+If __MUTABLE_UP_TO__ is not present, it is defaulted to Any where __MUTABILITY__ is (or is defaulted to) mutable,
+  and Nothing where __MUTABILITY__ is (or is defaulted to) something other than mutable.
+
+Is there a way to reuse subtyping relationships to expedite progress?
+Where a type contains the type initialization "__MUTABLE_UP_TO__ = X", class p.G is a local boundary if p.G.this.type <: X.
+
+Receiver Example:
+class E {
+	class D {
+		class C {
+			/* __READONLY_REFS__ =+ root.E.this */ def m() = {
+			}
+			/* __READONLY_REFS__ =+ root.E.this.D.this.C.this */ def m2() = {   // default from "@readonly def m2"
+			}
+			/* __READONLY_REFS__ =+ root.E.this.D.this */ def m3() = {  // two readonly references in environment
+			}
+
+			/* __MUTABLE_OUTERS__ =+ root.E.this.D.this */ def m4() = {  // mutable D.this, E.this is polyread
+			}
+			/* __MUTABLE_OUTERS__ =+ root & root.E.this.D.this */ def m5() = {  // mutable in static root and D.this
+			}
+			/* __MUTABLE_OUTERS__ =+ root & root.E.this & root.E.this.D.this */ def m6() = {  // mutable in root, E.this, and D.this
+			}
+		}
+	}
+}
+//val d: e.D @outer[root.E{__MUTABILITY__=+readonly}] = new e.D()  // d is mutable, but with a boundary: e.type.widen is root.E @readonly.
+//       // note: root.E.this gets replaced by e inside D here
+//val c: d.C @outer[root.E{__MUTABILITY__=+readonly}] = new d.C()  // viewpoint adaptation copies boundary without change: d is mutable.
+//       // note: e.D.this gets replaced by d inside C here
+//c.m()  // why is this OK?
+
+val e: root.E @readonly /* __READONLY_REFS__ =+ ??? */ = ???
+val d: e.D /* __READONLY_REFS__ =+ e */ = ???
+       // note: root.E.this gets replaced by e inside D here
+val c: d.C /* __READONLY_REFS__ =+ e */ = ???  //
+       // note: e.D.this gets replaced by d inside C here
+c.m()  // ok: c and m's receiver sig. both have "__READONLY_REFS__ =+ e"
+
+val e: root.E @readonly /* __MUTABLE_OUTERS__ =+ root */ = ???
+val d: e.D /* __MUTABLE_OUTERS__ =+ root */ = ???      // e isn't mutable, so it doesn't get added to the mutable-outers list
+       // note: root.E.this gets replaced by e inside D here
+val c: d.C /* __MUTABLE_OUTERS__ =+ root & d */ = ???  // d is mutable, so it gets added to the list
+       // note: e.D.this gets replaced by d inside C here
+c.m5()  // OK: c and m's sig. both have "__MUTABLE_OUTERS__ =+ root & d"
+c.m6()  // error: root & d is not compatible with root & e & d
+
+Possible implementation plan:
+xxx 1. Viewpoint adaptation: type selections: p.T: (can't refine p.T, otherwise dotc will complain that "new p.T" isn't a class).
+yyy 1. Mutable-outer queries: mutableOuter(p.T) returns mutableOuter(p.type.widen) if p is non-mutable,
+yyy	    mutableOuter(p.type.widen) & p.type if p is mutable,
+yyy 	Any if p is root.
+zzz1. Viewpoint adaptation redeux: we actually do type refinements when info is requested on p.T (avoiding the problem above).
+zzz 	???
+Recontextualization:
+(it seems that
+...
+
+
+Can an overridden method call its super? (Yes.)
+
+(Example of subclassing with mutable outers)
+class E {
+	class C {
+		/* __MUTABLE_OUTERS__ =+ root.E */ def m() = ???
+	}
+}
+val e: root.E = ???
+class D extends e.C {
+	/*  */ override def m() = {
+		// Note no __MUTABLE_OUTERS__ on overriding m. We don't check overrides here. (See [1] below.)
+
+		super.m();  // or: root.D.super[e.C].m()
+		// root.D.super is mediated through root.D.this
+		// The reference e.C must be equivalent to e.C{ __MUTABLE_OUTERS__ =+ e }
+		// so super[e.C] must widen to e.C{ __MUTABLE_OUTERS__ =+ e }
+	}
+}
+// The "outer" reference of super.m is actually e; the prefix of e.C.
+// So the mutability of e matters; if e widens to root.E@readonly, then super[e.C].m could not be called from D.this.m.
+
+// [1] Actually, the __MUTABLE_OUTERS__ = root on m. D's base class is root.e.C.
+// So __MUTABLE_OUTERS__ on C.m has root & root.E.this, and D.m has just root.
+//  We have the subtyping relationship:  root & root.E.this  <:  root
+//  Method receivers are contravariant, so the override of m checks out OK.
+
+It seems that I'm not really looking for a type-annotation-style mechanism here.
+
+Proposal: Each method is associated with a set of @polyread outer references.
+	When the method is called, every non-mutable reference in the receiver's stable prefix must exist in this set.
+Flipping the system: each method is associated with a set of mutable outer references. (Every outer reference not in this set is considered @polyread.)
+	When the method is called, every mutable reference in the receiver's stable prefix must exist in this set.
+	(The advantage of the flipped system is that the receiver's outer-reference discovery and checking are more thoroughly tested.)
+
+Q: What is the "root" reference defined to be? A: defn.RootPackage. Its type (info) is TypeRef(NoPrefix, RootClass).
+Info: The owner of top-level terms is RootClass. The owner of top-level types is EmptyClass. (from Denotations#staticRef).
+	The basic structure seems to be the following:
+	class RootClass {
+		object scala { ... }
+		object java { ... }
+		object dotty { ... }
+		object <empty> { ... }  // this object contains code that is not part of any other package
+		object <special-ops> { ... }
+	}
+	val RootPackage: RootClass = ...
+
+Other items:
+1. Do automatic refinement of ValDef/DefDef result types: If the rhs is non-mutable, and the lhs result type is
+   mutable (but does not have a mutability refinement), then refine it to the rhs mutability.
+
+Defining boundary testing in terms of subtyping instead of subclassing prevents fragility problems.
+
+Plan:
+	1. Implement outer-reference mutability discovery for methods. (step A: return a list of references. step B: reduce the list as method annotations are parsed.)
+	2. Implement prefix-mutability discovery.
+	3. Implement check for prefix/outer-mutability compatibility.
+
+AFTER 2 ATTEMPTS AT PREFIX/OUTER MUTABILITY CHECKING:
+There is a basic issue where inheritance causes prefix types to not match outer-reference types. For example, in building core.Symbols,
+the code structure is the following (simplified for readability):
+
+	object core {
+		object Symbols {
+			def synthesizeCompanionMethod(..., owner: SymDenotation ...) =
+                if (owner.exists ...) ...   // calling "exists" from prefix "owner"
+		}
+		object SymDenotations {
+			class SymDenotation extends Denotation {  // the class of "owner" is here
+			}
+		}
+		object Denotations {
+			class Denotation {
+				def exists: Boolean = ...  // "exists" exists here
+			}
+		}
+	}
+
+If I modify "def exists" to "@pureAt[Denotations] def exists", I have a problem:
+The module "Denotations" does not exist in the prefix path of "owner".
+What I find instead in the prefix of "owner" is SymDenotations, since "owner" is a SymDenotation.
+
+Alternative solution: Use "@mutableTo[Denotation]" instead of "@pureAt[Denotations]".
+
+Checking: The highest-level mutable class in the outers chain must be inside some mutable
+class in the receiver-prefix chain. (It suffices to say that the highest-level mutable symbol
+in the outers chain must be inside the highest-level mutable symbol in the prefix chain.)
