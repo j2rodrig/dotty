@@ -124,7 +124,8 @@ class tests extends CompilerTest {
   @Test def dotmod_result_override() = compileFile(dotmodNegDir, "result_override")
   @Test def dotmod_receiver_override() = compileFile(dotmodNegDir, "receiver_override")
   @Test def dotmod_value_override() = compileFile(dotmodNegDir, "value_override")
-  @Test def dotmod_class_immutability() = compileFile(dotmodNegDir, "class_immutability")  // this test probably doesn't make sense any more
+  @Test def dotmod_class_immutability() = compileFile(dotmodNegDir, "class_immutability")
+  @Test def dotmod_explicit_mutability_member() = compileFile(dotmodNegDir, "explicit_mutability_member")
   @Test def dotmod_as_final() = compileFile(dotmodNegDir, "as_final")
   @Test def dotmod_as_type() = compileFile(dotmodNegDir, "as_type")
   @Test def dotmod_as_final_override() = compileFile(dotmodNegDir, "as_final_override")
@@ -152,6 +153,7 @@ class tests extends CompilerTest {
     dotmod_receiver_override()
     dotmod_value_override()
     dotmod_class_immutability()
+    dotmod_explicit_mutability_member()
     dotmod_as_final()
     dotmod_as_type()
     dotmod_as_final_override()

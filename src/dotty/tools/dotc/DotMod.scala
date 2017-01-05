@@ -24,12 +24,18 @@ import scala.collection.Set
 
 object DotMod {
 
+  // Flags
+  val enableFrontEnd: Boolean = true
+  val enableRefChecks: Boolean = true
+
   // FRONT-END INITIALIZATION
 
   def customInit(ctx: FreshContext): FreshContext = {
-    ctx.setTypeComparerFn(new DotModTypeComparer(_))
-    ctx.setTypeOpHooks(new DotModTypeOpHooks(ctx))
-    ctx.setTyper(new DotModTyper)
+    if (enableFrontEnd) {
+      ctx.setTypeComparerFn(new DotModTypeComparer(_))
+      ctx.setTypeOpHooks(new DotModTypeOpHooks(ctx))
+      ctx.setTyper(new DotModTyper)
+    }
     ctx
   }
 
@@ -515,6 +521,7 @@ object DotMod {
     def queryMutabilityMember(tp: Type, isClassRef: Boolean): Type = tp.member(MutabilityMemberName) match {
 
       // There is an explicit __MUTABILITY__ member.
+      //  (or an ErrorDenotation, which has TypeAlias(ErrorType) info; or NoDenotation, which has NoType info.)
       case denot: SingleDenotation =>
         denot.info match {
 
@@ -523,7 +530,7 @@ object DotMod {
             inf.alias
 
           // is a type definition
-          case inf: RealTypeBounds =>
+          case inf: TypeBounds =>
             if (inf.hi eq inf.lo)
               inf.hi
             else if (inf.hi eq defn.MutableAnnotType)
@@ -549,20 +556,19 @@ object DotMod {
                 if (inf.lo eq defn.NothingType) defn.MutableAnnotType else inf.lo
               }
 
-          // is something else - since there's no /type member/ named __MUTABILITY__, assume it doesn't exist
-          // (there would be a name conflict otherwise). So return the default mutability.
+          // doesn't exist (NoType) or is something else - since there's no /type member/ named __MUTABILITY__,
+          // assume it doesn't exist (there would be a name conflict otherwise). So return the default mutability.
           case _ =>
             defn.MutableAnnotType
         }
 
       // There is not an explicit __MUTABILITY__ member. Return the default mutability.
-      // (Explanation: We've either got a NoDenotation or MultiDenotation here.
-      //  If it's a NoDenotation, the member doesn't exist.
-      //  We shouldn't be getting a MultiDenotation from a type member query,
-      //  and in any case intersection-type handling should have dealt with this issue before we got here.
-      //  Regardless, a MultiDenotation should mean that __MUTABILITY__ is defined as something
-      //  other than a type member, so the actual mutability is the default mutability.)
-      case _ =>
+      // (Explanation: The only thing we should get here is a MultiDenotation.
+      //  We should never get a MultiDenotation from a type member query,
+      //  since dotty's intersection-type handling should have resolved the type-member query into a SingleDenotation.
+      //  A MultiDenotation here should mean that __MUTABILITY__ is defined as something
+      //  other than a type member, so the mutability type member is not defined by the programmer.)
+      case _: MultiDenotation =>
         defn.MutableAnnotType
     }
 
@@ -1486,7 +1492,10 @@ object DotMod {
     override val treeTransform = new MyTransform
 
     override def run(implicit ctx: Context): Unit = {
-      super.run(ctx.fresh.setTypeComparerFn(new DotModTypeComparer(_)))
+      if (enableRefChecks)
+        super.run(ctx.fresh.setTypeComparerFn(new DotModTypeComparer(_)))
+      else
+        super.run
     }
 
     class MyTransform extends Transform {
@@ -1561,15 +1570,17 @@ object DotMod {
         }
       }
 
-      override def transformTemplate(tree: tpd.Template)(implicit ctx: Context, info: TransformerInfo) = {
-        val cls = ctx.owner
-        val opc = new OverridingPairs.Cursor(cls)
-        while (opc.hasNext) {
-          customOverrideCheck(opc.overriding, opc.overridden)
-          checkFinals(opc.overriding, opc.overridden)
-          checkTypeViews(opc.overriding, opc.overridden)
-          checkPurityEffects(opc.overriding, opc.overridden)
-          opc.next()
+      override def transformTemplate(tree: tpd.Template)(implicit ctx: Context, info: TransformerInfo): tpd.Tree = {
+        if (enableRefChecks) {  // todo: ideally, enableRefChecks==true should prevent a DotModRefChecks from being instantiated in the first place...
+          val cls = ctx.owner
+          val opc = new OverridingPairs.Cursor(cls)
+          while (opc.hasNext) {
+            customOverrideCheck(opc.overriding, opc.overridden)
+            checkFinals(opc.overriding, opc.overridden)
+            checkTypeViews(opc.overriding, opc.overridden)
+            checkPurityEffects(opc.overriding, opc.overridden)
+            opc.next()
+          }
         }
         super.transformTemplate(tree)
       }
