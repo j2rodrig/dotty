@@ -1,0 +1,6 @@
+title: Dotty Documentation
+repository_url: "http://github.com/lampepfl/dotty"
+baseurl: ""
+theme: minima
+gems:
+    - jekyll-toc
