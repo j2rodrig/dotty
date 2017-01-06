@@ -2874,3 +2874,57 @@ Alternative solution: Use "@mutableTo[Denotation]" instead of "@pureAt[Denotatio
 Checking: The highest-level mutable class in the outers chain must be inside some mutable
 class in the receiver-prefix chain. (It suffices to say that the highest-level mutable symbol
 in the outers chain must be inside the highest-level mutable symbol in the prefix chain.)
+
+
+ANNOTATION ISSUES:
+------------------
+A recent commit broke argument-taking annotations (e.g., @mutabilityOf, @asType).
+
+Suspect code from Namer.scala, which types annotations in a context where the necessary arguments cannot be found:
+
+  /** Add annotations of `stat` to `sym`.
+   *  This method can be called twice on a symbol (e.g. once
+   *  during the `annotate` phase and then again during completion).
+   *  Therefore, care needs to be taken not to add annotations again
+   *  that are already added to the symbol.
+   */
+  def addAnnotations(sym: Symbol, stat: MemberDef)(implicit ctx: Context) = {
+    // (1) The context in which an annotation of a top-level class or module is evaluated
+    // is the closest enclosing context which has the enclosing package as owner.
+    // (2) The context in which an annotation for any other symbol is evaluated is the
+    // closest enclosing context which has the owner of the class enclosing the symbol as owner.
+    // E.g in
+    //
+    //     package p
+    //     import a.b
+    //     class C {
+    //       import d.e
+    //       @ann m() ...
+    //     }
+    //
+    // `@ann` is evaluated in the context just outside `C`, where the `a.b`
+    // import is visible but the `d.e` import is forgotten. This measure is necessary
+    // in order to avoid cycles.
+    lazy val annotCtx = {
+      var target = sym.owner.lexicallyEnclosingClass
+      if (!target.is(PackageClass)) target = target.owner
+      var c = ctx
+      while (c.owner != target) c = c.outer
+      c
+    }
+    for (annotTree <- untpd.modsDeco(stat).mods.annotations) {
+      val cls = typedAheadAnnotation(annotTree)(annotCtx)
+      if (sym.unforcedAnnotation(cls).isEmpty) {
+        val ann = Annotation.deferred(cls, implicit ctx => typedAnnotation(annotTree))
+        sym.addAnnotation(ann)
+        if (cls == defn.InlineAnnot && sym.is(Method, butNot = Accessor))
+          sym.setFlag(Inline)
+      }
+    }
+  }
+
+Temporary fix: Redefined annotCtx to be equal to ctx:
+    // JR: The problem with the foregoing is that we lose the ability to give arguments
+    //     to annotations if those arguments are defined inside `C`.
+    //     There must be a better way to handle the cyclic references.
+    lazy val annotCtx = ctx

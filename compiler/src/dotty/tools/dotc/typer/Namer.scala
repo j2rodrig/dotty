@@ -586,13 +586,17 @@ class Namer { typer: Typer =>
     // `@ann` is evaluated in the context just outside `C`, where the `a.b`
     // import is visible but the `d.e` import is forgotten. This measure is necessary
     // in order to avoid cycles.
-    lazy val annotCtx = {
-      var target = sym.owner.lexicallyEnclosingClass
-      if (!target.is(PackageClass)) target = target.owner
-      var c = ctx
-      while (c.owner != target) c = c.outer
-      c
-    }
+    //lazy val annotCtx = {
+    //  var target = sym.owner.lexicallyEnclosingClass
+    //  if (!target.is(PackageClass)) target = target.owner
+    //  var c = ctx
+    //  while (c.owner != target) c = c.outer
+    //  c
+    //}
+    // JR: The problem with the foregoing is that we lose the ability to give arguments
+    //     to annotations if those arguments are defined inside `C`.
+    //     There must be a better way to handle the cyclic references.
+    lazy val annotCtx = ctx
     for (annotTree <- untpd.modsDeco(stat).mods.annotations) {
       val cls = typedAheadAnnotation(annotTree)(annotCtx)
       if (sym.unforcedAnnotation(cls).isEmpty) {
