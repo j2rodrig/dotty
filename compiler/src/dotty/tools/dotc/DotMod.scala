@@ -157,6 +157,8 @@ object DotMod {
 
   val MutabilityMemberName = typeName("__MUTABILITY__")
   val PrefixMutabilityName = typeName("__PREFIX_MUTABILITY__")
+  def ReadonlyTypeName(implicit ctx: Context) = defn.ReadonlyAnnotType.name
+  def MutableTypeName(implicit ctx: Context) = defn.MutableAnnotType.name
   def ReadonlyType(implicit ctx: Context) = TypeAlias(defn.ReadonlyAnnotType, 1)  // info for a readonly mutability member
   def MutableType(implicit ctx: Context) = TypeAlias(defn.MutableAnnotType, 1)    // info for a mutable mutability member
 
@@ -208,22 +210,36 @@ object DotMod {
         // recurse until mutability reductions reach a steady state
         isSubMutability(m1, m2)
 
-      else
+      else {
         // Compare mutabilities.
-        (m1 eq m2) || (m1 eq defn.MutableAnnotType) || (m2 eq defn.ReadonlyAnnotType) || m1.isError || m2.isError || {  // simple cases.
-          m2 match {   // if both m1 and m2 select __MUTABILITY__, they are equivalent if they have equivalent prefixes.
-            case TypeRef(prefix2, MutabilityMemberName) => m1 match {
-              case TypeRef(prefix1, MutabilityMemberName) =>
-                super.isSubType(prefix1, prefix2) && super.isSubType(prefix2, prefix1)
-              case _ =>
-                //System.err.println(em"False mutability: $mut1 <: $mut2")
-                false
-            }
+        (m1 eq m2) || m1.isError || m2.isError || {
+          m2 match {
+            //
+            // We try to resolve the following cases here:
+            // 1. if both m1 and m2 are TypeRefs selecting the same type name (e.g., __MUTABILITY__),
+            //    they are equivalent if they have equivalent prefixes.
+            // 2. m1 is mutable or m2 is readonly.
+            //    There is some a variance in the representation of package references; for example, mutable may be:
+            //      TypeRef(ThisType(TypeRef(NoPrefix,dotty)),mutable)
+            //    or:
+            //      TypeRef(TermRef(ThisType(TypeRef(NoPrefix,<root>)),dotty)/withSig(Signature(List(),)),mutable)
+            //    So just checking m1 eq m2 is no longer sufficient.
+            //    Instead, we check if the names and prefixes are equivalent to mutable and readonly, respectively.
+            //    TODO: replace other mutable/readonly equivalence checks with this approach
+            case TypeRef(prefix2, name2) =>
+              ((name2 eq ReadonlyTypeName) && super.isSameType(prefix2, defn.ReadonlyAnnotType.prefix)) ||
+                (m1 match {
+                  case TypeRef(prefix1, name1) =>
+                    ((name1 eq MutableTypeName) && super.isSameType(prefix1, defn.MutableAnnotType.prefix)) ||
+                      ((name1 eq name2) && super.isSameType(prefix1, prefix2))
+                  case _ =>
+                    false
+                })
             case _ =>
-              //System.err.println(em"False mutability: $mut1 <: $mut2")
               false
           }
         }
+      }
     }
 
     def isMutability(tp: Type): Boolean = tp match {
