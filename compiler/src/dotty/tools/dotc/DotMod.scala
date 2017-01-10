@@ -318,28 +318,29 @@ object DotMod {
       4. The class is an owner of the method.
       5. There are no non-weak owners of the method that are also owned by the class.
     Second, find and return the receiver mutability declared on the first element of the pair.
+
+    ADDENDUM: The search will terminate early with thisTpe.__MUTABILITY__ if
+    a @pure annotation or @mutableIn[T] annotation is encountered (where thisTpe is not inside T).
    */
-  final def findThisMutability(refSym: Symbol, ofClass: Symbol)(implicit ctx: Context): Type = {
-    //assert(refSym.exists, em"Attempt to find the mutability of ${ofClass.name}.this outside of $ofClass")
-    assert(ofClass.isClass, em"Expected a class in findThisMutability, got $ofClass")
-    if (ofClass derivesFrom refSym)  // if we're already at the class we're looking for, return @mutable
+  final def findThisMutability(refSym: Symbol, thisTpe: ThisType)(implicit ctx: Context): Type = {
+    if (thisTpe.cls derivesFrom refSym)  // if we're already at the class we're looking for, return @mutable
       return defn.MutableAnnotType
-    if (!refSym.exists)  // if we're outside of the class we're looking for, assume @mutable
+    if ((refSym is Package) || !refSym.exists)  // if we're outside of the class we're looking for, assume @mutable
       return defn.MutableAnnotType
 
-    // Find the owning class of refSym
-    val classOfSym = skipWeakNonClassOwners(refSym.owner)
-    if (!classOfSym.isClass) return findThisMutability(classOfSym, ofClass)   // owner isn't a class, so look at the owner of the owner
+    // Handle outer-mutability annotations. If refSym declares @pure, or @mutableIn[T] where thisTpe is not inside T,
+    //  then assume thisTpe has polymorphic mutability.
+    if (isOutsideDeclaredMutabilityBoundaryOfSym(thisTpe, refSym))
+      return TypeRef(thisTpe, MutabilityMemberName)
 
-    if (ofClass.derivesFrom(classOfSym))  // is the owning class a base of the class we're looking for?
+    // Find the owner class of refSym
+    val owner = skipWeakNonClassOwners(refSym.owner)
+    if (!owner.isClass) return findThisMutability(owner, thisTpe)   // owner isn't a class, so look at the owner of the owner
+
+    if (thisTpe.cls derivesFrom owner)  // is the owning class a base of the class we're looking for?
       declaredReceiverType(refSym)   // found it!
     else
-      findThisMutability(classOfSym, ofClass)   // keep looking... starting at fromSym's owner
-  }
-
-  /// Translates any @mutableIn[C] or @pure annotations into
-  def findOuterThisMutability(refSym: Symbol, ofClass: Symbol)(implicit ctx: Context): Type = {
-    ???
+      findThisMutability(owner, thisTpe)  // keep looking... starting from refSym's owner
   }
 
   /**
@@ -485,7 +486,7 @@ object DotMod {
         // tp is C.this for some class C. Basically, we act as though C.this widens to a C that is refined
         //  by the mutability declared for C within the current context.
         // The mutability of super is the same as the mutability of this. See <DISCUSSION: SUPER_THIS_MUT> in the notes.
-        case tp: ThisType => findThisMutability(ctx.owner, tp.cls)
+        case tp: ThisType => findThisMutability(ctx.owner, tp)
         case tp: SuperType => go(tp.thistpe)
         case _ =>
           // Widen to check for other kinds of types.
@@ -648,6 +649,105 @@ object DotMod {
       case _ =>
         TypeRef(tpAbstract, MutabilityMemberName)
     }
+  }
+
+
+  //-----OUTER-MUTABILITY TRY 2C------//
+
+  def boundaryToString(tp: Type)(implicit ctx: Context): String = {
+    if (tp eq defn.NothingType) "entirely mutable"
+    else if (tp eq defn.AnyType) "@pure"
+    else {
+      def rec(tp1: Type): String = tp1 match {
+        case tp1: TypeRef => em"${tp1.name}"
+        case AndType(tp11, tp12) => boundaryToString(tp11) + " & " + boundaryToString(tp12)
+        case _ => assert(false, em"Unexpected type in boundaryToString: $tp1"); ""
+      }
+      "@mutableIn[" + rec(tp) + "]"
+    }
+  }
+
+  /// Returns an intersection of class references that represent the highest mutable prefix on the given type.
+  /// Returns Nothing if all prefixes on the type are mutable, Any if the type is non-mutable.
+  /// If the type is an error type, returns Nothing.
+  def mutabilityBoundary(tp: Type)(implicit ctx: Context): Type = {
+    // Do one unwrap cycle before continuing. This unwrap prevents the immediate mutability (which is checked elsewhere)
+    // from interfering with outer-environment-reference checks.
+    val u = unwrapToConcreteClass(tp)
+    val p = unwrapToPrefix(u)
+    mutabilityBoundaryImpl(p, u)
+  }
+  def mutabilityBoundaryImpl(tp: Type, mutableClassRefs: Type)(implicit ctx: Context): Type = {
+    if ((tp eq NoPrefix) || (tp eq defn.EmptyPackageVal) || tp.isError || (tp eq NoType))
+      defn.NothingType
+    else if (mutabilityOf2(tp) eq defn.MutableAnnotType) {
+      val u = unwrapToConcreteClass(tp)
+      val p = unwrapToPrefix(u)
+      mutabilityBoundaryImpl(p, u)
+    } else
+      mutableClassRefs
+  }
+
+  /// Returns the intersection of class references that form the mutability boundary at
+  ///  the given symbol.
+  def mutabilityBoundaryAtSymbol(sym: Symbol, _innerClass: Symbol = NoSymbol)(implicit ctx: Context): Type = {
+    // Return Nothing if the symbol is a package (packages cannot have annotations). "No annotations" defaults to all-mutable references.
+    if ((sym eq NoSymbol) || (sym is Package))
+      return defn.NothingType
+
+    val innerClass = if (sym.isClass) sym else _innerClass  // remember the most recent class encountered. We'll need it if we encounter a @pure annotation.
+
+    sym.annotationsWithoutCompleting(outerMutabilityAnnotNames).foreach { annot =>
+      if (annot.symbol eq defn.MutableInAnnot) {
+        val tp = getLastTypeArgOf(annot.tree.tpe)
+        val u = unwrapToConcreteClass(tp)
+        return u
+      }
+      if (annot.symbol eq defn.PureAnnot) {
+        // Got a @pure. That means the mutability boundary type is the class inside the current symbol.
+        return if (innerClass eq NoSymbol)
+            defn.AnyType   // no inner classes means all receiver references are non-mutable.
+          else
+            innerClass.typeRef
+      }
+    }
+
+    mutabilityBoundaryAtSymbol(sym.owner, innerClass)
+  }
+
+  /// For mutability-boundary type checking.
+  /// tp1 and tp2 are expected to be TypeRefs or intersections of TypeRefs.
+  def isSubMutabilityBoundary(tp1: Type, tp2: Type)(implicit ctx: Context): Boolean =
+    (tp1 eq defn.NothingType) || (tp2 eq defn.AnyType) || {
+      (tp1 ne defn.AnyType) && (tp2 ne defn.NothingType) && {
+        def rec(tp: Type): Boolean = tp match {
+          case tp: TypeRef =>
+            symIsContainedInOwnerOfType(tp.symbol, tp2)
+          case AndType(tp11, tp12) =>
+            rec(tp11) || rec(tp12)
+          case _ => assert(false, em"Unexpected type in isSubMutabilityBoundary: $tp"); false
+        }
+        rec(tp1)
+      }
+    }
+
+  /// Returns true if the mutability boundary of the given type is outside the mutability boundary declared
+  /// on the given symbol. Always returns true if the given symbol is annotated @pure.
+  /// Returns false if the boundary type is inside, or if no boundary is declared on the given symbol.
+  def isOutsideDeclaredMutabilityBoundaryOfSym(tp: Type, sym: Symbol)(implicit ctx: Context): Boolean = {
+    sym.annotationsWithoutCompleting(outerMutabilityAnnotNames).foreach { annot =>
+      if (annot.symbol eq defn.MutableInAnnot) {
+        val tpArg = getLastTypeArgOf(annot.tree.tpe)
+        val u1 = unwrapToConcreteClass(tp)     // find boundary of given type
+        val u2 = unwrapToConcreteClass(tpArg)  // find boundary of declared type argument
+        if (!isSubMutabilityBoundary(u1, u2))
+          return true
+      }
+      if (annot.symbol eq defn.PureAnnot) {
+        return true
+      }
+    }
+    false
   }
 
 
@@ -1293,8 +1393,18 @@ object DotMod {
         errorTree(tree, em"Incompatible receiver mutability in call to method ${tree.symbol.name}:\n" +
           em"  Expected: $declared2\n" +
           em"  Got: $preMut")
-      } else
-        tree
+      } else {
+        // Check outer-reference compatibility.
+        val prefixBoundary = mutabilityBoundary(prefix)
+        val declaredBoundary = mutabilityBoundaryAtSymbol(tree.symbol)
+        if (!isSubMutabilityBoundary(prefixBoundary, declaredBoundary)) {
+          errorTree(tree, em"Incompatible environment-mutation annotations in call to method ${tree.symbol.name}:\n" +
+            em"  Expected: ${boundaryToString(declaredBoundary)}\n" +
+            em"  Got: ${boundaryToString(prefixBoundary)}"
+          )
+        } else
+          tree
+      }
     }
 
     def checkedPurity(prefix: Type, tree: tpd.Tree)(implicit ctx: Context): tpd.Tree = {

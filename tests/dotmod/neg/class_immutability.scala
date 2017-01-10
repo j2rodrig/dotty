@@ -16,7 +16,7 @@ object class_immutability {
   }
 
   val o1: O = new O
-  val o2: O @readonly = new O   // also do a @readonly enclosing instance... should this make a difference? Answer: No.
+  val o2: O @readonly = new O   // also do a @readonly enclosing instance.
   val m1 = new o1.M
   val m2 = new o2.M
   val n1 = new o1.N
@@ -33,7 +33,7 @@ object class_immutability {
   m1.set(???)  // error: incompatible receiver
   m2.set(???)  // error: incompatible receiver
   n1.set(???)  // ok
-  n2.set(???)  // ok
+  n2.set(???)  // error: incompatible environment-mutation annotations (prefix o2 is @readonly)
   n3.set(???)  // ok
   n3r.set(???) // error
   n3m.set(???) // ok
