@@ -204,12 +204,12 @@ class tests extends CompilerTest {
     dotmod_value_override()
     dotmod_class_immutability()
     dotmod_explicit_mutability_member()
-    dotmod_as_final()
-    dotmod_as_type()
-    dotmod_as_final_override()
-    dotmod_as_type_override()
+    //dotmod_as_final()   // currently deprecated
+    //dotmod_as_type()    // currently deprecated
+    //dotmod_as_final_override()  // currently deprecated
+    //dotmod_as_type_override()   // currently deprecated
     dotmod_pure_basic()
-    dotmod_pure_refchecks()
+    //dotmod_pure_refchecks()
     dotmod_pure_rcv_mut()
     dotmod_pure_rcv_mut_2()
     dotmod_parameter_polymorphism()

@@ -596,7 +596,8 @@ class Namer { typer: Typer =>
     // JR: The problem with the foregoing is that we lose the ability to give arguments
     //     to annotations if those arguments are defined inside `C`.
     //     There must be a better way to handle the cyclic references.
-    lazy val annotCtx = ctx
+    //     Instead, move to the innermost context where sym is not defined (like in Typer#completeAnnotations).
+    lazy val annotCtx = ctx.outersIterator.dropWhile(_.owner == sym).next
     for (annotTree <- untpd.modsDeco(stat).mods.annotations) {
       val cls = typedAheadAnnotation(annotTree)(annotCtx)
       if (sym.unforcedAnnotation(cls).isEmpty) {

@@ -28,6 +28,11 @@ object DotMod {
   val enableFrontEnd: Boolean = true
   val enableRefChecks: Boolean = true
 
+  // Experimental flags
+  val enableExperimentalTypeViews: Boolean = false
+  val enableEffectiveFinality: Boolean = false
+  val enableSimplePurity: Boolean = false
+
   // FRONT-END INITIALIZATION
 
   def customInit(ctx: FreshContext): FreshContext = {
@@ -92,7 +97,7 @@ object DotMod {
       if (sym.isConstructor)
         sym.owner.isPure
       else
-        assumePure(sym) ||
+        (enableSimplePurity && assumePure(sym)) ||
         annotationsWithoutCompleting(pureAnnotationNames).exists(_.symbol eq defn.PureAnnot)
     }
 
@@ -351,10 +356,10 @@ object DotMod {
   def getLastTypeArgOf(tpe: Type)(implicit ctx: Context): Type = tpe match {
     case RefinedType(_, _, TypeAlias(tp)) =>
       tp
-    case RefinedType(_, _, TypeBounds(_, _)) =>
-      assert(false, em"Unexpected TypeBounds in refinedInfo of $tpe")
-      NoType
+    case tpe: ErrorType =>
+      tpe
     case _ =>
+      assert(false, em"Unexpected type in getLastTypeArgOf: $tpe")
       NoType
   }
 
@@ -661,11 +666,18 @@ object DotMod {
       def rec(tp1: Type): String = tp1 match {
         case tp1: TypeRef => em"${tp1.name}"
         case AndType(tp11, tp12) => boundaryToString(tp11) + " & " + boundaryToString(tp12)
+        case tp1: ErrorType => "< error type >"
         case _ => assert(false, em"Unexpected type in boundaryToString: $tp1"); ""
       }
       "@mutableIn[" + rec(tp) + "]"
     }
   }
+
+  /// Will deprecate mutabilityBoundary.
+  //def findCompatiblePrefixMutabilityBoundary(prefix: Type, target: Type)(implicit ctx: Context): Type = prefix match {
+    //case prefix: Type
+    //symIsContainedInOwnerOfType()
+  //}
 
   /// Returns an intersection of class references that represent the highest mutable prefix on the given type.
   /// Returns Nothing if all prefixes on the type are mutable, Any if the type is non-mutable.
@@ -674,8 +686,17 @@ object DotMod {
     // Do one unwrap cycle before continuing. This unwrap prevents the immediate mutability (which is checked elsewhere)
     // from interfering with outer-environment-reference checks.
     val u = unwrapToConcreteClass(tp)
+    //if (u.isInstanceOf[AndType]) {
+    //  System.err.println(em"Complex receiver type: $u")
+    //  //unwrapToConcreteClass(tp)
+    //}
     val p = unwrapToPrefix(u)
-    mutabilityBoundaryImpl(p, u)
+    //if (p.isInstanceOf[AndType])
+    //  System.err.println(em"Complex receiver-prefix type: $p")
+    val result = mutabilityBoundaryImpl(p, u)
+    if (result ne defn.NothingType)
+      System.err.println(em"XXXX Non-mutable outer reference: $result")
+    result
   }
   def mutabilityBoundaryImpl(tp: Type, mutableClassRefs: Type)(implicit ctx: Context): Type = {
     if ((tp eq NoPrefix) || (tp eq defn.EmptyPackageVal) || tp.isError || (tp eq NoType))
@@ -718,7 +739,7 @@ object DotMod {
   /// For mutability-boundary type checking.
   /// tp1 and tp2 are expected to be TypeRefs or intersections of TypeRefs.
   def isSubMutabilityBoundary(tp1: Type, tp2: Type)(implicit ctx: Context): Boolean =
-    (tp1 eq defn.NothingType) || (tp2 eq defn.AnyType) || {
+    (tp1 eq defn.NothingType) || (tp2 eq defn.AnyType) || tp1.isError || tp2.isError || {
       (tp1 ne defn.AnyType) && (tp2 ne defn.NothingType) && {
         def rec(tp: Type): Boolean = tp match {
           case tp: TypeRef =>
@@ -749,6 +770,12 @@ object DotMod {
     }
     false
   }
+
+
+
+  //def matchesMutabilityBoundary(prefix: Type, atSym: Symbol): Boolean = {
+
+  //}
 
 
   //-----OUTER-MUTABILITY TRY 2B------//
@@ -842,7 +869,13 @@ object DotMod {
   def unwrapToConcreteClass(tp: Type)(implicit ctx: Context): Type = tp.widenDealias.stripAnnots match {
     case tp: TypeRef if tp.symbol.isClass => tp
     case tp: TypeProxy => unwrapToConcreteClass(tp.underlying)
-    case AndType(tp1, tp2) => unwrapToConcreteClass(tp1) & unwrapToConcreteClass(tp2)
+    case AndType(tp1, tp2) =>
+      val u1 = unwrapToConcreteClass(tp1)
+      val u2 = unwrapToConcreteClass(tp2)
+      if ((u1 eq u2) || u2.isError) u2
+      else if (u1.isError) u1
+      else
+        AndType(u1, u2)
     case tp: OrType => unwrapToConcreteClass(ctx.orDominator(tp))
     case NoType => NoType
     case NoPrefix => NoPrefix
@@ -853,9 +886,16 @@ object DotMod {
   }
 
   // Finds valid prefixes of underlying named-class references.
-  def unwrapToPrefix(tp: Type)(implicit ctx: Context): Type = unwrapToConcreteClass(tp) match {
+  def unwrapToPrefix(tp: Type)(implicit ctx: Context): Type =
+    unwrapToPrefixImpl(unwrapToConcreteClass(tp))
+  def unwrapToPrefixImpl(tp: Type)(implicit ctx: Context): Type = tp match {
     case tp: TypeRef => tp.prefix
-    case AndType(tp1, tp2) => unwrapToPrefix(tp1) & unwrapToPrefix(tp2)
+    case AndType(tp1, tp2) =>
+      val prefix1 = unwrapToPrefixImpl(tp1)
+      val prefix2 = unwrapToPrefixImpl(tp2)
+      if ((prefix1 eq NoPrefix) || prefix2.isError || (prefix1 eq prefix2)) prefix2
+      else if ((prefix2 eq NoPrefix) || prefix1.isError) prefix1
+      else AndType(prefix1, prefix2)
     case _ => tp
   }
 
@@ -1017,7 +1057,7 @@ object DotMod {
     }
 
     // If there's a @pure on the symbol, and the symbol is a member of a class, default to a polymorphic mutability.
-    if (sym.effectiveOwner.isClass && sym.isPure)
+    if (sym.effectiveOwner.isClass && sym.isPure)  // todo update isPure to return only literal @pure annotations if enableSimplePurity flag isn't set
       return TypeRefUnlessNoPrefix(sym.effectiveOwner.thisType, MutabilityMemberName)
 
     // No RI annotations found.
@@ -1156,26 +1196,16 @@ object DotMod {
   }
 
   def viewpointAdapt(prefix: Type, target: Type, origSym: Symbol)(implicit ctx: Context): Type = {
-    val preMut = mutabilityOf2(prefix) //mutabilityOf(prefix, origSym)
+    val preMut = mutabilityOf2(prefix)
     val target1 = substThisMutability(target)   // translate this-mutabilities on the target
-    val tpMut = mutabilityOf2(target1) //mutabilityOf(target1, ctx.owner)
+    val tpMut = mutabilityOf2(target1)
     val finalMut = preMut | tpMut
-    //if (prefix ne NoPrefix) {
-    //  System.err.println(em"pre: $prefix mut $preMut")
-    //  System.err.println(em"tp:  $target1 mut $tpMut" + (if (target ne target1) em" (tp subst from $target)" else ""))
-    //}
 
     // Refine the mutability if the final mutability is different than target mutability.
-    val tp1 = if (finalMut ne tpMut)
+    if (finalMut ne tpMut)
       refineResultMember(target1, MutabilityMemberName, TypeAlias(finalMut, 1), otherMembersToDrop = List(PrefixMutabilityName))
     else
       target1
-
-    //// Set the assignability member if the prefix is non-mutable.
-    //if (preMut ne defn.MutableAnnotType)
-    //  refineResultMember(tp1, PrefixMutabilityName, TypeAlias(preMut, 1))
-    //else
-      tp1
   }
 
   /** Returns a list of @asFinal annotation arguments on fromSym and all enclosing symbols. */
@@ -1322,9 +1352,6 @@ object DotMod {
   def isAssignable(tp: Type)(implicit ctx: Context): Boolean = {
     val a = assignabilityOf(tp)
     a <:< defn.MutableAnnotType
-
-    //val prefixMutDenot = tp.member(PrefixMutabilityName)
-    //!prefixMutDenot.exists || (prefixMutDenot.info <:< MutableType)
   }
 
   class DotModTypeOpHooks(initCtx: Context) extends TypeOpHooks(initCtx) {
@@ -1337,15 +1364,13 @@ object DotMod {
       // Don't do custom logic in a types-erased phase
       if (!ctx.erasedTypes) {
 
-        //if (denot.symbol.name eq termName("w"))
-        //  false
-
         // Do viewpoint adaption for terms only.
         // Note: Changed to canHaveAnnotations from isViewpointAdaptable.
         //   Current theory is that only non-methodic types should be adapted - see <DISCUSSION: EXPR-ADAPTATION> in notes.
         if (denot.isTerm && !(denot.symbol is Module) && canHaveAnnotations(target)) {
-          target = viewedTypeOf(denot.symbol, target)         // handle @asType[T](ref) annotations
-          target = viewpointAdapt(pre, target, denot.symbol)  // viewpoint-adapt a prefixed term reference
+          if (enableExperimentalTypeViews)
+            target = viewedTypeOf(denot.symbol, target)         // handle @asType[T](ref) annotations
+          target = viewpointAdapt(pre, target, denot.symbol)    // viewpoint-adapt a prefixed term reference
         }
 
         // Do a substitution of this-type mutabilities on method results.
@@ -1398,6 +1423,7 @@ object DotMod {
         val prefixBoundary = mutabilityBoundary(prefix)
         val declaredBoundary = mutabilityBoundaryAtSymbol(tree.symbol)
         if (!isSubMutabilityBoundary(prefixBoundary, declaredBoundary)) {
+          mutabilityBoundary(prefix)  // temp
           errorTree(tree, em"Incompatible environment-mutation annotations in call to method ${tree.symbol.name}:\n" +
             em"  Expected: ${boundaryToString(declaredBoundary)}\n" +
             em"  Got: ${boundaryToString(prefixBoundary)}"
@@ -1411,33 +1437,37 @@ object DotMod {
       tree.denot.alternatives.foreach { denot =>
         val selectedSym = denot.symbol
 
-        // Check that all @asFinal annotations in effect in the current context are also in effect on the called method.
-        allFinals(ctx.owner).foreach { arg =>
-          if (!isViewedAsFinal(arg.symbol, selectedSym))
-            return errorTree(tree, em"Cannot select $selectedSym from here: $arg must be declared @asFinal")
-        }
-
-        // Check that all type views in the current context are compatible with all type views at the called method.
-        allTypeViews(ctx.owner).foreach { case (arg, tpe) =>
-          val argDenot = arg.forcedTyped.denot
-          val tpe2 = findViewedType(argDenot.symbol, selectedSym, argDenot.info) match {
-            case NoType => argDenot.info
-            case tp => tp
+        if (enableEffectiveFinality) {
+          // Check that all @asFinal annotations in effect in the current context are also in effect on the called method.
+          allFinals(ctx.owner).foreach { arg =>
+            if (!isViewedAsFinal(arg.symbol, selectedSym))
+              return errorTree(tree, em"Cannot select $selectedSym from here: $arg must be declared @asFinal")
           }
-          if (!(tpe <:< tpe2))
-            return errorTree(tree, em"Cannot select $selectedSym from here: $arg is $tpe here, which is not compatible with expected type $tpe2.")
         }
 
-        // Check that the called method conforms to the purity of the caller (i.e., the purity of the current context owner).
-        // Conformance is present if either of the two following conditions holds:
-        // 1. The called method is @pure.
-        // 2. The called method is inside the purity boundary of the caller.
-        if (!(selectedSym.isPure || selectedSym.isContainedInPurityBoundaryOf(ctx.owner))) {
-          if (assumePure(ctx.owner.purityBoundary))
-            ctx.warning(em"$selectedSym should be annotated @pure due to the assumed purity of ${ctx.owner.purityBoundary}", tree.pos)
-          else {
-            //selectedSym.isContainedInPurityBoundaryOf(ctx.owner)
-            return errorTree(tree, em"Cannot select $selectedSym from here: It must be @pure due to the @pure on ${ctx.owner.purityBoundary}.")
+        if (enableExperimentalTypeViews) {
+          // Check that all type views in the current context are compatible with all type views at the called method.
+          allTypeViews(ctx.owner).foreach { case (arg, tpe) =>
+            val argDenot = arg.forcedTyped.denot
+            val tpe2 = findViewedType(argDenot.symbol, selectedSym, argDenot.info) match {
+              case NoType => argDenot.info
+              case tp => tp
+            }
+            if (!(tpe <:< tpe2))
+              return errorTree(tree, em"Cannot select $selectedSym from here: $arg is $tpe here, which is not compatible with expected type $tpe2.")
+          }
+        }
+
+        if (enableSimplePurity) {
+          // Check that the called method conforms to the purity of the caller (i.e., the purity of the current context owner).
+          // Conformance is present if either of the two following conditions holds:
+          // 1. The called method is @pure.
+          // 2. The called method is inside the purity boundary of the caller.
+          if (!(selectedSym.isPure || selectedSym.isContainedInPurityBoundaryOf(ctx.owner))) {
+            if (assumePure(ctx.owner.purityBoundary))
+              ctx.warning(em"$selectedSym should be annotated @pure due to the assumed purity of ${ctx.owner.purityBoundary}", tree.pos)
+            else
+              return errorTree(tree, em"Cannot select $selectedSym from here: It must be @pure due to the @pure on ${ctx.owner.purityBoundary}.")
           }
         }
       }
@@ -1454,36 +1484,12 @@ object DotMod {
         tree.tpe match {
           case TermRef(prefix, underlying) =>
 
-            // Prefix validation
-            //val prefixes = findPrefixMutabilities(prefix)
-            //val outers = findNonMutableOuters(tree.symbol)
-            //val prefixes = findPrefixReferences(prefix)
-            //val andPrefix = makeAndType(prefixes)
-            //System.err.println(em"Prefix type: $prefix")
-            //System.err.println(em"Selecting ${tree.symbol}; prefixes are: $andPrefix")
-
-            //val y = findPrefixMutabilities(tree.symbol.owner.thisType)
-            //val outers = findOuterReferences(tree.symbol)
-                //findOuterReferences_dep(tree.symbol, tree.symbol.isConstructor)
-            //val andOuters = makeAndType(outers)
-            //System.err.println(em" outers at ${tree.symbol} are: $andOuters")
-
-            //System.err.println(em"$andPrefix (in call to ${tree.symbol})")
-
-            //System.err.println("")
-
-            //assert (x.length == y.length, em"Mismatch on prefix $prefix calling ${tree.symbol}.")
-
-            //val tre1 = checkPrefixes(tree, prefixes, outers)
-            //if (tre1.tpe.isError) return tre1
-            //isCallableByPrefix(prefix, tree.symbol)
-
-            //checkPrefixToOuterCompatibility(prefix, tree.symbol)
-
-            // TODO: the checkPrefixToOuterCompatibility seems to be very slow (see, e.g., the pos_rbtree test). Try an approach that uses less compute time...
-
             val tree1 = checkedReceiver(prefix, tree)
-            checkedPurity(prefix, tree1)
+            if (enableEffectiveFinality || enableSimplePurity || enableExperimentalTypeViews)
+              checkedPurity(prefix, tree1)
+            else
+              tree1
+
           case _ =>
             System.err.println(em"WEIRD WARNING: Selection of ${tree.symbol} does not have a TermRef type. Type is: ${tree.tpe}")
             tree
@@ -1500,29 +1506,33 @@ object DotMod {
     def customChecks(tree: tpd.Tree, pt: Type)(implicit ctx: Context): tpd.Tree = tree match {
 
       case tree: tpd.MemberDef =>
-        // A symbol's type as viewed from outside a context must be compatible with its type as viewed within the context.
-        // We do this to prevent illegal downcasts.
-        // Basically, we can use @asType to force a more restrictive (greater/upcast) static type on a symbol,
-        // but we cannot use @asType to force arbitrary downcasts.
-        viewedTypeList(tree.symbol).foreach { case (arg, typeInside) =>
-          val typedArg = arg.forcedTyped  // HACK!!! I don't know why I don't always have a typed tree here. See <DISCUSSION: ANNOTATION TYPING ISSUE related to @asType/@asFinal>.
-          typedArg.tpe match {
-            case _: NamedType =>
-              val typeOutside = viewedTypeOf(typedArg.symbol, typedArg.denot.info)(ctx)
-              if (!(typeOutside <:< typeInside))
-                return errorTree(arg, em"Illegal type view for ${typedArg.symbol}:\n" +
-                  em" required at least: $typeOutside\n" +
-                  em" got: $typeInside")
-            case _ =>
-              return errorTree(arg, em"Illegal @asType annotation: Expected a field or variable, got $arg")
+        if (enableExperimentalTypeViews) {
+          // A symbol's type as viewed from outside a context must be compatible with its type as viewed within the context.
+          // We do this to prevent illegal downcasts.
+          // Basically, we can use @asType to force a more restrictive (greater/upcast) static type on a symbol,
+          // but we cannot use @asType to force arbitrary downcasts.
+          viewedTypeList(tree.symbol).foreach { case (arg, typeInside) =>
+            val typedArg = arg.forcedTyped // HACK!!! I don't know why I don't always have a typed tree here. See <DISCUSSION: ANNOTATION TYPING ISSUE related to @asType/@asFinal>.
+            typedArg.tpe match {
+              case _: NamedType =>
+                val typeOutside = viewedTypeOf(typedArg.symbol, typedArg.denot.info)(ctx)
+                if (!(typeOutside <:< typeInside))
+                  return errorTree(arg, em"Illegal type view for ${typedArg.symbol}:\n" +
+                    em" required at least: $typeOutside\n" +
+                    em" got: $typeInside")
+              case _ =>
+                return errorTree(arg, em"Illegal @asType annotation: Expected a field or variable, got $arg")
+            }
           }
         }
-        // Also check validity of @asFinal arguments.
-        asFinalList(tree.symbol).foreach { arg =>
-          arg.tpe match {
-            case _: NamedType =>  // nothing to do -- argument is OK
-            case _ =>
-              return errorTree(arg, em"Illegal @asFinal annotation: Expected a field or variable, got $arg")
+        if (enableEffectiveFinality) {
+          // Also check validity of @asFinal arguments.
+          asFinalList(tree.symbol).foreach { arg =>
+            arg.tpe match {
+              case _: NamedType => // nothing to do -- argument is OK
+              case _ =>
+                return errorTree(arg, em"Illegal @asFinal annotation: Expected a field or variable, got $arg")
+            }
           }
         }
         tree
@@ -1530,7 +1540,7 @@ object DotMod {
       case tree: tpd.Assign =>
         if (!isAssignable(tree.lhs.tpe))
           errorTree(tree.lhs, em"Cannot perform assignment; ${tree.lhs.symbol} is effectively final due to a non-mutable prefix type.")
-        else if (isViewedAsFinal(tree.lhs.symbol, ctx.owner))
+        else if (enableEffectiveFinality && isViewedAsFinal(tree.lhs.symbol, ctx.owner))
           errorTree(tree.lhs, em"Cannot perform assignment; ${tree.lhs.symbol} is effectively final due to a @pure or @asFinal annotation.")
         // Make sure the RHS type is compatible with the original (non-viewed) LHS type.
         // Essentially, even though the RHS is compatible with the viewed LHS, it is not necessarily legal to assign to the variable.
@@ -1702,9 +1712,9 @@ object DotMod {
           val opc = new OverridingPairs.Cursor(cls)
           while (opc.hasNext) {
             customOverrideCheck(opc.overriding, opc.overridden)
-            checkFinals(opc.overriding, opc.overridden)
-            checkTypeViews(opc.overriding, opc.overridden)
-            checkPurityEffects(opc.overriding, opc.overridden)
+            if (enableEffectiveFinality) checkFinals(opc.overriding, opc.overridden)
+            if (enableExperimentalTypeViews) checkTypeViews(opc.overriding, opc.overridden)
+            if (enableSimplePurity) checkPurityEffects(opc.overriding, opc.overridden)
             opc.next()
           }
         }

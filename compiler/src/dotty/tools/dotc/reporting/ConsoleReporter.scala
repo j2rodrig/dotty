@@ -3,9 +3,10 @@ package dotc
 package reporting
 
 import core.Contexts._
-import java.io.{ BufferedReader, PrintWriter }
-import diagnostic.{ Message, MessageContainer }
-import diagnostic.messages.{ Error, Warning, ConditionalWarning }
+import java.io.{BufferedReader, PrintWriter}
+
+import diagnostic.{Message, MessageContainer}
+import diagnostic.messages.{ConditionalWarning, Error, MigrationWarning, Warning}
 
 /**
   * This class implements a Reporter that displays messages on a text console
@@ -31,6 +32,8 @@ class ConsoleReporter(
         if (ctx.settings.prompt.value) displayPrompt()
         true
       case m: ConditionalWarning if !m.enablingOption.value =>
+        false
+      case m: MigrationWarning =>  // todo: temp; turning off migration warnings for now
         false
       case m =>
         printMessage(messageAndPos(m.contained, m.pos, diagnosticLevel(m)))
